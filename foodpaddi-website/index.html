@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>Food Paddi - Products</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.3.0/fonts/remixicon.css" rel="stylesheet" />
+  <style>
+    /* Optional: show username in header */
+    #userName {
+      margin-left: 0.5rem;
+      font-weight: bold;
+    }
+    .icon-badge {
+      position: relative;
+      display: inline-block;
+      margin-left: 1rem;
+      cursor: pointer;
+    }
+    .badge {
+      position: absolute;
+      top: -6px;
+      right: -6px;
+      background: red;
+      color: white;
+      font-size: 0.6rem;
+      padding: 2px 5px;
+      border-radius: 50%;
+    }
+  </style>
+</head>
+<body>
+  <script>
+    // 🔑 Check token and redirect if not logged in
+    const token = localStorage.getItem("token");
+    if (!token) {
+      window.location.href = "login.html";
+    }
+  </script>
+
+  <header>
+    <div class="nav-left">
+      <i class="ri-menu-line nav-icon"></i>
+      <h1>🍲 Food Paddi</h1>
+      <span id="userName"></span>
+    </div>
+
+    <div class="nav-right">
+      <button id="themeToggle" class="theme-toggle" title="Toggle dark/light mode">
+        <i class="ri-sun-line"></i>
+      </button>
+      <div class="icon-badge">
+        <i class="ri-notification-3-line nav-icon"></i>
+        <span class="badge">3</span>
+      </div>
+      <div class="icon-badge">
+        <i class="ri-shopping-cart-2-line nav-icon"></i>
+        <span class="badge">2</span>
+      </div>
+      <div class="icon-badge">
+        <i id="logoutBtn" class="ri-logout-box-line nav-icon" title="Logout"></i>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div id="product-list" class="product-list"></div>
+
+    <div id="pagination" class="pagination">
+      <button id="prevPage">⟨ Prev</button>
+      <span id="pageInfo"></span>
+      <button id="nextPage">Next ⟩</button>
+    </div>
+  </main>
+
+  <footer>
+    <nav class="bottom-nav">
+    <a href="index.html"><i class="ri-user-line"></i><span>Profile</span></a>
+    <a href="search.html"><i class="ri-user-line"></i><span>Search</span></a>
+      <a href="cart.html"><i class="ri-heart-3-line"></i><span>Cart</span></a>
+    <a href="order.html"><i class="ri-user-line"></i><span>Orders</span></a>
+    <a href="profile.html"><i class="ri-user-line"></i><span>Profile</span></a>
+    </nav>
+  </footer>
+
+  <script src="script.js"></script>
+  <script>
+    // 🌗 Dark/Light Mode Toggle
+    const toggleBtn = document.getElementById("themeToggle");
+    const html = document.documentElement;
+
+    const savedTheme = localStorage.getItem("theme") || "light";
+    html.dataset.theme = savedTheme;
+
+    function updateIcon() {
+      toggleBtn.innerHTML =
+        html.dataset.theme === "dark"
+          ? '<i class="ri-moon-line"></i>'
+          : '<i class="ri-sun-line"></i>';
+    }
+
+    updateIcon();
+
+    toggleBtn.addEventListener("click", () => {
+      html.dataset.theme = html.dataset.theme === "dark" ? "light" : "dark";
+      localStorage.setItem("theme", html.dataset.theme);
+      updateIcon();
+    });
+
+    // Show logged-in user's name
+    const user = JSON.parse(localStorage.getItem("user") || '{}');
+    const userNameEl = document.getElementById("userName");
+    if (user.name) {
+      userNameEl.textContent = `Hello, ${user.name}`;
+    }
+
+    // Logout functionality
+    document.getElementById("logoutBtn").addEventListener("click", () => {
+      localStorage.removeItem("token");
+      localStorage.removeItem("user");
+      window.location.href = "login.html";
+    });
+  </script>
+</body>
+</html>

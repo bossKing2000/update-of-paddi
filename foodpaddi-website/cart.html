@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Your Cart | Food Paddi</title>
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <style>
+    body {
+      font-family: 'Poppins', sans-serif;
+      background-color: #f8f8f8;
+      margin: 0;
+      padding: 0;
+    }
+
+    header {
+      background-color: #ff5722;
+      color: white;
+      padding: 15px;
+      text-align: center;
+      font-size: 20px;
+      font-weight: bold;
+    }
+
+    .back-btn {
+      display: inline-block;
+      margin: 10px 0;
+      color: white;
+      text-decoration: none;
+      font-size: 14px;
+      background: #333;
+      padding: 6px 12px;
+      border-radius: 6px;
+    }
+
+    .cart-container {
+      max-width: 850px;
+      margin: 30px auto;
+      background: #fff;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    .cart-item {
+      display: flex;
+      align-items: flex-start;
+      border-bottom: 1px solid #eee;
+      padding: 15px 0;
+      gap: 15px;
+    }
+
+    .cart-item img {
+      width: 90px;
+      height: 90px;
+      border-radius: 8px;
+      object-fit: cover;
+    }
+
+    .item-details {
+      flex: 1;
+    }
+
+    .item-details h3 {
+      margin: 0 0 5px;
+      font-size: 17px;
+      color: #333;
+    }
+
+    .item-details p {
+      margin: 2px 0;
+      color: #777;
+      font-size: 14px;
+    }
+
+    .options {
+      font-size: 13px;
+      color: #555;
+      margin-top: 5px;
+    }
+
+    .options label {
+      display: block;
+      margin: 4px 0;
+    }
+
+    .quantity-controls {
+      display: flex;
+      align-items: center;
+      margin-top: 10px;
+    }
+
+    .quantity-controls button {
+      background: #ff5722;
+      color: white;
+      border: none;
+      width: 28px;
+      height: 28px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .quantity-controls span {
+      margin: 0 10px;
+      font-weight: bold;
+    }
+
+    .special-request {
+      width: 100%;
+      margin-top: 10px;
+      padding: 6px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      resize: none;
+      font-family: inherit;
+      font-size: 13px;
+    }
+
+    .remove-btn {
+      background: #e53935;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      margin-top: 10px;
+    }
+
+    .unavailable {
+      color: red;
+      font-size: 13px;
+      font-weight: 600;
+      margin-top: 5px;
+    }
+
+    .cart-summary {
+      text-align: right;
+      margin-top: 25px;
+      border-top: 2px solid #eee;
+      padding-top: 15px;
+    }
+
+    .checkout-btn {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+      margin-left: 10px;
+    }
+
+    .clear-btn {
+      background: #999;
+      color: white;
+      border: none;
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+
+    .checkout-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    🛒 Your Cart
+    <br>
+    <a href="index.html" class="back-btn">← Back to Home</a>
+  </header>
+
+  <div class="cart-container" id="cart-container">
+    <p>Loading your cart...</p>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:5000/api";
+    const token = localStorage.getItem("token");
+
+    let currentCart = null;
+    let typingTimeouts = {};
+
+    async function fetchCart() {
+      try {
+        const res = await axios.get(`${API_BASE}/cart`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        currentCart = res.data.data;
+        renderCart(currentCart);
+      } catch (err) {
+        document.getElementById("cart-container").innerHTML =
+          "<p>⚠️ Unable to load cart.</p>";
+        console.error(err);
+      }
+    }
+
+    function renderCart(cart) {
+      const container = document.getElementById("cart-container");
+      container.innerHTML = "";
+
+      if (!cart || !cart.items || cart.items.length === 0) {
+        container.innerHTML = "<p>Your cart is empty.</p>";
+        return;
+      }
+
+      cart.items.forEach(item => {
+        const product = item.product;
+        const allOptions = product.options || [];
+        const selectedOptions = item.selectedOptions?.map(o => o.productOptionId) || [];
+
+        const optionsHTML = allOptions.map(opt => `
+          <label>
+            <input 
+              type="checkbox" 
+              ${selectedOptions.includes(opt.id) ? "checked" : ""} 
+              onchange="toggleOption('${item.id}', '${opt.id}', this.checked)"
+            />
+            ${opt.name} (+₦${opt.price})
+          </label>
+        `).join("");
+
+        const div = document.createElement("div");
+        div.className = "cart-item";
+        div.innerHTML = `
+          <img src="${product.image?.[0] || 'placeholder.jpg'}" alt="${product.name}">
+          <div class="item-details">
+            <h3>${product.name}</h3>
+            <p>Vendor: ${product.vendor.name}</p>
+            <p>Unit Price: ₦${item.unitPrice}</p>
+            ${!item.productonline ? '<p class="unavailable">⚠️ Product not currently live</p>' : ''}
+            <div class="options"><strong>Options:</strong><br>${optionsHTML || "No options"}</div>
+            <div class="quantity-controls">
+              <button onclick="updateQuantity('${item.id}', ${item.quantity - 1})">−</button>
+              <span>${item.quantity}</span>
+              <button onclick="updateQuantity('${item.id}', ${item.quantity + 1})">+</button>
+            </div>
+            <textarea 
+              class="special-request" 
+              id="req-${item.id}" 
+              placeholder="Add special request..."
+              oninput="debounceSpecialRequest('${item.id}')"
+            >${item.specialRequest || ""}</textarea>
+            <button class="remove-btn" onclick="removeItem('${item.id}')">Remove</button>
+          </div>
+        `;
+        container.appendChild(div);
+      });
+
+      const summary = document.createElement("div");
+      summary.className = "cart-summary";
+      summary.innerHTML = `
+        <h3>Total: ₦${cart.totalPrice}</h3>
+        <button class="clear-btn" onclick="clearCart()">Clear Cart</button>
+        <button class="checkout-btn" onclick="checkoutCart()" ${
+          cart.items.every(i => !i.productonline) ? "disabled" : ""
+        }>Checkout</button>
+      `;
+      container.appendChild(summary);
+    }
+
+    async function updateQuantity(itemId, newQty) {
+      if (newQty <= 0) return removeItem(itemId);
+      try {
+        const res = await axios.put(`${API_BASE}/cart/items/${itemId}`, { quantity: newQty }, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        currentCart = res.data.data;
+        renderCart(currentCart);
+      } catch (err) {
+        alert("Failed to update item quantity.");
+        console.error(err);
+      }
+    }
+
+    async function toggleOption(itemId, optionId, checked) {
+      try {
+        const item = currentCart.items.find(i => i.id === itemId);
+        if (!item) return;
+
+        let selectedOptions = item.selectedOptions?.map(o => o.productOptionId) || [];
+        if (checked) {
+          if (!selectedOptions.includes(optionId)) selectedOptions.push(optionId);
+        } else {
+          selectedOptions = selectedOptions.filter(id => id !== optionId);
+        }
+
+        const res = await axios.put(`${API_BASE}/cart/items/${itemId}`, {
+          quantity: item.quantity,
+          selectedOptions,
+          specialRequest: item.specialRequest || ""
+        }, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+
+        currentCart = res.data.data;
+        renderCart(currentCart);
+      } catch (err) {
+        console.error(err);
+        alert("Failed to update options.");
+      }
+    }
+
+    function debounceSpecialRequest(itemId) {
+      clearTimeout(typingTimeouts[itemId]);
+      typingTimeouts[itemId] = setTimeout(() => updateSpecialRequest(itemId), 600);
+    }
+
+    async function updateSpecialRequest(itemId) {
+      try {
+        const item = currentCart.items.find(i => i.id === itemId);
+        if (!item) return;
+        const specialRequest = document.getElementById(`req-${itemId}`).value;
+        const res = await axios.put(`${API_BASE}/cart/items/${itemId}`, {
+          quantity: item.quantity,
+          selectedOptions: item.selectedOptions?.map(o => o.productOptionId) || [],
+          specialRequest
+        }, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        currentCart = res.data.data;
+      } catch (err) {
+        console.error("Failed to update special request:", err);
+      }
+    }
+
+    async function removeItem(itemId) {
+      if (!confirm("Remove this item from your cart?")) return;
+      try {
+        const res = await axios.delete(`${API_BASE}/cart/items/${itemId}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        currentCart = res.data.data;
+        renderCart(currentCart);
+      } catch (err) {
+        alert("Failed to remove item.");
+        console.error(err);
+      }
+    }
+
+    async function clearCart() {
+      if (!confirm("Clear your entire cart?")) return;
+      try {
+        const res = await axios.delete(`${API_BASE}/cart`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        currentCart = res.data.data;
+        renderCart(currentCart);
+      } catch (err) {
+        alert("Failed to clear cart.");
+        console.error(err);
+      }
+    }
+
+    async function checkoutCart() {
+      if (!confirm("Proceed to checkout?")) return;
+      try {
+        const res = await axios.post(`${API_BASE}/cart/checkout`, {}, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        alert("✅ Checkout successful!");
+        currentCart = res.data.data.cart;
+        renderCart(currentCart);
+      } catch (err) {
+        console.error(err);
+        alert("Checkout failed: " + (err.response?.data?.message || "Unknown error"));
+      }
+    }
+
+    fetchCart();
+  </script>
+</body>
+</html>

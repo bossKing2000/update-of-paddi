@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Food Paddi Notifications</title>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"
+          integrity="sha384-Gw6DqD0gUHTXsfouoafnPXnD+ivTbIG1F8CD/8HqGBjz3gG+43JjKcNzzd+AOd6k"
+          crossorigin="anonymous"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f8f9fa;
+      margin: 0;
+      padding: 20px;
+    }
+    h1 { color: #ff6600; }
+    #notifications {
+      list-style: none;
+      padding: 0;
+      max-width: 600px;
+      margin-top: 20px;
+    }
+    #notifications li {
+      background: #fff;
+      margin-bottom: 10px;
+      padding: 15px;
+      border-radius: 6px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .read { opacity: 0.6; }
+    button {
+      background-color: #ff6600;
+      color: white;
+      border: none;
+      padding: 5px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover { background-color: #e65c00; }
+    #status {
+      margin-top: 10px;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Notifications (Demo)</h1>
+<div id="status">Loading...</div>
+<ul id="notifications"></ul>
+
+<script>
+  console.log("✅ Script loaded");
+
+  // ====== TEMP ACCESS TOKEN ======
+  const accessToken = "YOUR_JWT_TOKEN_HERE"; // replace with real JWT
+
+  const statusDiv = document.getElementById("status");
+
+  // ✅ Connect to Socket.IO server
+  const socket = io("http://localhost:5000", {
+    auth: { token: accessToken },
+    transports: ["websocket"]
+  });
+
+  socket.on("connect", () => {
+    console.log("Connected to Socket.IO server!");
+    statusDiv.textContent = "Connected to server ✅";
+  });
+
+  socket.on("disconnect", (reason) => {
+    console.log("Disconnected:", reason);
+    statusDiv.textContent = `Disconnected: ${reason}`;
+  });
+
+  socket.on("connect_error", (err) => {
+    console.error("Socket connection error:", err.message);
+    statusDiv.textContent = `Connection error: ${err.message}`;
+  });
+
+  // Demo: handle incoming "notification" events
+  socket.on("notification", (notif) => {
+    console.log("📩 New notification:", notif);
+    addNotification(notif);
+  });
+
+  // ✅ Test fetch to /api/test (first proof backend is reachable)
+  async function testBackend() {
+    try {
+      const res = await fetch("http://localhost:5000/api/test");
+      const txt = await res.text();
+      console.log("Test API response:", txt);
+      statusDiv.textContent = `Backend says: ${txt}`;
+    } catch (err) {
+      console.error("Failed to reach /api/test:", err);
+      statusDiv.textContent = "❌ Could not reach backend from browser";
+    }
+  }
+
+  // ✅ Fetch existing products as "notifications"
+  async function fetchNotifications() {
+    try {
+      const res = await fetch("http://localhost:5000/api/product", {
+        headers: { "Authorization": "Bearer " + accessToken }
+      });
+      if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
+      const products = await res.json();
+
+      products.forEach((p) => {
+        addNotification({
+          id: p.id,
+          title: p.name || "Untitled Product",
+          message: p.description || "No description",
+          createdAt: p.createdAt || new Date(),
+          read: false
+        });
+      });
+
+      if (products.length === 0) statusDiv.textContent = "No items yet.";
+    } catch (err) {
+      console.error("Failed to fetch products:", err);
+      statusDiv.textContent = "Failed to load products ❌";
+    }
+  }
+
+  // ✅ Add notification to DOM
+  function addNotification(notif) {
+    const ul = document.getElementById("notifications");
+    if (!notif.id) return;
+    if (document.getElementById(notif.id)) return; // prevent duplicates
+
+    const li = document.createElement("li");
+    li.className = notif.read ? "read" : "";
+    li.id = notif.id;
+    li.innerHTML = `
+      <div>
+        <strong>${notif.title}</strong><br>
+        ${notif.message}<br>
+        <small>${new Date(notif.createdAt).toLocaleString()}</small>
+      </div>
+    `;
+    ul.prepend(li);
+  }
+
+  // Run checks
+  testBackend();       // hit /api/test first
+  fetchNotifications(); // then try products
+</script>
+
+</body>
+</html>

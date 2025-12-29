@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, maximum-scale=1.0" />
+  <title>Food Paddi - Product Detail</title>
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.3.0/fonts/remixicon.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+
+  <style>
+    :root {
+      --bg-color: #f9fafc;
+      --text-color: #1c1c1e;
+      --card-bg: #ffffff;
+      --header-bg: linear-gradient(135deg, #ff7b00, #ffa040);
+      --accent-color: #ff7b00;
+      --offline-color: #ff3b30;
+      --live-color: #00c853;
+      --shadow-color: rgba(0, 0, 0, 0.05);
+    }
+
+    [data-theme="dark"] {
+      --bg-color: #121212;
+      --text-color: #eaeaea;
+      --card-bg: #1e1e1e;
+      --header-bg: linear-gradient(135deg, #ff9f43, #ff7b00);
+      --accent-color: #ffb74d;
+      --offline-color: #ff5252;
+      --live-color: #00e676;
+      --shadow-color: rgba(255, 255, 255, 0.1);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      background: var(--bg-color);
+      color: var(--text-color);
+      transition: background 0.3s ease, color 0.3s ease;
+      padding-bottom: 80px;
+    }
+
+    header {
+      background: var(--header-bg);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.9rem 1.2rem;
+      box-shadow: 0 2px 12px rgba(255, 107, 0, 0.25);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom-left-radius: 14px;
+      border-bottom-right-radius: 14px;
+    }
+
+    header .left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header i {
+      font-size: 1.6rem;
+      cursor: pointer;
+      transition: transform 0.2s ease, opacity 0.2s ease;
+    }
+
+    header h1 {
+      font-size: 1.3rem;
+      margin: 0;
+      font-weight: 700;
+    }
+
+    .icons {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .icon-badge {
+      position: relative;
+      cursor: pointer;
+    }
+
+    .badge {
+      position: absolute;
+      top: -6px;
+      right: -6px;
+      background: #ff3b30;
+      color: white;
+      border-radius: 50%;
+      font-size: 0.65rem;
+      padding: 3px 6px;
+      font-weight: 600;
+      line-height: 1;
+    }
+
+    .theme-toggle {
+      background: transparent;
+      border: none;
+      color: white;
+      font-size: 1.5rem;
+      cursor: pointer;
+      transition: transform 0.2s ease;
+    }
+
+    .theme-toggle:hover { transform: rotate(20deg); }
+
+    .detail-container {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 24px 18px 40px;
+    }
+
+    .product-header {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 28px;
+      background: var(--card-bg);
+      border-radius: 24px;
+      padding: 22px;
+      box-shadow: 0 8px 22px var(--shadow-color);
+      margin-bottom: 30px;
+    }
+
+    .slider {
+      position: relative;
+      flex: 1 1 50%;
+      border-radius: 20px;
+      overflow: hidden;
+      height: 400px;
+    }
+
+    .slides {
+      display: flex;
+      transition: transform 0.6s ease;
+      height: 100%;
+    }
+
+    .slides img {
+      width: 100%;
+      flex-shrink: 0;
+      object-fit: cover;
+      height: 100%;
+    }
+
+    .slider button {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      background: rgba(0, 0, 0, 0.4);
+      border: none;
+      color: white;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 1.2rem;
+      border-radius: 50%;
+    }
+
+    .slider .prev { left: 10px; }
+    .slider .next { right: 10px; }
+
+    .dots {
+      display: flex;
+      justify-content: center;
+      margin-top: 10px;
+      gap: 8px;
+    }
+
+    .dots span {
+      width: 10px;
+      height: 10px;
+      background: #ccc;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+
+    .dots .active { background: var(--accent-color); }
+
+    .info h2 { font-size: 1.6rem; font-weight: 700; margin: 0 0 10px; }
+    .info p { font-size: 0.95rem; margin: 5px 0; }
+    .price { color: var(--accent-color); font-weight: 700; font-size: 1.2rem; }
+   .status.live { color: var(--live-color); }
+    .status.offline { color: var(--offline-color); }
+
+    section {
+      background: var(--card-bg);
+      border-radius: 20px;
+      padding: 20px;
+      margin-bottom: 28px;
+      box-shadow: 0 8px 22px var(--shadow-color);
+    }
+
+    textarea {
+      width: 100%;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #ccc;
+      font-family: inherit;
+      font-size: 0.9rem;
+      resize: none;
+      margin-top: 8px;
+    }
+
+    .add-cart-btn {
+      background: var(--accent-color);
+      color: white;
+      border: none;
+      border-radius: 10px;
+      padding: 12px 18px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+      margin-top: 12px;
+      transition: all 0.3s ease;
+    }
+
+    .add-cart-btn.added {
+      background: var(--live-color);
+      transform: scale(1.05);
+    }
+
+    @media (max-width: 700px) {
+      .slider { height: 280px; }
+      .slides img { height: 280px; }
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <div class="left">
+      <i class="ri-arrow-left-line" onclick="window.location.href='index.html'"></i>
+      <h1>Product Detail</h1>
+    </div>
+
+    <div class="icons">
+      <button class="theme-toggle" id="themeToggle"><i class="ri-sun-line"></i></button>
+      <div class="icon-badge" onclick="window.location.href='notifications.html'">
+        <i class="ri-notification-3-line"></i>
+        <span class="badge" id="notifCount">0</span>
+      </div>
+      <div class="icon-badge" onclick="window.location.href='cart.html'">
+        <i class="ri-shopping-cart-2-line"></i>
+        <span class="badge" id="cartCount">0</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="detail-container" id="product-detail">
+    <p>Loading product details...</p>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:5000/api";
+    const token = localStorage.getItem("token");
+
+    // 🌗 Theme Toggle
+    const themeToggle = document.getElementById("themeToggle");
+    const root = document.documentElement;
+    function setTheme(theme) {
+      root.setAttribute("data-theme", theme);
+      localStorage.setItem("theme", theme);
+      themeToggle.innerHTML = theme === "dark"
+        ? '<i class="ri-moon-clear-line"></i>'
+        : '<i class="ri-sun-line"></i>';
+    }
+    setTheme(localStorage.getItem("theme") || "light");
+    themeToggle.addEventListener("click", () => {
+      const newTheme = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      setTheme(newTheme);
+    });
+
+    // 🔔 Notifications
+    async function fetchNotificationCount() {
+      try {
+        const res = await axios.get(`${API_BASE}/notifications`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const unread = res.data.data.filter(n => !n.read).length;
+        document.getElementById("notifCount").innerText = unread;
+      } catch { document.getElementById("notifCount").innerText = "0"; }
+    }
+
+    // 🛒 Cart Count
+    async function fetchCartCount() {
+      try {
+        const res = await axios.get(`${API_BASE}/cart`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const count = res.data.data?.items?.length || 0;
+        document.getElementById("cartCount").innerText = count;
+      } catch { document.getElementById("cartCount").innerText = "0"; }
+    }
+
+    // 🧩 Product Detail
+    async function fetchProductDetail() {
+      const params = new URLSearchParams(window.location.search);
+      const productId = params.get("id");
+      const container = document.getElementById("product-detail");
+      if (!productId) return container.innerHTML = "<p>❌ No product ID found.</p>";
+
+      try {
+        const res = await axios.get(`${API_BASE}/product/${productId}`);
+        const p = res.data.data;
+
+                // ✅ Ensure proper boolean handling
+        console.log("isLive value from API:", p.isLive, "type:", typeof p.isLive);
+    // ✅ Ensure consistent boolean interpretation
+    const isLive = p.isLive === true || p.isLive === "true";
+    const liveStatus = isLive ? "live" : "offline";
+    const liveText = isLive ? "Live" : "Offline";
+
+        const sliderHTML = `
+          <div class="slider">
+            <div class="slides">
+              ${p.images.map(img => `<img src="${img}" alt="${p.name}" />`).join("")}
+            </div>
+            <button class="prev"><i class="ri-arrow-left-s-line"></i></button>
+            <button class="next"><i class="ri-arrow-right-s-line"></i></button>
+          </div>
+          <div class="dots">
+            ${p.images.map((_, i) => `<span data-index="${i}" class="${i === 0 ? 'active' : ''}"></span>`).join("")}
+          </div>
+        `;
+
+        container.innerHTML = `
+          <div class="product-header">
+            <div class="image-gallery">${sliderHTML}</div>
+            <div class="info">
+              <h2>${p.name}</h2>
+              <p>${p.description}</p>
+              <p class="price">₦${p.price.toLocaleString()}</p>
+              <p class="status ${liveStatus}">${liveText}</p>
+              <p><strong>Category:</strong> ${p.category?.name || "N/A"}</p>
+              <p><strong>⭐ Rating:</strong> ${p.averageRating?.toFixed(1) || "N/A"} (${p.reviewCount} reviews)</p>
+              <p><strong>👁 Views:</strong> ${p.totalViews}</p>
+              <textarea id="specialRequest" placeholder="Add special request..."></textarea>
+              <button class="add-cart-btn" id="addCartBtn" onclick="addToCart('${p.id}')">Add to Cart</button>
+            </div>
+          </div>
+
+          <section>
+            <h3><i class="ri-user-line"></i> Vendor Info</h3>
+            <div class="vendor-info">
+              <img src="${p.vendor.avatarUrl}" width="70" height="70" style="border-radius:50%;object-fit:cover"/>
+              <div>
+                <p><strong>${p.vendor.name}</strong></p>
+                <p>${p.vendor.bio || ""}</p>
+                <p><i class="ri-phone-line"></i> ${p.vendor.phone || "Not available"}</p>
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <h3><i class="ri-restaurant-line"></i> Product Options</h3>
+            <ul>${p.options.map(opt => `<li>${opt.name} — ₦${opt.price.toLocaleString()}</li>`).join("")}</ul>
+          </section>
+        `;
+        initSlider();
+      } catch (err) {
+        console.error(err);
+        container.innerHTML = "<p>⚠️ Failed to load product details.</p>";
+      }
+    }
+
+    // 🛒 Add to Cart (with visual feedback)
+    async function addToCart(productId) {
+      const specialRequest = document.getElementById("specialRequest").value;
+      const btn = document.getElementById("addCartBtn");
+      btn.disabled = true;
+      try {
+        await axios.post(`${API_BASE}/cart/add/`, { productId, quantity: 1, specialRequest }, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        btn.innerText = "Added ✅";
+        btn.classList.add("added");
+        fetchCartCount();
+        setTimeout(() => {
+          btn.innerText = "Add to Cart";
+          btn.classList.remove("added");
+          btn.disabled = false;
+        }, 3000);
+      } catch (err) {
+        console.error(err);
+        alert("❌ Failed to add to cart.");
+        btn.disabled = false;
+      }
+    }
+
+    // 🎞️ Slider
+    function initSlider() {
+      const slides = document.querySelector(".slides");
+      const images = document.querySelectorAll(".slides img");
+      const dots = document.querySelectorAll(".dots span");
+      let index = 0;
+      let timer = setInterval(next, 4000);
+
+      function show(i) {
+        slides.style.transform = `translateX(${-i * 100}%)`;
+        dots.forEach(d => d.classList.remove("active"));
+        dots[i].classList.add("active");
+      }
+
+      function next() {
+        index = (index + 1) % images.length;
+        show(index);
+      }
+
+      document.querySelector(".next").onclick = () => { next(); reset(); };
+      document.querySelector(".prev").onclick = () => { index = (index - 1 + images.length) % images.length; show(index); reset(); };
+      dots.forEach(dot => dot.onclick = () => { index = +dot.dataset.index; show(index); reset(); });
+
+      function reset() {
+        clearInterval(timer);
+        timer = setInterval(next, 4000);
+      }
+    }
+
+    fetchProductDetail();
+    fetchCartCount();
+    fetchNotificationCount();
+  </script>
+</body>
+</html>

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, maximum-scale=1.0" />
+  <title>Notifications | Food Paddi</title>
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.3.0/fonts/remixicon.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+
+  <style>
+    :root {
+      --bg-color: #f9fafc;
+      --text-color: #1c1c1e;
+      --card-bg: #ffffff;
+      --accent-color: #ff7b00;
+      --border-color: #e5e5e5;
+    }
+
+    [data-theme="dark"] {
+      --bg-color: #121212;
+      --text-color: #eaeaea;
+      --card-bg: #1e1e1e;
+      --border-color: #2c2c2c;
+    }
+
+    body {
+      font-family: 'Poppins', sans-serif;
+      margin: 0;
+      background: var(--bg-color);
+      color: var(--text-color);
+      transition: background 0.3s ease, color 0.3s ease;
+    }
+
+    header {
+      background: var(--accent-color);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 15px 20px;
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    header span i {
+      cursor: pointer;
+      margin-right: 10px;
+      vertical-align: middle;
+    }
+
+    .theme-toggle {
+      background: transparent;
+      border: none;
+      color: white;
+      font-size: 1.4rem;
+      cursor: pointer;
+    }
+
+    .container {
+      max-width: 700px;
+      margin: 30px auto;
+      padding: 0 15px;
+    }
+
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      margin-bottom: 15px;
+    }
+
+    .mark-all-btn {
+      background: var(--accent-color);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+
+    .mark-all-btn:hover {
+      opacity: 0.9;
+    }
+
+    .notification {
+      background: var(--card-bg);
+      border-radius: 10px;
+      padding: 15px;
+      margin-bottom: 15px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+      cursor: pointer;
+      border-left: 4px solid transparent;
+      border: 1px solid var(--border-color);
+      transition: background 0.2s ease, transform 0.1s ease;
+    }
+
+    .notification:hover {
+      transform: scale(1.01);
+    }
+
+    .notification.unread {
+      border-left-color: var(--accent-color);
+      background: rgba(255, 123, 0, 0.05);
+    }
+
+    .notification strong {
+      display: block;
+      font-size: 1rem;
+      margin-bottom: 4px;
+    }
+
+    .notification p {
+      margin: 0;
+      font-size: 0.9rem;
+      color: var(--text-color);
+    }
+
+    .notification small {
+      display: block;
+      color: gray;
+      margin-top: 6px;
+      font-size: 0.8rem;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <span><i class="ri-arrow-left-line" onclick="window.location.href='index.html'"></i> Notifications</span>
+    <button class="theme-toggle" id="themeToggle"><i class="ri-sun-line"></i></button>
+  </header>
+
+  <div class="container">
+    <div class="actions">
+      <button class="mark-all-btn" id="markAllBtn">Mark All as Read</button>
+    </div>
+
+    <div id="notificationsContainer">
+      <p>Loading notifications...</p>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:5000/api/order";
+    const token = localStorage.getItem("token");
+    const root = document.documentElement;
+    const themeToggle = document.getElementById("themeToggle");
+    const markAllBtn = document.getElementById("markAllBtn");
+    const container = document.getElementById("notificationsContainer");
+
+    // 🟡 Redirect if not logged in
+    if (!token) {
+      alert("Please log in to view your notifications.");
+      window.location.href = "login.html";
+    }
+
+    // 🌗 THEME HANDLING
+    function setTheme(theme) {
+      root.setAttribute("data-theme", theme);
+      localStorage.setItem("theme", theme);
+      themeToggle.innerHTML =
+        theme === "dark"
+          ? '<i class="ri-moon-clear-line"></i>'
+          : '<i class="ri-sun-line"></i>';
+    }
+
+    setTheme(localStorage.getItem("theme") || "light");
+
+    themeToggle.addEventListener("click", () => {
+      const newTheme =
+        root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      setTheme(newTheme);
+    });
+
+    // 📩 FETCH NOTIFICATIONS
+    async function fetchNotifications() {
+      try {
+        const res = await axios.get(`${API_BASE}/notifications`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        const data = res.data.data.notifications || res.data.data;
+
+        if (!data.length) {
+          container.innerHTML = "<p>No notifications yet 📭</p>";
+          return;
+        }
+
+        // ✅ Each notification links to detail page
+        container.innerHTML = data
+          .map(
+            (n) => `
+          <div class="notification ${n.read ? "" : "unread"}"
+               onclick="window.location.href='notification-detail.html?id=${n.id}'">
+            <strong>${n.title || "Notification"}</strong>
+            <p>${n.message}</p>
+            <small>${new Date(n.createdAt).toLocaleString()}</small>
+          </div>`
+          )
+          .join("");
+      } catch (err) {
+        console.error(err);
+        container.innerHTML = "<p>⚠️ Failed to load notifications.</p>";
+      }
+    }
+
+    // 🟢 MARK SINGLE AS READ
+    async function markAsRead(id) {
+      try {
+        await axios.patch(`${API_BASE}/notifications/${id}/read`, {}, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      } catch (err) {
+        console.error("Failed to mark as read:", err);
+      }
+    }
+
+    // 🟠 MARK ALL AS READ
+    markAllBtn.addEventListener("click", async () => {
+      try {
+        const res = await axios.patch(`${API_BASE}/notifications/read-all`, {}, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        alert(res.data.message || "All notifications marked as read!");
+        fetchNotifications();
+      } catch (err) {
+        console.error(err);
+        alert("⚠️ Failed to mark all as read.");
+      }
+    });
+
+    fetchNotifications();
+  </script>
+</body>
+</html>

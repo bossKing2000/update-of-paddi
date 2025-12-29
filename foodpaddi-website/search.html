@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Food Paddi - Search</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.3.0/fonts/remixicon.css" rel="stylesheet" />
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #f9fafc;
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+      transition: all 0.3s ease;
+    }
+    [data-theme="dark"] {
+      background: #121212;
+      color: #eaeaea;
+    }
+
+    header {
+      width: 100%;
+      padding: 1rem;
+      background: linear-gradient(135deg, #ff7b00, #ffa040);
+      color: white;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .theme-toggle {
+      font-size: 1.5rem;
+      cursor: pointer;
+      background: transparent;
+      border: none;
+      color: inherit;
+    }
+
+    /* Search Section */
+    .search-container {
+      max-width: 600px;
+      margin: 1.5rem auto;
+      padding: 0 1rem;
+      position: relative;
+    }
+    .search-bar {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+      padding: 0.5rem 1rem;
+      transition: all 0.3s ease;
+    }
+    [data-theme="dark"] .search-bar {
+      background: #1e1e1e;
+    }
+    .search-bar input {
+      flex: 1;
+      border: none;
+      outline: none;
+      font-size: 1rem;
+      background: transparent;
+      color: inherit;
+    }
+    .search-bar i {
+      color: #ff7b00;
+      font-size: 1.4rem;
+      margin-right: 8px;
+    }
+
+    /* Suggestions dropdown */
+    .suggestions {
+      position: absolute;
+      width: 100%;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+      margin-top: 5px;
+      overflow: hidden;
+      z-index: 10;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    [data-theme="dark"] .suggestions {
+      background: #1e1e1e;
+    }
+    .suggestions div {
+      padding: 10px;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+    .suggestions div:hover {
+      background: #ff7b00;
+      color: #fff;
+    }
+
+    /* Results grid */
+    .results-container {
+      max-width: 700px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 1rem;
+    }
+    .product-card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+      overflow: hidden;
+      transition: all 0.3s ease;
+      text-align: center;
+      padding-bottom: 10px;
+    }
+    [data-theme="dark"] .product-card {
+      background: #1e1e1e;
+    }
+    .product-card img {
+      width: 100%;
+      height: 120px;
+      object-fit: cover;
+    }
+    .product-card h4 {
+      margin: 8px 0 4px;
+      font-size: 1rem;
+    }
+    .product-card p {
+      font-size: 0.85rem;
+      color: #666;
+    }
+    [data-theme="dark"] .product-card p {
+      color: #bbb;
+    }
+
+    footer {
+      margin-top: 2rem;
+    }
+    .bottom-nav {
+      display: flex;
+      justify-content: space-around;
+      padding: 10px 0;
+      background: #fff;
+      box-shadow: 0 -2px 5px rgba(0,0,0,0.1);
+    }
+    [data-theme="dark"] .bottom-nav {
+      background: #1e1e1e;
+    }
+    .bottom-nav a {
+      text-decoration: none;
+      color: inherit;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-size: 0.8rem;
+    }
+    .bottom-nav a.active i, .bottom-nav a.active span {
+      color: #ff7b00;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🍲 Food Paddi</h1>
+    <button id="themeToggle" class="theme-toggle"><i class="ri-sun-line"></i></button>
+  </header>
+
+  <!-- 🔍 Search -->
+  <div class="search-container">
+    <div class="search-bar">
+      <i class="ri-search-line"></i>
+      <input type="text" id="searchInput" placeholder="Search for food, vendors..." autocomplete="off" />
+    </div>
+    <div id="suggestionsBox" class="suggestions" style="display:none;"></div>
+  </div>
+
+  <!-- 🛍️ Search Results -->
+  <div id="resultsContainer" class="results-container"></div>
+
+  <footer>
+    <nav class="bottom-nav">
+      <a href="index.html"><i class="ri-home-5-line"></i><span>Home</span></a>
+      <a href="search.html" class="active"><i class="ri-search-line"></i><span>Search</span></a>
+      <a href="#"><i class="ri-heart-3-line"></i><span>Saved</span></a>
+      <a href="profile.html"><i class="ri-user-line"></i><span>Profile</span></a>
+    </nav>
+  </footer>
+
+  <script>
+    // 🌓 Theme toggle
+    const toggleBtn = document.getElementById("themeToggle");
+    const html = document.documentElement;
+    const savedTheme = localStorage.getItem("theme") || "light";
+    html.dataset.theme = savedTheme;
+
+    const updateIcon = () => {
+      toggleBtn.innerHTML = html.dataset.theme === "dark"
+        ? '<i class="ri-moon-line"></i>'
+        : '<i class="ri-sun-line"></i>';
+    };
+    updateIcon();
+    toggleBtn.addEventListener("click", () => {
+      html.dataset.theme = html.dataset.theme === "dark" ? "light" : "dark";
+      localStorage.setItem("theme", html.dataset.theme);
+      updateIcon();
+    });
+
+    // 🔍 Search + Suggestions
+    const searchInput = document.getElementById("searchInput");
+    const suggestionsBox = document.getElementById("suggestionsBox");
+    const resultsContainer = document.getElementById("resultsContainer");
+
+    let timer;
+
+    searchInput.addEventListener("input", (e) => {
+      const q = e.target.value.trim();
+      clearTimeout(timer);
+      if (q.length < 2) {
+        suggestionsBox.style.display = "none";
+        return;
+      }
+      timer = setTimeout(() => fetchSuggestions(q), 300);
+    });
+
+    async function fetchSuggestions(q) {
+      try {
+        const res = await fetch(`http://localhost:5000/api/product/p/suggestions?q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        if (data.success && data.data.results.length) {
+          suggestionsBox.innerHTML = "";
+          data.data.results.forEach((item) => {
+            const div = document.createElement("div");
+            div.textContent = item.name;
+            div.addEventListener("click", () => {
+              searchInput.value = item.name;
+              suggestionsBox.style.display = "none";
+              performSearch(item.name);
+            });
+            suggestionsBox.appendChild(div);
+          });
+          suggestionsBox.style.display = "block";
+        } else {
+          suggestionsBox.style.display = "none";
+        }
+      } catch (err) {
+        console.error("Suggestion error:", err);
+      }
+    }
+
+    searchInput.addEventListener("keypress", (e) => {
+      if (e.key === "Enter") {
+        performSearch(searchInput.value.trim());
+        suggestionsBox.style.display = "none";
+      }
+    });
+
+    async function performSearch(q) {
+      if (!q) return;
+      resultsContainer.innerHTML = `<p>Searching for "${q}"...</p>`;
+      try {
+        const res = await fetch(`http://localhost:5000/api/product/p/search?q=${encodeURIComponent(q)}&limit=20&page=1`);
+        const data = await res.json();
+        if (data.success && data.data.length) {
+          displayResults(data.data);
+        } else {
+          resultsContainer.innerHTML = `<p>No results found for "${q}"</p>`;
+        }
+      } catch (err) {
+        console.error("Search error:", err);
+        resultsContainer.innerHTML = `<p>Failed to fetch results</p>`;
+      }
+    }
+
+    function displayResults(products) {
+      resultsContainer.innerHTML = "";
+      products.forEach((p) => {
+        const card = document.createElement("div");
+        card.className = "product-card";
+        const img = Array.isArray(p.images) && p.images.length ? p.images[0] : "https://via.placeholder.com/150";
+        card.innerHTML = `
+          <img src="${img}" alt="${p.name}">
+          <h4>${p.name}</h4>
+          <p>${p.category || ""}</p>
+        `;
+        resultsContainer.appendChild(card);
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Go Live Product</title>
+</head>
+<body>
+  <h2>Schedule Product Go Live</h2>
+
+  <form id="goLiveForm">
+    <label>
+      Product ID:
+      <input type="text" id="productId" required />
+    </label>
+    <br/><br/>
+
+    <label>
+      Go Live At (your local time):
+      <input type="datetime-local" id="goLiveAt" required />
+    </label>
+    <br/><br/>
+
+    <label>
+      Take Down At (your local time):
+      <input type="datetime-local" id="takeDownAt" required />
+    </label>
+    <br/><br/>
+
+    <label>
+      Grace Minutes (optional):
+      <input type="number" id="graceMinutes" value="0" min="0" />
+    </label>
+    <br/><br/>
+
+    <label>
+      JWT Token:
+      <input type="text" id="jwtToken" placeholder="Paste your JWT here" required />
+    </label>
+    <br/><br/>
+
+    <button type="submit">Go Live</button>
+  </form>
+
+  <pre id="response"></pre>
+
+  <script>
+    const form = document.getElementById('goLiveForm');
+    const responseEl = document.getElementById('response');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const productId = document.getElementById('productId').value.trim();
+      const goLiveAtLocal = document.getElementById('goLiveAt').value;
+      const takeDownAtLocal = document.getElementById('takeDownAt').value;
+      const graceMinutes = parseInt(document.getElementById('graceMinutes').value || '0', 10);
+      const token = document.getElementById('jwtToken').value.trim();
+
+      if (!token) {
+        responseEl.textContent = 'Please enter a valid JWT token.';
+        return;
+      }
+      if (!goLiveAtLocal || !takeDownAtLocal) {
+        responseEl.textContent = 'Please select valid go live and take down dates.';
+        return;
+      }
+
+      // ✅ Convert local time inputs to UTC ISO strings (backend expects UTC)
+      const goLiveAtUtc = new Date(goLiveAtLocal).toISOString();
+      const takeDownAtUtc = new Date(takeDownAtLocal).toISOString();
+
+      try {
+        const res = await fetch(`http://localhost:5000/api/status/${productId}/schedule/go-live`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token
+          },
+          body: JSON.stringify({
+            goLiveAt: goLiveAtUtc,
+            takeDownAt: takeDownAtUtc,
+            graceMinutes
+          })
+        });
+
+        const data = await res.json();
+        responseEl.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        responseEl.textContent = 'Error: ' + err.message;
+      }
+    });
+  </script>
+</body>
+</html>

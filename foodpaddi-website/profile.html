@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Food Paddi - Profile</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.3.0/fonts/remixicon.css" rel="stylesheet" />
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f9fafc; margin: 0; padding: 0; min-height: 100vh; transition: all 0.3s ease; }
+    [data-theme="dark"] { background: #121212; color: #eaeaea; }
+    header { width: 100%; padding: 1rem; background: linear-gradient(135deg, #ff7b00, #ffa040); color: white; display: flex; justify-content: space-between; align-items: center; }
+    .profile-container { max-width: 500px; margin: 2rem auto; padding: 20px; background: #fff; border-radius: 16px; box-shadow: 0 8px 20px rgba(0,0,0,0.05); transition: all 0.3s ease; }
+    [data-theme="dark"] .profile-container { background: #1e1e1e; }
+    .profile-container h2 { margin-top: 0; }
+    .profile-avatar { width: 120px; height: 120px; border-radius: 50%; object-fit: cover; margin-bottom: 15px; border: 2px solid #ff7b00; }
+    .profile-field { margin: 10px 0; }
+    .profile-field span { font-weight: bold; }
+    .preferences { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+    .pref-badge { background: #ff7b00; color: white; padding: 3px 8px; border-radius: 8px; font-size: 0.8rem; }
+    .address { margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 12px; }
+    .default-address { border: 2px solid #ff7b00; }
+    [data-theme="dark"] .address { background: #2a2a2a; }
+    button { padding: 10px 15px; border: none; border-radius: 8px; cursor: pointer; background: #ff7b00; color: white; transition: 0.2s; }
+    button:hover { background: #ffa040; }
+    .theme-toggle { font-size: 1.5rem; cursor: pointer; background: transparent; border: none; color: inherit; }
+    footer { margin-top: 2rem; }
+    .bottom-nav { display: flex; justify-content: space-around; padding: 10px 0; background: #fff; box-shadow: 0 -2px 5px rgba(0,0,0,0.1); }
+    .bottom-nav a { text-decoration: none; color: inherit; display: flex; flex-direction: column; align-items: center; font-size: 0.8rem; }
+    .bottom-nav a.active i, .bottom-nav a.active span { color: #ff7b00; }
+  </style>
+</head>
+<body>
+  <script>
+    const token = localStorage.getItem("token");
+    if (!token) window.location.href = "login.html";
+  </script>
+
+  <header>
+    <h1>🍲 Food Paddi</h1>
+    <div>
+      <button id="themeToggle" class="theme-toggle"><i class="ri-sun-line"></i></button>
+      <i id="logoutBtn" class="ri-logout-box-line nav-icon" title="Logout" style="margin-left:15px; cursor:pointer;"></i>
+    </div>
+  </header>
+
+  <div class="profile-container">
+    <img id="profileAvatar" class="profile-avatar" src="" alt="User Avatar">
+    <h2 id="profileName"></h2>
+    <div class="profile-field"><span>Username:</span> <span id="profileUsername"></span></div>
+    <div class="profile-field"><span>Email:</span> <span id="profileEmail"></span></div>
+    <div class="profile-field"><span>Role:</span> <span id="profileRole"></span></div>
+    <div class="profile-field"><span>Phone:</span> <span id="profilePhone"></span></div>
+    <div class="profile-field"><span>Bio:</span> <span id="profileBio"></span></div>
+
+    <div class="profile-field"><span>Preferences:</span>
+      <div id="profilePrefs" class="preferences"></div>
+    </div>
+
+    <div class="profile-field"><span>Addresses:</span>
+      <div id="profileAddresses"></div>
+    </div>
+
+    <!-- Vendor / Delivery fields -->
+    <div id="vendorFields" style="display:none;">
+      <div class="profile-field"><span>Brand Name:</span> <span id="profileBrand"></span></div>
+      <div class="profile-field"><span>Brand Logo:</span> <img id="profileBrandLogo" src="" alt="Brand Logo" style="width:80px; height:80px; border-radius:8px; display:block; margin-top:5px;"></div>
+      <div class="profile-field"><span>Pending Role Change:</span> <span id="profilePendingRole"></span></div>
+    </div>
+  </div>
+
+  <footer>
+    <nav class="bottom-nav">
+    <a href="index.html"><i class="ri-user-line"></i><span>Profile</span></a>
+      <a href="#"><i class="ri-search-line"></i><span>Search</span></a>
+      <a href="#"><i class="ri-heart-3-line"></i><span>Saved</span></a>
+      <a href="profile.html" class="active"><i class="ri-user-line"></i><span>Profile</span></a>
+    </nav>
+  </footer>
+
+  <script>
+    // Theme toggle
+    const toggleBtn = document.getElementById("themeToggle");
+    const html = document.documentElement;
+    const savedTheme = localStorage.getItem("theme") || "light";
+    html.dataset.theme = savedTheme;
+
+    function updateIcon() {
+      toggleBtn.innerHTML = html.dataset.theme === "dark" ? '<i class="ri-moon-line"></i>' : '<i class="ri-sun-line"></i>';
+    }
+    updateIcon();
+    toggleBtn.addEventListener("click", () => {
+      html.dataset.theme = html.dataset.theme === "dark" ? "light" : "dark";
+      localStorage.setItem("theme", html.dataset.theme);
+      updateIcon();
+    });
+
+    // Fetch user profile from backend
+    fetch("http://localhost:5000/api/auth/profile", {
+      headers: { "Authorization": `Bearer ${token}` }
+    })
+    .then(res => res.json())
+    .then(data => {
+      const user = data.user;
+      if (!user) return;
+
+      // Basic info
+      document.getElementById("profileAvatar").src = user.avatarUrl || 'https://via.placeholder.com/120';
+      document.getElementById("profileName").textContent = user.name || 'N/A';
+      document.getElementById("profileUsername").textContent = user.username || 'N/A';
+      document.getElementById("profileEmail").textContent = user.email || 'N/A';
+      document.getElementById("profileRole").textContent = user.role || 'N/A';
+      document.getElementById("profilePhone").textContent = user.phoneNumber || 'N/A';
+      document.getElementById("profileBio").textContent = user.bio || 'N/A';
+
+      // Preferences
+      const prefsContainer = document.getElementById("profilePrefs");
+      prefsContainer.innerHTML = '';
+      if (user.preferences?.length) {
+        user.preferences.forEach(pref => {
+          const badge = document.createElement("div");
+          badge.className = "pref-badge";
+          badge.textContent = pref;
+          prefsContainer.appendChild(badge);
+        });
+      } else {
+        prefsContainer.textContent = 'N/A';
+      }
+
+      // Addresses
+      const addressesContainer = document.getElementById("profileAddresses");
+      addressesContainer.innerHTML = '';
+      if (user.addresses?.length) {
+        user.addresses.forEach(addr => {
+          const div = document.createElement("div");
+          div.className = "address";
+          div.innerHTML = `<strong>${addr.label}:</strong><br>${addr.street}, ${addr.city}, ${addr.state}, ${addr.country} ${addr.zipCode}`;
+          addressesContainer.appendChild(div);
+        });
+      } else {
+        addressesContainer.textContent = 'No addresses available';
+      }
+
+      // Vendor / Delivery fields
+      if (user.role === 'VENDOR' || user.role === 'DELIVERY') {
+        document.getElementById('vendorFields').style.display = 'block';
+        document.getElementById('profileBrand').textContent = user.brandName || 'N/A';
+        document.getElementById('profileBrandLogo').src = user.brandLogo || 'https://via.placeholder.com/80';
+        document.getElementById('profilePendingRole').textContent = user.pendingRole ? 'Yes' : 'No';
+      }
+    })
+    .catch(err => {
+      console.error("Failed to fetch profile:", err);
+      alert("Could not load profile. Try refreshing the page.");
+    });
+
+    // Logout
+    document.getElementById("logoutBtn").addEventListener("click", () => {
+      localStorage.removeItem("token");
+      window.location.href = "login.html";
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Database Seeder Dashboard</title>
+  <style>
+    body {
+      font-family: "Segoe UI", sans-serif;
+      background: #f3f4f6;
+      color: #111827;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      height: 100vh;
+      margin: 0;
+      padding-top: 60px;
+    }
+
+    h1 {
+      margin-bottom: 20px;
+      color: #2563eb;
+    }
+
+    .controls {
+      display: flex;
+      gap: 15px;
+      margin-bottom: 20px;
+    }
+
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button#startBtn {
+      background: #16a34a;
+      color: white;
+    }
+
+    button#startBtn:hover {
+      background: #15803d;
+    }
+
+    button#stopBtn {
+      background: #dc2626;
+      color: white;
+    }
+
+    button#stopBtn:hover {
+      background: #b91c1c;
+    }
+
+    .progress-container {
+      width: 80%;
+      max-width: 500px;
+      background: #e5e7eb;
+      border-radius: 10px;
+      overflow: hidden;
+      height: 25px;
+      margin-bottom: 15px;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: #2563eb;
+      transition: width 0.3s ease;
+    }
+
+    .info {
+      text-align: center;
+      font-size: 15px;
+      color: #374151;
+    }
+
+    .status-box {
+      margin-top: 20px;
+      background: white;
+      padding: 15px 25px;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+      width: 80%;
+      max-width: 500px;
+    }
+
+    .status-box p {
+      margin: 6px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>🌱 Seeder Dashboard</h1>
+
+  <div class="controls">
+    <button id="startBtn">▶️ Start Seeder</button>
+    <button id="stopBtn">⏹️ Stop Seeder</button>
+  </div>
+
+  <div class="progress-container">
+    <div id="progressBar" class="progress-bar"></div>
+  </div>
+
+  <div class="info">
+    <p id="progressText">Progress: 0 / 0</p>
+    <p id="messageText">Message: Idle</p>
+  </div>
+
+  <div class="status-box">
+    <p><strong>Status:</strong> <span id="statusText">Not running</span></p>
+    <p><strong>Stop Requested:</strong> <span id="stopText">No</span></p>
+  </div>
+
+  <script>
+    const API_BASE = "http://localhost:5000/api/seeder"; // 🔧 Change to your backend base URL if different
+
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const progressBar = document.getElementById("progressBar");
+    const progressText = document.getElementById("progressText");
+    const messageText = document.getElementById("messageText");
+    const statusText = document.getElementById("statusText");
+    const stopText = document.getElementById("stopText");
+
+    let polling = null;
+
+    // ✅ Start Seeder
+    startBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch(`${API_BASE}/run-seeder`);
+        const data = await res.json();
+        alert(data.message || "Seeder started");
+        startPolling();
+      } catch (err) {
+        alert("Failed to start seeder");
+        console.error(err);
+      }
+    });
+
+    // ⏹️ Stop Seeder
+    stopBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch(`${API_BASE}/stop-seeder`);
+        const data = await res.json();
+        alert(data.message || "Stop signal sent");
+      } catch (err) {
+        alert("Failed to stop seeder");
+        console.error(err);
+      }
+    });
+
+    // 🔄 Poll Seeder Progress
+    async function updateProgress() {
+      try {
+        const res = await fetch(`${API_BASE}/seeder-progress`);
+        const data = await res.json();
+
+        const { running, progress, message, stopRequested } = data;
+        progressText.textContent = `Progress: ${progress}`;
+        messageText.textContent = `Message: ${message}`;
+        statusText.textContent = running ? "Running" : "Idle";
+        stopText.textContent = stopRequested ? "Yes" : "No";
+
+        // Progress bar calculation
+        const [current, total] = progress.split(" / ").map(Number);
+        const percentage = total ? (current / total) * 100 : 0;
+        progressBar.style.width = `${percentage}%`;
+
+        if (!running && polling) {
+          clearInterval(polling);
+          polling = null;
+        }
+      } catch (err) {
+        console.error("Error updating progress:", err);
+      }
+    }
+
+    function startPolling() {
+      if (polling) return;
+      polling = setInterval(updateProgress, 2000);
+      updateProgress();
+    }
+
+    // Start initial status polling
+    startPolling();
+  </script>
+</body>
+</html>

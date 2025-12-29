@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Popularity Job Progress</title>
+  <style>
+    /* ── Reset & Base ── */
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #fff7f0;
+      color: #333;
+      margin: 0;
+      padding: 40px;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      min-height: 100vh;
+    }
+
+    .container {
+      background-color: #ffffff;
+      border-radius: 12px;
+      padding: 30px 40px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      width: 400px;
+      text-align: center;
+    }
+
+    h1 {
+      color: #F97316; /* Orange */
+      margin-bottom: 25px;
+    }
+
+    button {
+      background-color: #F97316;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 12px 20px;
+      margin: 10px 5px;
+      font-size: 16px;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+    }
+
+    button:hover {
+      background-color: #e05c00;
+    }
+
+    #progress {
+      margin-top: 30px;
+      font-size: 16px;
+      text-align: left;
+      background-color: #fff3e0;
+      padding: 20px;
+      border-radius: 8px;
+      border: 1px solid #FBC691;
+    }
+
+    #progress p {
+      margin: 8px 0;
+    }
+
+    .status-running { color: #F97316; font-weight: bold; }
+    .status-completed { color: green; font-weight: bold; }
+    .status-cancelled { color: red; font-weight: bold; }
+    .status-error { color: #b00020; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Popularity Job Control</h1>
+    <button id="startBtn">Start Job</button>
+    <button id="cancelBtn">Cancel Job</button>
+    <button id="resetBtn">Reset Job</button>
+
+    <div id="progress">
+      <p>Status: <span id="status" class="status-running">Idle</span></p>
+      <p>Processed: <span id="processed">0</span> / <span id="total">0</span></p>
+      <p>Progress: <span id="percent">0</span>%</p>
+    </div>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const processedEl = document.getElementById("processed");
+    const totalEl = document.getElementById("total");
+    const percentEl = document.getElementById("percent");
+    const startBtn = document.getElementById("startBtn");
+    const cancelBtn = document.getElementById("cancelBtn");
+    const resetBtn = document.getElementById("resetBtn");
+
+    function updateStatusClass(status) {
+      statusEl.className = '';
+      if (status === "Running") statusEl.classList.add("status-running");
+      else if (status === "Completed") statusEl.classList.add("status-completed");
+      else if (status === "Cancelled") statusEl.classList.add("status-cancelled");
+      else if (status === "Error") statusEl.classList.add("status-error");
+      else if (status === "Idle") statusEl.classList.add("status-running");
+    }
+
+    const API_BASE = "http://localhost:5000";
+
+    async function fetchProgress() {
+      try {
+        const res = await fetch(`${API_BASE}/popularity-progress`);
+        const data = await res.json();
+        processedEl.textContent = data.processed ?? 0;
+        totalEl.textContent = data.total ?? 0;
+        percentEl.textContent = data.percent ?? 0;
+        const statusText = data.percent < 100 && data.total > 0 ? "Running" : (data.total === 0 ? "Idle" : "Completed");
+        statusEl.textContent = statusText;
+        updateStatusClass(statusText);
+      } catch (err) {
+        console.error("Error fetching progress:", err);
+        statusEl.textContent = "Error";
+        updateStatusClass("Error");
+      }
+    }
+
+    startBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch(`${API_BASE}/run-popularity-job`);
+        const data = await res.json();
+        alert(data.message);
+        statusEl.textContent = "Running";
+        updateStatusClass("Running");
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Error";
+        updateStatusClass("Error");
+      }
+    });
+
+    cancelBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch(`${API_BASE}/cancel-popularity-job`);
+        const data = await res.json();
+        alert(data.message);
+        statusEl.textContent = "Cancelled";
+        updateStatusClass("Cancelled");
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Error";
+        updateStatusClass("Error");
+      }
+    });
+
+    resetBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch(`${API_BASE}/reset-popularity-job`);
+        const data = await res.json();
+        alert(data.message);
+        statusEl.textContent = "Idle";
+        processedEl.textContent = "0";
+        totalEl.textContent = "0";
+        percentEl.textContent = "0";
+        updateStatusClass("Idle");
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Error";
+        updateStatusClass("Error");
+      }
+    });
+
+    // Poll progress every 5 seconds
+    setInterval(fetchProgress, 5000);
+
+    // Initial fetch so page shows correct status immediately
+    fetchProgress();
+  </script>
+</body>
+</html>
+
+
+
+<!-- use this in chrome or any browser  -->
+
+<!-- https://ui-food-paddi.onrender.com/progress.html -->
+
+
+
+<!-- use this in chrome or any browser  -->
+
+<!-- https://ui-food-paddi.onrender.com/progress.html -->

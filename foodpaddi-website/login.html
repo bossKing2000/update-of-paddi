@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Food Paddi - Login</title>
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.3.0/fonts/remixicon.css" rel="stylesheet" />
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #f9fafc;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      transition: all 0.3s ease;
+    }
+    [data-theme="dark"] { background: #121212; color: #eaeaea; }
+    header { width: 100%; padding: 1rem; background: linear-gradient(135deg, #ff7b00, #ffa040); color: white; text-align: center; font-weight: 700; }
+    .container { max-width: 400px; width: 100%; padding: 20px; margin-top: 30px; background: #fff; border-radius: 16px; box-shadow: 0 8px 20px rgba(0,0,0,0.05); transition: all 0.3s ease; }
+    [data-theme="dark"] .container { background: #1e1e1e; }
+    input, button { width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: 1px solid #ccc; font-size: 1rem; }
+    button { cursor: pointer; background: #ff7b00; color: white; border: none; transition: all 0.2s ease; }
+    button:hover { background: #ffa040; }
+    .theme-toggle { position: absolute; top: 10px; right: 10px; background: transparent; border: none; font-size: 1.5rem; cursor: pointer; color: inherit; }
+  </style>
+</head>
+<body>
+  <button class="theme-toggle" id="themeToggle"><i class="ri-sun-line"></i></button>
+  <header>Food Paddi</header>
+
+  <div class="container login">
+    <h2>Login</h2>
+    <input type="email" id="email" placeholder="Email" />
+    <input type="password" id="password" placeholder="Password" />
+    <button id="loginBtn">Login</button>
+    <p id="loginMsg" style="color:red;"></p>
+  </div>
+
+  <script>
+    const apiBase = "http://localhost:5000/api/auth";
+    const themeToggle = document.getElementById("themeToggle");
+    const root = document.documentElement;
+
+    function setTheme(theme) {
+      root.setAttribute("data-theme", theme);
+      localStorage.setItem("theme", theme);
+      themeToggle.innerHTML = theme === "dark" ? '<i class="ri-moon-clear-line"></i>' : '<i class="ri-sun-line"></i>';
+    }
+
+    const savedTheme = localStorage.getItem("theme") || "light";
+    setTheme(savedTheme);
+
+    themeToggle.addEventListener("click", () => {
+      const newTheme = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      setTheme(newTheme);
+    });
+
+    // Auto redirect if already logged in
+    if (localStorage.getItem("token")) {
+      window.location.href = "products.html";
+    }
+
+    document.getElementById("loginBtn").addEventListener("click", async () => {
+      const email = document.getElementById("email").value;
+      const password = document.getElementById("password").value;
+      const loginMsg = document.getElementById("loginMsg");
+      loginMsg.textContent = "";
+
+      if (!email || !password) {
+        loginMsg.textContent = "Please fill in all fields.";
+        return;
+      }
+
+      try {
+        const res = await fetch(`${apiBase}/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+
+        if (data.accessToken) {
+          localStorage.setItem("token", data.accessToken);
+          localStorage.setItem("user", JSON.stringify(data.user));
+          window.location.href = "index.html"; // redirect after login
+        } else {
+          loginMsg.textContent = data.message || "Login failed.";
+        }
+      } catch (err) {
+        loginMsg.textContent = "Error connecting to server.";
+        console.error(err);
+      }
+    });
+  </script>
+</body>
+</html>

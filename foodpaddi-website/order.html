@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Orders | Food Paddi</title>
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.3.0/fonts/remixicon.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+
+  <style>
+    :root{
+      --bg:#f9fafc; --card:#fff; --text:#111; --accent:#ff7b00; --muted:#7a7a7a; --border:#e6e6e6;
+      --success:#4caf50; --danger:#f44336; --info:#2196f3; --warning:#ff9800;
+    }
+    [data-theme="dark"]{ --bg:#0f1112; --card:#151617; --text:#eaeaea; --muted:#9aa0a6; --border:#222; --accent:#ffb74d; }
+    *{box-sizing:border-box}
+    body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial; background:var(--bg); color:var(--text); margin:0; -webkit-font-smoothing:antialiased;}
+    header{background:var(--accent); color:#fff; display:flex; align-items:center; justify-content:space-between; padding:12px 18px; position:sticky; top:0; z-index:60}
+    header h1{font-size:1.05rem; margin:0; display:flex; gap:10px; align-items:center}
+    header .actions{display:flex; gap:8px; align-items:center}
+    .container{max-width:1100px; margin:24px auto; padding:0 16px}
+    .controls{display:flex; gap:10px; align-items:center; margin-bottom:12px; flex-wrap:wrap}
+    .btn{border:0;padding:8px 12px;border-radius:8px;cursor:pointer;font-weight:600}
+    .btn-primary{background:var(--accent); color:#fff}
+    .btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}
+    .btn-danger{background:var(--danger); color:#fff}
+    .card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px; margin-bottom:12px; box-shadow:0 4px 18px rgba(0,0,0,0.04)}
+    .order-grid{display:grid; grid-template-columns: 1fr 320px; gap:16px}
+    .order-list{min-height:200px}
+    .order-row{display:flex; justify-content:space-between; gap:12px; align-items:flex-start; padding:12px; border-radius:10px; border:1px solid var(--border); margin-bottom:10px}
+    .order-meta{flex:1}
+    .order-title{display:flex; gap:8px; align-items:center; margin-bottom:6px}
+    .small{font-size:0.9rem; color:var(--muted)}
+    .status{padding:6px 10px;border-radius:8px;color:#fff;font-weight:700;font-size:0.85rem}
+    .s-paid{background:var(--success)}
+    .s-await{background:var(--warning)}
+    .s-cancel{background:var(--danger)}
+    .s-cooking{background:var(--info)}
+    .order-actions{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap}
+    .muted{color:var(--muted)}
+    .product-list{margin-top:8px}
+    .product-item{display:flex; gap:10px; align-items:center; padding:8px 0; border-bottom:1px dashed rgba(0,0,0,0.04)}
+    .product-item:last-child{border-bottom:none}
+    .badge{display:inline-block;padding:6px 8px;border-radius:8px;background:var(--border); font-weight:600}
+    /* modal */
+    .modal{display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); align-items:center; justify-content:center; z-index:1000}
+    .modal.show{display:flex}
+    .modal-panel{width:100%; max-width:920px; background:var(--card); border-radius:12px; padding:18px; border:1px solid var(--border); box-shadow:0 10px 40px rgba(0,0,0,0.25); overflow:auto; max-height:90vh}
+    .modal-grid{display:grid; grid-template-columns: 1fr 320px; gap:16px}
+    label{display:block;font-size:0.9rem;margin-bottom:6px}
+    input[type="text"], input[type="number"], textarea, select{width:100%; padding:8px; border:1px solid var(--border); border-radius:8px; background:transparent; color:var(--text)}
+    textarea{min-height:90px; resize:vertical}
+    .form-row{margin-bottom:10px}
+    footer{height:40px}
+    @media(max-width:900px){ .order-grid, .modal-grid{grid-template-columns:1fr} }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><i class="ri-shopping-bag-3-line"></i> Orders</h1>
+    <div class="actions">
+      <button id="refreshBtn" class="btn btn-outline" title="Refresh">⟳ Refresh</button>
+      <button id="themeToggle" class="btn btn-outline" title="Toggle theme"><i class="ri-sun-line"></i></button>
+      <button id="logoutBtn" class="btn btn-outline" title="Logout"><i class="ri-logout-box-line"></i> Logout</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="controls">
+      <div class="card" style="padding:10px 12px">
+        <strong id="roleLabel">Role: -</strong> <span class="small muted" id="userLabel"></span>
+      </div>
+
+      <div style="display:flex;gap:8px; align-items:center;">
+        <select id="statusFilter" class="btn btn-outline" style="padding:8px;border-radius:8px">
+          <option value="">All statuses</option>
+          <option value="PENDING">PENDING</option>
+          <option value="AWAITING_PAYMENT">AWAITING_PAYMENT</option>
+          <option value="PAYMENT_CONFIRMED">PAYMENT_CONFIRMED</option>
+          <option value="COOKING">COOKING</option>
+          <option value="READY_FOR_PICKUP">READY_FOR_PICKUP</option>
+          <option value="OUT_FOR_DELIVERY">OUT_FOR_DELIVERY</option>
+          <option value="COMPLETED">COMPLETED</option>
+          <option value="CANCELLED">CANCELLED</option>
+        </select>
+        <input id="searchInput" placeholder="Search order id, product, customer, vendor..." style="padding:8px;border-radius:8px;border:1px solid var(--border)" />
+        <button id="applyFilter" class="btn btn-primary">Apply</button>
+      </div>
+    </div>
+
+    <div class="order-grid">
+      <div class="order-list card" id="ordersContainer">
+        <p class="muted">Loading orders…</p>
+      </div>
+
+      <div class="card" id="sidePanel">
+        <h3 style="margin-top:0">Selected order</h3>
+        <div id="selectedSummary" class="muted">No order selected</div>
+        <div style="margin-top:12px">
+          <button id="openSelectedBtn" class="btn btn-primary" disabled>Open Detail</button>
+          <button id="refreshSelectedBtn" class="btn btn-outline" disabled>Refresh</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Order Modal -->
+  <div class="modal" id="orderModal">
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h2 id="modalTitle">Order Detail</h2>
+        <div style="display:flex;gap:8px">
+          <button id="modalClose" class="btn btn-outline">Close</button>
+        </div>
+      </div>
+
+      <div class="modal-grid">
+        <div>
+          <div id="orderInfo" style="margin-bottom:12px"></div>
+
+          <div class="card" id="itemsCard">
+            <h4 style="margin:0 0 8px 0">Items</h4>
+            <div id="itemsList" class="product-list"></div>
+          </div>
+
+          <div class="card" id="paymentsCard" style="margin-top:12px">
+            <h4 style="margin:0 0 8px 0">Payments</h4>
+            <div id="paymentsList" class="small muted">Loading payments...</div>
+            <div style="margin-top:8px" id="startPaymentArea"></div>
+          </div>
+
+          <div class="card" id="timelineCard" style="margin-top:12px">
+            <h4 style="margin:0 0 8px 0">Activity / Timeline</h4>
+            <div id="timelineList" class="small muted">—</div>
+          </div>
+        </div>
+
+        <div>
+          <div class="card">
+            <h4 style="margin:0 0 8px 0">Summary</h4>
+            <div id="orderSummary" class="small muted"></div>
+          </div>
+
+          <div class="card" id="specialSection" style="margin-top:12px">
+            <h4 style="margin:0 0 8px 0">Special Request</h4>
+            <div id="specialArea" class="small muted">—</div>
+            <div id="vendorRespondForm" style="margin-top:8px;display:none">
+              <label>Vendor note</label>
+              <textarea id="vendorNote" placeholder="Write a message to customer..."></textarea>
+              <label style="margin-top:8px">Extra charge (₦) — optional</label>
+              <input id="vendorExtra" type="number" min="0" step="1" />
+              <div style="margin-top:8px;display:flex;gap:8px">
+                <button id="sendVendorRespond" class="btn btn-primary">Send Response</button>
+                <button id="clearVendorRespond" class="btn btn-outline">Clear</button>
+              </div>
+            </div>
+
+            <div id="customerApproveArea" style="margin-top:8px;display:none">
+              <p class="small muted">Vendor requested extra charge. Approve to proceed to payment.</p>
+              <div style="display:flex;gap:8px">
+                <button id="approveSpecialBtn" class="btn btn-primary">Approve & Start Payment</button>
+                <button id="rejectSpecialBtn" class="btn btn-outline">Reject</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:12px">
+            <h4 style="margin:0 0 8px 0">Actions</h4>
+            <div id="actionControls" style="display:flex;flex-direction:column;gap:8px">
+              <!-- dynamic action buttons inserted here -->
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer></footer>
+
+<script>
+/* ============================
+   Config & helpers
+   ============================ */
+const ORDER_API = "http://localhost:5000/api/order";
+const PAYMENT_API = "http://localhost:5000/api/payments";
+const token = localStorage.getItem("token");
+const user = (() => {
+  try { return JSON.parse(localStorage.getItem("user") || "{}"); } catch(e){return {}}
+})();
+
+if (!token) {
+  // Redirect to login if not present
+  window.location.href = "login.html";
+}
+
+const authHeaders = () => ({ Authorization: `Bearer ${token}` });
+
+/* DOM */
+const ordersContainer = document.getElementById("ordersContainer");
+const roleLabel = document.getElementById("roleLabel");
+const userLabel = document.getElementById("userLabel");
+const refreshBtn = document.getElementById("refreshBtn");
+const themeToggle = document.getElementById("themeToggle");
+const logoutBtn = document.getElementById("logoutBtn");
+const statusFilter = document.getElementById("statusFilter");
+const searchInput = document.getElementById("searchInput");
+const applyFilter = document.getElementById("applyFilter");
+
+const orderModal = document.getElementById("orderModal");
+const modalClose = document.getElementById("modalClose");
+const orderInfo = document.getElementById("orderInfo");
+const itemsList = document.getElementById("itemsList");
+const orderSummary = document.getElementById("orderSummary");
+const paymentsList = document.getElementById("paymentsList");
+const startPaymentArea = document.getElementById("startPaymentArea");
+const timelineList = document.getElementById("timelineList");
+const specialArea = document.getElementById("specialArea");
+const vendorRespondForm = document.getElementById("vendorRespondForm");
+const sendVendorRespond = document.getElementById("sendVendorRespond");
+const clearVendorRespond = document.getElementById("clearVendorRespond");
+const vendorNote = document.getElementById("vendorNote");
+const vendorExtra = document.getElementById("vendorExtra");
+const customerApproveArea = document.getElementById("customerApproveArea");
+const approveSpecialBtn = document.getElementById("approveSpecialBtn");
+const rejectSpecialBtn = document.getElementById("rejectSpecialBtn");
+const actionControls = document.getElementById("actionControls");
+const selectedSummary = document.getElementById("selectedSummary");
+const openSelectedBtn = document.getElementById("openSelectedBtn");
+const refreshSelectedBtn = document.getElementById("refreshSelectedBtn");
+
+/* state */
+let ORDERS = [];
+let ROLE = user.role || null;
+let SELECTED = null;
+
+/* boot */
+roleLabel.textContent = `Role: ${ROLE || "UNKNOWN"}`;
+userLabel.textContent = user.name ? `Logged in as ${user.name}` : "";
+
+/* theme */
+function setTheme(theme){
+  document.documentElement.setAttribute("data-theme", theme);
+  themeToggle.innerHTML = theme === "dark" ? '<i class="ri-moon-clear-line"></i>' : '<i class="ri-sun-line"></i>';
+  localStorage.setItem("theme", theme);
+}
+setTheme(localStorage.getItem("theme") || "light");
+themeToggle.addEventListener("click", ()=> setTheme(document.documentElement.getAttribute("data-theme")==="dark" ? "light" : "dark"));
+
+logoutBtn.addEventListener("click", ()=>{
+  localStorage.removeItem("token");
+  localStorage.removeItem("user");
+  window.location.href = "login.html";
+});
+
+/* events */
+refreshBtn.addEventListener("click", fetchOrders);
+applyFilter.addEventListener("click", fetchOrders);
+openSelectedBtn.addEventListener("click", ()=> SELECTED && openOrderModal(SELECTED.id));
+refreshSelectedBtn.addEventListener("click", ()=> SELECTED && refreshSingle(SELECTED.id));
+modalClose.addEventListener("click", ()=> closeModal());
+document.addEventListener("keydown", (e)=> { if(e.key==="Escape") closeModal(); });
+
+/* fetch orders list */
+async function fetchOrders() {
+  const params = {};
+  const status = statusFilter.value;
+  const q = searchInput.value?.trim();
+  if (status) params.status = status;
+  if (q) params.q = q;
+
+  ordersContainer.innerHTML = '<p class="muted">Loading orders…</p>';
+  try {
+    const res = await axios.get(`${ORDER_API}`, { headers: authHeaders(), params });
+    // backend can return { data: { orders, role } } or raw array
+    const payload = res.data.data || res.data;
+    ORDERS = payload.orders || payload || [];
+    // If backend includes role, override local
+    if (payload.role) ROLE = payload.role;
+
+    renderOrders(ORDERS);
+  } catch (err) {
+    console.error("fetchOrders err:", err);
+    ordersContainer.innerHTML = `<p class="muted">Failed to load orders. Check console.</p>`;
+  }
+}
+
+/* render list */
+function renderOrders(list){
+  if (!list || list.length === 0) {
+    ordersContainer.innerHTML = `<p class="muted">No orders found.</p>`;
+    return;
+  }
+  ordersContainer.innerHTML = "";
+  list.forEach(o => {
+    const row = document.createElement("div");
+    row.className = "order-row";
+    row.innerHTML = `
+      <div class="order-meta">
+        <div class="order-title">
+          <strong>#${o.id.slice(0,8)}</strong>
+          <span class="small muted"> • ${o.items?.length || 0} item(s)</span>
+        </div>
+        <div class="small muted">${o.items?.[0]?.product?.name || "—"}</div>
+        <div class="product-list small muted" style="margin-top:6px">
+          ${ (o.items || []).map(it => `<div>${it.quantity}× ${it.product?.name || it.name} ${it.options?.length?` — ${it.options.map(op=>op.productOption?.name).join(",")}`:""}</div>`).join("") }
+        </div>
+      </div>
+      <div style="text-align:right;min-width:220px">
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <div class="small muted">${new Date(o.createdAt).toLocaleString()}</div>
+        </div>
+        <div style="margin-top:10px">
+          <div class="status ${statusClassFor(o.status)}">${o.status}</div>
+        </div>
+        <div class="order-actions" style="justify-content:flex-end;margin-top:10px">
+          <button class="btn btn-outline" onclick="openOrderModal('${o.id}')">Open</button>
+          <button class="btn btn-primary" onclick="selectOrder('${o.id}')">Select</button>
+        </div>
+      </div>
+    `;
+    ordersContainer.appendChild(row);
+  });
+}
+
+/* helper status class */
+function statusClassFor(status){
+  if(!status) return "";
+  if (["COMPLETED","PAYMENT_CONFIRMED"].includes(status)) return "s-paid";
+  if (["AWAITING_PAYMENT","PENDING"].includes(status)) return "s-await";
+  if (["CANCELLED","CANCELLED_UNPAID","PAYMENT_EXPIRED"].includes(status)) return "s-cancel";
+  return "s-cooking";
+}
+
+/* select order (side panel) */
+function selectOrder(id){
+  const o = ORDERS.find(x=>x.id===id);
+  SELECTED = o;
+  selectedSummary.innerHTML = `
+    <div><strong>#${o.id.slice(0,8)}</strong> <span class="small muted"> ${o.status}</span></div>
+    <div class="small muted" style="margin-top:6px">Customer: ${o.customer?.name || "—"}</div>
+    <div class="small muted">Vendor: ${o.vendor?.name || "—"}</div>
+  `;
+  openSelectedBtn.disabled = false;
+  refreshSelectedBtn.disabled = false;
+  document.getElementById("openSelectedBtn").scrollIntoView({behavior:"smooth"});
+}
+
+/* refresh single order from server */
+async function refreshSingle(id){
+  try {
+    const res = await axios.get(`${ORDER_API}/${id}`, { headers: authHeaders() });
+    const payload = res.data.data || res.data;
+    const updated = payload.order || payload;
+    // update ORDERS
+    ORDERS = ORDERS.map(o => o.id === updated.id ? updated : o);
+    SELECTED = updated;
+    renderOrders(ORDERS);
+    selectOrder(updated.id);
+    alert("Order refreshed");
+  } catch (err) {
+    console.error("refreshSingle err:", err);
+    alert("Failed to refresh order");
+  }
+}
+
+/* open modal and populate */
+async function openOrderModal(id){
+  try {
+    orderModal.classList.add("show");
+    // fetch single order to ensure fresh
+    const res = await axios.get(`${ORDER_API}/${id}`, { headers: authHeaders() });
+    const payload = res.data.data || res.data;
+    const o = payload.order || payload;
+    SELECTED = o;
+    renderModal(o);
+  } catch (err) {
+    console.error("openOrderModal err:", err);
+    orderModal.classList.remove("show");
+    alert("Failed to load order detail");
+  }
+}
+
+/* close modal */
+function closeModal(){
+  orderModal.classList.remove("show");
+  // reset forms
+  vendorNote.value = "";
+  vendorExtra.value = "";
+  customerApproveArea.style.display = "none";
+  vendorRespondForm.style.display = "none";
+  actionControls.innerHTML = "";
+}
+
+/* render modal content */
+function renderModal(o){
+  // orderInfo
+  orderInfo.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-size:1.05rem"><strong>Order #${o.id.slice(0,8)}</strong></div>
+        <div class="small muted">Placed: ${new Date(o.createdAt).toLocaleString()}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="status ${statusClassFor(o.status)}">${o.status}</div>
+        <div class="small muted" style="margin-top:6px">Total: ₦${(o.totalPrice || o.totalAmount || 0).toLocaleString()}</div>
+      </div>
+    </div>
+    <hr style="margin:10px 0;border:none;border-top:1px solid var(--border)" />
+    <div class="small muted"><strong>Customer:</strong> ${o.customer?.name || "—"} ${o.customer?.phoneNumber?` • ${o.customer.phoneNumber}`:""}</div>
+    <div class="small muted"><strong>Vendor:</strong> ${o.vendor?.name || "—"}</div>
+    ${ o.address ? `<div class="small muted" style="margin-top:6px"><strong>Delivery:</strong> ${o.address.label || ""} — ${o.address.street || ""}, ${o.address.city || ""}</div>` : "" }
+  `;
+
+  // items
+  itemsList.innerHTML = "";
+  (o.items||[]).forEach(it => {
+    const div = document.createElement("div");
+    div.className = "product-item";
+    div.innerHTML = `
+      <div style="flex:1">
+        <div><strong>${it.product?.name || it.name}</strong> <span class="small muted">×${it.quantity}</span></div>
+        <div class="small muted">${it.options?.map(op=>op.productOption?.name).filter(Boolean).join(", ") || ""}</div>
+      </div>
+      <div style="min-width:90px;text-align:right"><strong>₦${(it.subtotal || 0).toLocaleString()}</strong></div>
+    `;
+    itemsList.appendChild(div);
+  });
+
+  // payments
+  renderPayments(o);
+
+  // timeline (if activity available)
+  timelineList.innerHTML = (o.activities && o.activities.length)
+    ? o.activities.map(a => `<div style="margin-bottom:6px"><strong>${a.title}</strong><div class="small muted">${a.message}</div><div class="small muted">${new Date(a.createdAt).toLocaleString()}</div></div>`).join("")
+    : `<div class="small muted">No activity recorded</div>`;
+
+  // special request area logic
+  const special = o.specialRequest || o.vendorNote || null;
+  specialArea.innerHTML = special ? `<div><strong>Customer request:</strong> ${special}</div><div class="small muted" style="margin-top:6px">Vendor note: ${o.vendorNote || "—"}</div>` : `<div class="small muted">No special request</div>`;
+
+  // show/hide vendor respond form
+  vendorRespondForm.style.display = (ROLE === "VENDOR" && o.vendorId === user.id) ? "block" : "none";
+
+  // show customer approve area when vendor added extraCharge and customer hasn't approved
+  const hasExtraCharge = !!o.extraCharge && o.extraCharge > 0;
+  const awaitingCustomerApproval = o.status === "WAITING_CUSTOMER_APPROVAL" || o.customerApproval === false;
+  customerApproveArea.style.display = (ROLE === "CUSTOMER" && o.customerId === user.id && hasExtraCharge && awaitingCustomerApproval) ? "block" : "none";
+
+  // actions - build based on role and allowed endpoints
+  buildActionControls(o);
+}
+
+/* render payments block */
+function renderPayments(o) {
+  const payments = o.payments || [];
+  if (!payments.length) {
+    paymentsList.innerHTML = `<div class="small muted">No payment record</div>`;
+  } else {
+    paymentsList.innerHTML = payments.map(p => `
+      <div style="margin-bottom:8px;padding:8px;border-radius:8px;border:1px solid var(--border)">
+        <div><strong>Ref:</strong> ${p.reference || p.id}</div>
+        <div class="small muted">Amount: ₦${(p.amount||0).toLocaleString()} • Status: ${p.status}</div>
+        <div class="small muted">${p.createdAt ? new Date(p.createdAt).toLocaleString() : ""}</div>
+      </div>
+    `).join("");
+  }
+
+  // If customer can start payment show start button
+  startPaymentArea.innerHTML = "";
+  if (ROLE === "CUSTOMER" && (o.status === "AWAITING_PAYMENT" || o.status === "WAITING_CUSTOMER_APPROVAL")) {
+    const btn = document.createElement("button");
+    btn.className = "btn btn-primary";
+    btn.textContent = "Start Payment";
+    btn.onclick = () => startPayment(o.id);
+    startPaymentArea.appendChild(btn);
+  }
+}
+
+/* build action controls by role */
+function buildActionControls(o){
+  actionControls.innerHTML = "";
+  // customer: approve special request, or cancel if pending
+  if (ROLE === "CUSTOMER" && o.customerId === user.id) {
+    if (o.status === "PENDING") {
+      appendAction("Cancel Order", async ()=> {
+        if (!confirm("Cancel order?")) return;
+        await callUpdateStatus(o.id, "CANCELLED");
+      }, "btn btn-outline");
+    }
+    if (o.status === "AWAITING_PAYMENT") {
+      appendAction("Start Payment", ()=> startPayment(o.id), "btn btn-primary");
+    }
+    if (o.status === "WAITING_CUSTOMER_APPROVAL") {
+      appendAction("Approve Special Request (Create Payment)", ()=> approveSpecialFlow(o.id), "btn btn-primary");
+      appendAction("Reject", ()=> alert("Reject path (implement per business rules)"), "btn btn-outline");
+    }
+  }
+
+  // vendor: respond to special request, update statuses
+  if (ROLE === "VENDOR" && o.vendorId === user.id) {
+    appendAction("Respond to Special Request (open form)", ()=> {
+      vendorRespondForm.style.display = "block";
+      vendorNote.focus();
+    }, "btn btn-primary");
+
+    // vendor can update to COOKING, READY_FOR_PICKUP, OUT_FOR_DELIVERY, COMPLETED, CANCELLED depending on current status
+    const transitions = allowedVendorTransitions(o.status);
+    transitions.forEach(t => {
+      appendAction(`Set ${t}`, ()=> callUpdateStatus(o.id, t), "btn btn-outline");
+    });
+  }
+
+  // admin: quick status change
+  if (ROLE === "ADMIN") {
+    appendAction("Set PAYMENT_CONFIRMED", ()=> callUpdateStatus(o.id, "PAYMENT_CONFIRMED"), "btn btn-outline");
+    appendAction("Set COMPLETED", ()=> callUpdateStatus(o.id, "COMPLETED"), "btn btn-outline");
+  }
+}
+
+/* helper to append action button */
+function appendAction(label, cb, cls="btn btn-outline"){
+  const b = document.createElement("button");
+  b.className = cls;
+  b.textContent = label;
+  b.onclick = async ()=> {
+    try {
+      b.disabled = true;
+      await cb();
+    } catch(err) {
+      console.error(err);
+      alert("Action failed (see console).");
+    } finally { b.disabled = false; }
+  };
+  actionControls.appendChild(b);
+}
+
+/* allowed vendor transitions minimal example */
+function allowedVendorTransitions(status){
+  const map = {
+    "PAYMENT_CONFIRMED": ["COOKING"],
+    "COOKING": ["READY_FOR_PICKUP"],
+    "READY_FOR_PICKUP": ["OUT_FOR_DELIVERY"],
+    "OUT_FOR_DELIVERY": ["COMPLETED"],
+    "PENDING": ["CANCELLED"],
+    "AWAITING_PAYMENT": ["CANCELLED"]
+  };
+  return map[status] || [];
+}
+
+/* call unified update endpoint */
+async function callUpdateStatus(orderId, newStatus){
+  try {
+    const body = { status: newStatus };
+    // your router path: router.patch("/vendor/order/:orderId/update-status", updateOrderStatus)
+    // it expects authorizeVendor for vendor routes — but you may have common route handling
+    // We'll call the endpoint you provided in earlier conversation
+    const url = `${ORDER_API}/vendor/order/${orderId}/update-status`;
+    const res = await axios.patch(url, body, { headers: authHeaders() });
+    alert(res.data?.message || "Status updated");
+    await fetchOrders();
+    if (SELECTED && SELECTED.id === orderId) await refreshSingle(orderId);
+  } catch (err) {
+    console.error("callUpdateStatus err:", err.response?.data || err);
+    alert(err.response?.data?.message || "Failed to update status");
+  }
+}
+
+/* vendor respond to special request endpoint
+   router.patch("/vendor/orders/:orderId/special-requests", authorizeVendor, vendorRespondToSpecialRequest);
+*/
+sendVendorRespond.addEventListener("click", async ()=>{
+  if (!SELECTED) return alert("No order selected");
+  const note = vendorNote.value.trim();
+  const extra = Number(vendorExtra.value || 0);
+  if (!note && (!extra || extra <=0)) {
+    if (!confirm("You're sending no note and no extra charge. Continue?")) return;
+  }
+  try {
+    const res = await axios.patch(`${ORDER_API}/vendor/orders/${SELECTED.id}/special-requests`, { vendorNote: note, extraCharge: extra || null }, { headers: authHeaders() });
+    alert(res.data?.message || "Response sent");
+    vendorNote.value = ""; vendorExtra.value = "";
+    await refreshSingle(SELECTED.id);
+  } catch (err) {
+    console.error("vendorRespond err:", err);
+    alert(err.response?.data?.message || "Failed to send response");
+  }
+});
+
+clearVendorRespond.addEventListener("click", ()=>{ vendorNote.value=""; vendorExtra.value=""; });
+
+/* customer approve special-request
+   router.patch("/customer/order/:orderId/approve/special-request", customerApproveOrderForSpecialRequest);
+*/
+approveSpecialBtn.addEventListener("click", async ()=>{
+  if (!SELECTED) return;
+  if (!confirm("Approve vendor's change and create/update payment (30 minute expiry)?")) return;
+  try {
+    const res = await axios.patch(`${ORDER_API}/customer/order/${SELECTED.id}/approve/special-request`, {}, { headers: authHeaders() });
+    alert(res.data?.message || "Approved — payment created/updated");
+    await refreshSingle(SELECTED.id);
+  } catch (err) {
+    console.error("approveSpecial err:", err);
+    alert(err.response?.data?.message || "Failed to approve");
+  }
+});
+
+rejectSpecialBtn.addEventListener("click", async ()=> {
+  if (!SELECTED) return;
+  if (!confirm("Reject vendor changes? This will notify the vendor.")) return;
+  // Your backend lacks a specific reject endpoint in the snippets; you can implement one.
+  alert("Reject flow is not implemented — implement on backend or use a message to vendor.");
+});
+
+/* start payment using /api/payments/start
+   Accepts { orderId, mobileSdk } and returns paymentUrl / reference etc.
+*/
+async function startPayment(orderId) {
+  try {
+    const payload = { orderId, mobileSdk: false };
+    const res = await axios.post(`${PAYMENT_API}/start`, payload, { headers: authHeaders() });
+    const data = res.data?.data || res.data;
+    // show returned data
+    const html = `
+      <div style="padding:10px;border-radius:8px;border:1px solid var(--border);margin-top:8px">
+        <div><strong>Payment started</strong></div>
+        <div class="small muted">Reference: ${data.reference || data.data?.reference || "—"}</div>
+        ${data.paymentUrl ? `<div style="margin-top:8px"><a href="${data.paymentUrl}" target="_blank" class="btn btn-primary">Open Checkout</a></div>` : ""}
+      </div>
+    `;
+    startPaymentArea.innerHTML = html;
+    // refresh order payments
+    await refreshSingle(orderId);
+  } catch (err) {
+    console.error("startPayment err:", err.response?.data || err);
+    alert(err.response?.data?.message || "Failed to start payment");
+  }
+}
+
+/* approveSpecialFlow - wrapper that calls customer approve (which already creates/updates payment),
+   then optionally calls startPayment if ready
+*/
+async function approveSpecialFlow(orderId){
+  try {
+    const res = await axios.patch(`${ORDER_API}/customer/order/${orderId}/approve/special-request`, {}, { headers: authHeaders() });
+    alert(res.data?.message || "Approved — payment created/updated");
+    await refreshSingle(orderId);
+
+    // Optionally start payment automatically by calling payments/start
+    if (confirm("Do you want to open checkout now?")) {
+      await startPayment(orderId);
+    }
+  } catch (err) {
+    console.error("approveSpecialFlow err:", err);
+    alert(err.response?.data?.message || "Failed to approve special request");
+  }
+}
+
+/* small convenience to fetch on load */
+fetchOrders();
+
+</script>
+</body>
+</html>
