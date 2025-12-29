@@ -4,7 +4,7 @@ import { paystack } from "../lib/axiosClient";
 import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
 import prisma from "../lib/prisma";
 import retry from "async-retry";
-import { generateReceipt } from "../utils/generate Receipt/generateReceipt";
+// import { generateReceipt } from "../utils/generate Receipt/generateReceipt";
 import {
   nowUtc,
   toUtc,
@@ -223,8 +223,8 @@ export const handleSuccessfulPayment = async (
 
         // 🧾 Generate receipt + record activity
         try {
-          const receipt = await generateReceipt(reference);
-          console.log(`[RECEIPT] ✅ Generated at ${receipt.pdfUrl}`);
+          // const receipt = await generateReceipt(reference);
+          // console.log(`[RECEIPT] ✅ Generated at ${receipt.pdfUrl}`);
         } catch (err: any) {
           console.error(
             `[RECEIPT] ❌ Failed to generate receipt: ${err.message}`
