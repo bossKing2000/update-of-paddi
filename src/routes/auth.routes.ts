@@ -20,9 +20,9 @@ router.post('/register',authRateLimiter,upload.single('avatarUrl'),registerValid
 //  Authenticate user and return access + refresh tokens
 //  access Public
 // router.post('/login',authRateLimiter,loginValidator,trackUserAction("LOGIN"),validateRequest,async (req: GeoRequest, res: Response) => {await login(req, res);});
-// router.post('/login',geoMiddleware,authRateLimiter,loginValidator,trackUserAction("LOGIN"),validateRequest,async (req: GeoRequest, res: Response) => {await login(req, res);});
+router.post('/login',geoMiddleware,authRateLimiter,loginValidator,trackUserAction("LOGIN"),validateRequest,async (req: GeoRequest, res: Response) => {await login(req, res);});
 
-router.post('/login',login );
+// router.post('/login',login );
 
 //  POST /logout
 //  Logs out user by clearing cookies or invalidating token
