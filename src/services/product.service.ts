@@ -2,7 +2,6 @@ import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { redisProducts, redisSearch, redisTotalViews, ShopCartRedis } from "../lib/redis";
 import { CACHE_KEYS } from "./redisCacheTiming";
-import { VendorCache } from "./vendorcacheService";
 
 // Fetch products with aggregate ratings
 export async function getProductsWithAggregates(

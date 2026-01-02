@@ -255,10 +255,46 @@ const foodImageUrls = [
   "https://images.unsplash.com/photo-1572802419224-296b0aeee0d9?w=400&h=300&fit=crop&auto=format&q=80"
 ];
 
+
+const foodVideoUrls = [
+      "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4", // 15s
+    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4", // 10s
+    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4", // 15s
+    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4", // 15s
+    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4", // 1
+        // Big Buck Bunny - various lengths
+    "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4",
+    "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_5s_1MB.mp4",
+    "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_3s_1MB.mp4",
+    "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_2s_1MB.mp4",
+    "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_1s_1MB.mp4",
+    
+   
+
+    "https://videos.pexels.com/video-files/855253/855253-sd_640_360_30fps.mp4", // 8s - Coffee
+
+
+
+
+      "https://videos.pexels.com/video-files/855253/855253-sd_640_360_30fps.mp4",
+    "https://videos.pexels.com/video-files/3303009/3303009-sd_640_360_25fps.mp4",
+    "https://videos.pexels.com/video-files/3120337/3120337-sd_640_360_30fps.mp4",
+    "https://videos.pexels.com/video-files/854967/854967-sd_640_360_30fps.mp4",
+    "https://videos.pexels.com/video-files/854964/854964-sd_640_360_30fps.mp4",
+    
+];
+
+
 function getRandomFoodImage(min: number = 1, max: number = 6): string[] {
   const count = faker.number.int({ min, max });
   return Array.from({ length: count }, () => faker.helpers.arrayElement(foodImageUrls));
 }
+
+function getRandomFoodVideo(min: number = 1, max: number = 6): string[] {
+  const count = faker.number.int({ min, max });
+  return Array.from({ length: count }, () => faker.helpers.arrayElement(foodVideoUrls));
+}
+
 
 // ==============================
 // Helper: Chunk arrays into smaller batches
@@ -296,7 +332,7 @@ async function main() {
   // CONFIGURABLE ENGAGEMENT PARAMETERS
   // ==============================
   const CUSTOMER_ENGAGEMENT = 0.8; // 60% of customers place orders
-  const VENDOR_ENGAGEMENT = 0.8;   // 70% of vendors have active products
+  const VENDOR_ENGAGEMENT = 0.7;   // 70% of vendors have active products
   const MAX_ORDERS_PER_CUSTOMER = { min: 5, max: 15};
   const ORDER_STATUS_PROBABILITIES = [
     { status: OrderStatus.COMPLETED, weight: 0.5 },
@@ -324,8 +360,8 @@ async function main() {
   // ==============================
   // 1️⃣ USERS (Vendors, Customers, Delivery)
   // ==============================
-  const totalVendors = 50;
-  const totalCustomers = 100;
+  const totalVendors = 150;
+  const totalCustomers = 200;
   const totalDeliveryGuys = 20;
   const usersData: Prisma.UserCreateManyInput[] = [];
 
@@ -410,7 +446,7 @@ async function main() {
     isOnline: faker.datatype.boolean(),
     latitude: faker.number.float({ min: 4.0, max: 10.0, fractionDigits: 6 }),
     longitude: faker.number.float({ min: 3.0, max: 6.9, fractionDigits: 6 }),
-    walletBalance: faker.number.float({ min: 0, max: 10000, fractionDigits: 2 }),
+    walletBalance: faker.number.float({ min: 0, max: 1000, fractionDigits: 2 }),
     lastSeenAt: faker.date.recent({ days: 3 }),
   }));
 
@@ -466,12 +502,12 @@ async function main() {
           id: productId,
           name: foodName,
           description: getRandomFoodDescription(foodName),
-          price: parseFloat(faker.commerce.price({ min: 1500, max: 10000 })),
+          price: parseFloat(faker.commerce.price({ min: 500, max: 5000 })),
           archived: false,
           category: faker.helpers.arrayElement(Object.values(Category)),
           vendorId: vendor.id,
           images: getRandomFoodImage(),
-          video: getRandomFoodImage(),
+          video: getRandomFoodVideo(),
           totalViews: faker.number.int({ min: 1, max: 15000 }),
         });
 
@@ -481,7 +517,7 @@ async function main() {
           optionData.push({
             productId,
             name: faker.commerce.productAdjective(),
-            price: parseFloat(faker.commerce.price({ min: 500, max: 1500 })),
+            price: parseFloat(faker.commerce.price({ min: 200, max: 1000 })),
           });
         }
 
@@ -509,7 +545,7 @@ async function main() {
         // });
 
           const goLiveAt = new Date();
-          const takeDownAt = new Date(Date.now() + 10 * 60 * 1000);
+          const takeDownAt = new Date(Date.now() + 30 * 60 * 1000);
           scheduleData.push({
             productId,
             goLiveAt,
@@ -640,7 +676,7 @@ console.log(`🛒 Created carts for ${cartCustomers.length} customers`);
       const orderItemsData: Prisma.OrderItemCreateManyInput[] = [];
 
       for (const product of orderProducts) {
-        const quantity = faker.number.int({ min: 1, max: 100 });
+        const quantity = faker.number.int({ min: 1, max: 50 });
         const subtotal = quantity * product.price;
         basePrice += subtotal;
 
@@ -654,7 +690,7 @@ console.log(`🛒 Created carts for ${cartCustomers.length} customers`);
         });
       }
 
-      const extraCharge = faker.number.float({ min: 100, max: 3000, fractionDigits: 2 });
+      const extraCharge = faker.number.float({ min: 100, max: 1000, fractionDigits: 2 });
       const totalPrice = basePrice + extraCharge;
       const orderStatus = pickWeighted(ORDER_STATUS_PROBABILITIES);
 

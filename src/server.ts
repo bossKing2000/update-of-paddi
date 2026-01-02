@@ -350,7 +350,7 @@ const startServer = async () => {
     // Start the job but don't wait for it - run in background
     const startupFixPromise = fixLiveStatusJob(true)
       .then(() => {
-        console.log('✅ Background product status check completed');
+        // console.log('✅ Background product status check completed');
       })
       .catch(err => {
         // Don't crash the server if this fails

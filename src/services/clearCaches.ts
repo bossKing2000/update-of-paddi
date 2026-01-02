@@ -59,9 +59,18 @@ export const clearProductCache = async (
     if (vendorId) {
       keysToDelete.push(
         `vendor:${vendorId}:products`,
-        `vendor:${vendorId}:products:available`
+        `vendor:${vendorId}:products:available`,
+        `vendor:${vendorId}:dashboardSummary`,
+        `products:live`,
       );
+        // Paginated vendor product lists
+      await scanAndDelete(redisProducts, [
+        `vendor:${vendorId}:products:page:`,
+      ]);
     }
+
+    
+    
 
     // ----- Global product keys -----
     keysToDelete.push("products:all", "products:featured");

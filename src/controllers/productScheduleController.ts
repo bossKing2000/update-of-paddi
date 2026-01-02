@@ -100,14 +100,9 @@ export const goLive = async (req: AuthRequest, res: Response) => {
       // 🚀 ALWAYS clear cache immediately after DB change
 await Promise.all([
   clearProductCache(productId, req.user.id),
-
-  // Vendor product list
-  redisProducts.del(`vendor:${req.user.id}:products`),
-
-  // Public feeds / search / category
-  redisProducts.del(`products:live`),
-  redisProducts.del(`products:category:*`),
 ]);
+
+  
 
     }
 

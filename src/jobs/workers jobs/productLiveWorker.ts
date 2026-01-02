@@ -43,47 +43,9 @@ export const productLiveWorker = new Worker(
       console.log(`[productLiveWorker] ✅ Product ${product.name} is now live`);
 
       // ✅ 2️⃣ Clear caches
-      await clearProductCache(product.id);
+      await clearProductCache(product.id, vendorId);
       await clearProductFromCarts(product.id);
 
-      const cacheKeysToDelete = [
-        `product:${productId}:detail`,
-        `product:${productId}`,
-        `api:product:${productId}`,
-        `api:/api/product/${productId}`,
-        `vendor:${vendorId}:products`,
-        `vendor:${vendorId}:products:available`,
-        `products:all`,
-        `products:featured`,
-        ...(product.category ? [`category:${product.category}:products`] : []),
-      ];
-
-      await Promise.allSettled(cacheKeysToDelete.map(async key => {
-        try { await redisProducts.del(key); }
-        catch (err) { console.warn(`[CACHE] Failed to delete key ${key}:`, err); }
-      }));
-
-      // ✅ 3️⃣ Clear all vendor product page caches using scanIterator
-      try {
-        for await (const key of redisProducts.scanIterator({ MATCH: `vendor:${vendorId}:products:page:*`, COUNT: 50 })) {
-          await redisProducts.del(key);
-        }
-        console.log(`[CACHE] Cleared vendor product page caches for vendor ${vendorId}`);
-      } catch (err) {
-        console.warn('[CACHE] Failed to clear vendor product page caches:', err);
-      }
-
-      // ✅ 4️⃣ Pattern-based deletion (optional)
-      const patterns = [`products:*`, `search:*`, `api:products:*`, `api:search:*`, `vendor:*:products*`, `category:*:products`];
-      try {
-        for (const pattern of patterns) {
-          for await (const key of redisProducts.scanIterator({ MATCH: pattern, COUNT: 50 })) {
-            await redisProducts.del(key);
-          }
-        }
-      } catch (err) {
-        console.warn('[CACHE] Pattern-based cache deletion failed:', err);
-      }
 
       // 5️⃣ Notify users
       const [followers, cartUsers] = await Promise.all([

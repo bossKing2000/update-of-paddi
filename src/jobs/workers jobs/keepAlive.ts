@@ -39,10 +39,9 @@ async function pingServer() {
  * 🔁 Cron Job — runs every 10 minutes
  */
 export function startKeepAliveJob() {
-  cron.schedule("*/10 * * * *", async () => {
+  cron.schedule("*/10 * * * * ", async () => {
     await pingServer();
     console.log("[KeepAlive] 🕒 Next ping in 10 minutes.");
   });
-
   console.log("[KeepAlive] 🚀 Cron job started for keep-alive pings.");
 }
