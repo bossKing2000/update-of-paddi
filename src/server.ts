@@ -32,7 +32,7 @@ import vendorFollowRoutes from './routes/vendorFollowRoutes';
 // Cron / In-memory Jobs
 // ------------------------------
 import { updatePopularityScores, cancelPopularityJob, resetPopularityJob } from './jobs/workers jobs/updatePopularityScore';
-import { startKeepAliveJob } from './jobs/workers jobs/keepAlive';
+import { startKeepAlive} from './jobs/workers jobs/keepAlive';
 import "./jobs/node-cron/runJob"; // ✅ Automatically starts cron jobs
 
 
@@ -380,10 +380,9 @@ const startServer = async () => {
       console.log(`🚀 Server running at http://localhost:${config.port}`);
       
       // Delay cron job start slightly to let server stabilize
-      setTimeout(() => {
-        startKeepAliveJob();
-        console.log('⏰ Cron jobs started');
-      }, 5000); // 5 second delay
+      startKeepAlive();
+
+
     });
 
   } catch (error) { 
