@@ -35,7 +35,7 @@ cron.schedule("*/50 * * * * *", async () => {
  * Runs every 1 minute to ensure product `isLive` status matches schedule.
  */
 // In your cron setup
-cron.schedule('*/40 * * * * *', () => {
+cron.schedule('*/5 * * * * ', () => {
   console.log('⏰ Running scheduled product status fix...');
   fixLiveStatusJob(false)
     .then(result => {

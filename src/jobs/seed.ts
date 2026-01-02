@@ -331,8 +331,8 @@ async function main() {
   // ==============================
   // CONFIGURABLE ENGAGEMENT PARAMETERS
   // ==============================
-  const CUSTOMER_ENGAGEMENT = 0.8; // 60% of customers place orders
-  const VENDOR_ENGAGEMENT = 0.7;   // 70% of vendors have active products
+  const CUSTOMER_ENGAGEMENT = 0.2; // 60% of customers place orders
+  const VENDOR_ENGAGEMENT = 0.5;   // 70% of vendors have active products
   const MAX_ORDERS_PER_CUSTOMER = { min: 5, max: 15};
   const ORDER_STATUS_PROBABILITIES = [
     { status: OrderStatus.COMPLETED, weight: 0.5 },
@@ -341,9 +341,9 @@ async function main() {
     { status: OrderStatus.PENDING, weight: 0.15 },
   ];
   const PAYMENT_STATUS_PROBABILITIES = [
-    { status: PaymentStatus.SUCCESS, weight: 0.6 },
-    { status: PaymentStatus.PENDING, weight: 0.3 },
-    { status: PaymentStatus.FAILED, weight: 0.2 },
+    { status: PaymentStatus.SUCCESS, weight: 0.5 },
+    { status: PaymentStatus.PENDING, weight: 0.6 },
+    { status: PaymentStatus.FAILED, weight: 0.3 },
     { status: PaymentStatus.EXPIRED, weight: 0.1 },
   ];
 
@@ -360,7 +360,7 @@ async function main() {
   // ==============================
   // 1️⃣ USERS (Vendors, Customers, Delivery)
   // ==============================
-  const totalVendors = 150;
+  const totalVendors = 200;
   const totalCustomers = 200;
   const totalDeliveryGuys = 20;
   const usersData: Prisma.UserCreateManyInput[] = [];
@@ -502,13 +502,13 @@ async function main() {
           id: productId,
           name: foodName,
           description: getRandomFoodDescription(foodName),
-          price: parseFloat(faker.commerce.price({ min: 500, max: 5000 })),
+          price: parseFloat(faker.commerce.price({ min: 500, max: 2500 })),
           archived: false,
           category: faker.helpers.arrayElement(Object.values(Category)),
           vendorId: vendor.id,
           images: getRandomFoodImage(),
           video: getRandomFoodVideo(),
-          totalViews: faker.number.int({ min: 1, max: 15000 }),
+          totalViews: faker.number.int({ min: 1, max: 10000 }),
         });
 
         // Options
@@ -517,7 +517,7 @@ async function main() {
           optionData.push({
             productId,
             name: faker.commerce.productAdjective(),
-            price: parseFloat(faker.commerce.price({ min: 200, max: 1000 })),
+            price: parseFloat(faker.commerce.price({ min: 100, max: 500 })),
           });
         }
 
@@ -545,7 +545,7 @@ async function main() {
         // });
 
           const goLiveAt = new Date();
-          const takeDownAt = new Date(Date.now() + 30 * 60 * 1000);
+          const takeDownAt = new Date(Date.now() + 50 * 60 * 1000);
           scheduleData.push({
             productId,
             goLiveAt,
@@ -578,7 +578,7 @@ async function main() {
   // --------------------------
 // 8️⃣ Customer Carts
 // --------------------------
-const cartCustomers = faker.helpers.arrayElements(allCustomers, Math.floor(allCustomers.length * 0.6)); // 50% of customers
+const cartCustomers = faker.helpers.arrayElements(allCustomers, Math.floor(allCustomers.length * 0.3)); // 50% of customers
 const liveProducts = await prisma.product.findMany({ where: { archived: false, isLive: true } });
 
 for (const customer of cartCustomers) {
@@ -592,12 +592,12 @@ for (const customer of cartCustomers) {
   });
 
   // 2️⃣ Pick some products for this cart
-  const cartItemsCount = faker.number.int({ min: 1, max: 5 });
+  const cartItemsCount = faker.number.int({ min: 0, max: 5 });
   const cartProducts = faker.helpers.arrayElements(liveProducts, cartItemsCount);
 
   let basePrice = 0;
   const cartData: Prisma.CartItemCreateManyInput[] = cartProducts.map((product) => {
-    const quantity = faker.number.int({ min: 1, max: 10 });
+    const quantity = faker.number.int({ min: 1, max: 5 });
     const unitPrice = product.price;
     const subtotal = quantity * unitPrice;
     basePrice += subtotal;
@@ -638,7 +638,7 @@ console.log(`🛒 Created carts for ${cartCustomers.length} customers`);
       vendorReviewsData.push({
         vendorId: vendor.id,
         customerId: customer.id,
-        rating: faker.number.int({ min: 1, max: 5 }),
+        rating: faker.number.int({ min: 0, max: 5 }),
         comment: faker.lorem.sentence(),
       });
     }
@@ -676,7 +676,7 @@ console.log(`🛒 Created carts for ${cartCustomers.length} customers`);
       const orderItemsData: Prisma.OrderItemCreateManyInput[] = [];
 
       for (const product of orderProducts) {
-        const quantity = faker.number.int({ min: 1, max: 50 });
+        const quantity = faker.number.int({ min: 1, max: 5 });
         const subtotal = quantity * product.price;
         basePrice += subtotal;
 
