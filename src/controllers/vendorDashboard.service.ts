@@ -888,6 +888,7 @@ import { redisProducts } from "../lib/redis";
 
 const prisma = new PrismaClient();
 
+
 type Period = "thisWeek" | "lastWeek" | "lastMonth";
 
 export class VendorDashboardService {
