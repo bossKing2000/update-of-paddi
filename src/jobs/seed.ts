@@ -331,9 +331,9 @@ async function main() {
   // ==============================
   // CONFIGURABLE ENGAGEMENT PARAMETERS
   // ==============================
-  const CUSTOMER_ENGAGEMENT = 0.2; // 60% of customers place orders
+  const CUSTOMER_ENGAGEMENT = 0.7; // 60% of customers place orders
   const VENDOR_ENGAGEMENT = 0.5;   // 70% of vendors have active products
-  const MAX_ORDERS_PER_CUSTOMER = { min: 5, max: 15};
+  const MAX_ORDERS_PER_CUSTOMER = { min: 0, max: 5};
   const ORDER_STATUS_PROBABILITIES = [
     { status: OrderStatus.COMPLETED, weight: 0.5 },
     { status: OrderStatus.CANCELLED, weight: 0.2 },
@@ -361,7 +361,7 @@ async function main() {
   // 1️⃣ USERS (Vendors, Customers, Delivery)
   // ==============================
   const totalVendors = 200;
-  const totalCustomers = 200;
+  const totalCustomers = 500;
   const totalDeliveryGuys = 20;
   const usersData: Prisma.UserCreateManyInput[] = [];
 
@@ -502,13 +502,13 @@ async function main() {
           id: productId,
           name: foodName,
           description: getRandomFoodDescription(foodName),
-          price: parseFloat(faker.commerce.price({ min: 500, max: 2500 })),
+          price: parseFloat(faker.commerce.price({ min: 200, max: 1500 })),
           archived: false,
           category: faker.helpers.arrayElement(Object.values(Category)),
           vendorId: vendor.id,
           images: getRandomFoodImage(),
           video: getRandomFoodVideo(),
-          totalViews: faker.number.int({ min: 1, max: 10000 }),
+          totalViews: faker.number.int({ min: 0, max: 1000 }),
         });
 
         // Options
@@ -545,13 +545,13 @@ async function main() {
         // });
 
           const goLiveAt = new Date();
-          const takeDownAt = new Date(Date.now() + 50 * 60 * 1000);
+          const takeDownAt = new Date(Date.now() + 90 * 60 * 1000);
           scheduleData.push({
             productId,
             goLiveAt,
             takeDownAt,
             isLive: true,
-            graceMinutes: faker.number.int({ min: 0, max: 30 }),
+            graceMinutes: faker.number.int({ min: 0, max: 50 }),
           });
 
 
@@ -690,7 +690,7 @@ console.log(`🛒 Created carts for ${cartCustomers.length} customers`);
         });
       }
 
-      const extraCharge = faker.number.float({ min: 100, max: 1000, fractionDigits: 2 });
+      const extraCharge = faker.number.float({ min: 10, max: 5500, fractionDigits: 2 });
       const totalPrice = basePrice + extraCharge;
       const orderStatus = pickWeighted(ORDER_STATUS_PROBABILITIES);
 
