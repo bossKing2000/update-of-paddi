@@ -20,7 +20,7 @@ export async function generateReceipt(paymentId: string) {
           items: { include: { product: true } },
           vendor: true,
         },
-      },
+      }, 
       user: true,
     },
   });
