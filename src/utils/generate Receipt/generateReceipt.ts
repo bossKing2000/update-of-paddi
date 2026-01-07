@@ -162,7 +162,7 @@ export async function generateReceipt(paymentId: string) {
   doc.moveDown(2);
 
   if (payment.order?.items?.length) {
-    payment.order.items.forEach((item, i) => {
+    payment.order.items.forEach((item: { product: { name: string; }; unitPrice: number; quantity: number; }, i: number) => {
       const productName = item.product?.name || "Unnamed Product";
       const subtotal = item.unitPrice * item.quantity;
 
