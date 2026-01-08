@@ -190,6 +190,7 @@ export const handleSuccessfulPayment = async (
               where: { id: order.id },
               data: {
                 status: OrderStatus.PAYMENT_CONFIRMED,
+                paymentStatus: "SUCCESS", // ← FIXED: Added paymentStatus
                 paidAt: now,
               },
             }),
@@ -215,6 +216,7 @@ export const handleSuccessfulPayment = async (
               where: { id: order.id },
               data: {
                 status: OrderStatus.PAYMENT_CONFIRMED,
+                paymentStatus: "SUCCESS", // ← FIXED: Added paymentStatus
                 paidAt: now,
               },
             }),
