@@ -8,7 +8,7 @@ import { fixLiveStatusJob } from "../workers jobs/fixLiveStatusJob";
  * Runs every 5 minutes to cancel stale or unpaid orders.
  */
 
-cron.schedule("*/50 * * * * *", async () => {
+cron.schedule("*/3 * * * * ", async () => {
   try {
     await runOrderCleanupJob(); 
   } catch (err) {
@@ -21,7 +21,7 @@ cron.schedule("*/50 * * * * *", async () => {
  * 💳 Verify Pending Payments Job
  * Runs every 1 minute to auto-verify stuck or delayed transactions.s
  */
-cron.schedule("*/5 * * * * *", async () => {
+cron.schedule("*/1 * * * * ", async () => {
   try {
     await verifyPendingPayments();
   } catch (err) {
