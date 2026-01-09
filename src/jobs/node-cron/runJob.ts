@@ -21,13 +21,13 @@ cron.schedule("*/50 * * * * *", async () => {
  * 💳 Verify Pending Payments Job
  * Runs every 1 minute to auto-verify stuck or delayed transactions.s
  */
-cron.schedule("*/5 * * * * *", async () => {
-  try {
-    await verifyPendingPayments();
-  } catch (err) {
-    console.error("[CRON] Verify pending payments failed:", err);
-  }
-});
+// cron.schedule("*/5 * * * * *", async () => {
+//   try {
+//     await verifyPendingPayments();
+//   } catch (err) {
+//     console.error("[CRON] Verify pending payments failed:", err);
+//   }
+// });
 
 
 /**
