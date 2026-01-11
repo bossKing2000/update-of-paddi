@@ -18,7 +18,7 @@ const config_1 = __importDefault(require("./config/config"));
 const redis_1 = require("./lib/redis");
 const setupSearch_1 = require("./lib/setupSearch");
 const error_middleware_1 = require("./middlewares/error.middleware");
-const paymentController_1 = require("./controllers/paymentController");
+// import { webhookHandler } from './controllers/paymentController';
 const socket_1 = require("./socket");
 const auth_routes_1 = __importDefault(require("./routes/auth.routes"));
 const productRoutes_1 = __importDefault(require("./routes/productRoutes"));
@@ -46,6 +46,7 @@ const vendorDashboard_routes_1 = __importDefault(require("./routes/vendorDashboa
 const aiRouter_1 = __importDefault(require("./routes/aiRouter"));
 const backfillThumbnails_1 = require("./jobs/sripts/backfillThumbnails");
 const fixLiveStatusJob_1 = require("./jobs/workers jobs/fixLiveStatusJob");
+const webhook_1 = require("./controllers/webhook");
 dotenv_1.default.config();
 const prisma = new client_1.PrismaClient();
 const app = (0, express_1.default)();
@@ -55,7 +56,8 @@ let jobRunning = false; // only for popularity job
 // Middleware & setup
 // ------------------------------
 // Paystack Webhook — must come BEFORE express.json()
-app.post('/api/payments/webhook', express_1.default.raw({ type: 'application/json' }), paymentController_1.webhookHandler);
+// app.post('/api/payments/webhook', express.raw({ type: 'application/json' }), webhookHandler);
+app.post('/api/payments/webhook', express_1.default.raw({ type: 'application/json' }), webhook_1.paystackWebhookHandler);
 // Ensure uploads folder exists
 const uploadDir = path_1.default.join(__dirname, '../uploads');
 if (!fs_1.default.existsSync(uploadDir))

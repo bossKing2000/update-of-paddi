@@ -14,7 +14,7 @@ import config from './config/config';
 import { ensureRedisReady, redisProducts } from './lib/redis';
 import { setupSearch } from './lib/setupSearch';
 import { errorHandler } from './middlewares/error.middleware';
-import { webhookHandler } from './controllers/paymentController';
+// import { webhookHandler } from './controllers/paymentController';
 import { initSocket } from './socket';
 
 import authRoutes from './routes/auth.routes';
@@ -47,6 +47,7 @@ import vendorDashboardRoutes from './routes/vendorDashboard.routes';
 import aiRouter from './routes/aiRouter';
 import { ProductImageService } from './jobs/sripts/backfillThumbnails';
 import { fixLiveStatusJob } from './jobs/workers jobs/fixLiveStatusJob';
+import { paystackWebhookHandler } from './controllers/webhook';
 
 
 
@@ -66,8 +67,8 @@ let jobRunning = false; // only for popularity job
 // ------------------------------
 
 // Paystack Webhook — must come BEFORE express.json()
-app.post('/api/payments/webhook', express.raw({ type: 'application/json' }), webhookHandler);
-
+// app.post('/api/payments/webhook', express.raw({ type: 'application/json' }), webhookHandler);
+app.post('/api/payments/webhook', express.raw({ type: 'application/json' }), paystackWebhookHandler);
 // Ensure uploads folder exists
 const uploadDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });

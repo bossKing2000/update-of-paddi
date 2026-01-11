@@ -11,7 +11,7 @@ const fixLiveStatusJob_1 = require("../workers jobs/fixLiveStatusJob");
  * 🧹 Order Cleanup Job
  * Runs every 5 minutes to cancel stale or unpaid orders.
  */
-node_cron_1.default.schedule("*/50 * * * * *", async () => {
+node_cron_1.default.schedule("*/3 * * * * ", async () => {
     try {
         await (0, orderCleanupJob_1.runOrderCleanupJob)();
     }
@@ -23,7 +23,7 @@ node_cron_1.default.schedule("*/50 * * * * *", async () => {
  * 💳 Verify Pending Payments Job
  * Runs every 1 minute to auto-verify stuck or delayed transactions.s
  */
-node_cron_1.default.schedule("*/50 * * * * *", async () => {
+node_cron_1.default.schedule("*/1 * * * * ", async () => {
     try {
         await (0, verifyPendingPayments_1.verifyPendingPayments)();
     }

@@ -172,384 +172,230 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
 };
 
 
-const paystackWebhookSchema = z.object({
-  event: z.string(),
-  data: z.object({
-    reference: z.string(),
-    amount: z.number(), // in kobo
-    channel: z.string().optional(),
-    metadata: z.object({
-      orderId: z.string(),
-      userId: z.string(),
-    }),
-    authorization: z.object({
-      authorization_code: z.string(),
-      last4: z.string(),
-      brand: z.string(),
-      reusable: z.boolean(),
-      channel: z.string().optional(),
-    }).optional()
-  }),
-});
+// const paystackWebhookSchema = z.object({
+//   event: z.string(),
+//   data: z.object({
+//     reference: z.string(),
+//     amount: z.number(), // in kobo
+//     channel: z.string().optional(),
+//     metadata: z.object({
+//       orderId: z.string(),
+//       userId: z.string(),
+//     }),
+//     authorization: z.object({
+//       authorization_code: z.string(),
+//       last4: z.string(),
+//       brand: z.string(),
+//       reusable: z.boolean(),
+//       channel: z.string().optional(),
+//     }).optional()
+//   }),
+// });
 
-function validatePaystackSignature(rawBody: Buffer, signature: string | undefined): boolean {
-  if (!signature) return false;
+// function validatePaystackSignature(rawBody: Buffer, signature: string | undefined): boolean {
+//   if (!signature) return false;
 
-  const expected = crypto
-    .createHmac('sha512', config.paystackSecret)
-    .update(rawBody)
-    .digest('hex');
+//   const expected = crypto
+//     .createHmac('sha512', config.paystackSecret)
+//     .update(rawBody)
+//     .digest('hex');
 
-  return signature === expected;
-}
+//   return signature === expected;
+// }
 
-// // ✅ Updated Paystack Webhook Handler (Production-Grade)
-// export const webhookHandler = async (req: Request, res: Response) => {
-//   try {
-//     // 🧾 1️⃣ Validate raw body & signature
-//     const rawBody = req.body;
-//     if (!Buffer.isBuffer(rawBody)) {
-//       console.error("[WEBHOOK] ❌ Raw body must be a Buffer.");
-//       return res.status(400).send("Invalid body format");
-//     }
+// // export const webhookHandler = async (req: Request, res: Response) => {
+// //   try {
+// //     // 🧾 1️⃣ Validate raw body & signature
+// //     const rawBody = req.body;
+// //     if (!Buffer.isBuffer(rawBody)) {
+// //       console.error("[WEBHOOK] ❌ Raw body must be a Buffer.");
+// //       return res.status(400).send("Invalid body format");
+// //     }
 
-//     const signature = req.headers["x-paystack-signature"] as string | undefined;
-//     if (!validatePaystackSignature(rawBody, signature)) {
-//       console.warn("[WEBHOOK] ❌ Invalid or missing Paystack signature.");
-//       return res.status(401).send("Unauthorized: Invalid signature");
-//     }
+// //     const signature = req.headers["x-paystack-signature"] as string | undefined;
+// //     if (!validatePaystackSignature(rawBody, signature)) {
+// //       console.warn("[WEBHOOK] ❌ Invalid or missing Paystack signature.");
+// //       return res.status(401).send("Unauthorized: Invalid signature");
+// //     }
 
-//     // 📦 2️⃣ Parse and validate payload
-//     const eventPayload = JSON.parse(rawBody.toString());
-//     const parsed = paystackWebhookSchema.safeParse(eventPayload);
-//     if (!parsed.success) {
-//       console.error("[WEBHOOK] ❌ Invalid event structure:", parsed.error.format());
-//       return res.status(400).send("Invalid payload structure");
-//     }
+// //     // 📦 2️⃣ Parse and validate payload
+// //     const eventPayload = JSON.parse(rawBody.toString());
+// //     const parsed = paystackWebhookSchema.safeParse(eventPayload);
+// //     if (!parsed.success) {
+// //       console.error("[WEBHOOK] ❌ Invalid event structure:", parsed.error.format());
+// //       return res.status(400).send("Invalid payload structure");
+// //     }
 
-//     const { event, data } = parsed.data;
-//     if (event !== "charge.success") {
-//       console.log(`[WEBHOOK] ℹ️ Ignored event: ${event}`);
-//       return res.sendStatus(200);
-//     }
+// //     const { event, data } = parsed.data;
+// //     if (event !== "charge.success") {
+// //       console.log(`[WEBHOOK] ℹ️ Ignored event: ${event}`);
+// //       return res.sendStatus(200);
+// //     }
 
-//     const { reference, amount, metadata, authorization } = data;
-//     const now = nowUtc(); // ✅ Always UTC
+// //     const { reference, amount, metadata, authorization } = data;
+// //     const now = nowUtc(); // ✅ Always UTC
 
-//     // 💳 3️⃣ Save reusable card for returning customers
-//     if (authorization?.reusable && metadata?.userId) {
-//       try {
-//         await prisma.userPaymentMethod.upsert({
-//           where: { cardToken: authorization.authorization_code },
-//           create: {
-//             userId: metadata.userId,
-//             cardToken: authorization.authorization_code,
-//             last4: authorization.last4,
-//             brand: authorization.brand.toLowerCase(),
-//             isDefault: false,
-//           },
-//           update: { updatedAt: now },
-//         });
-//       } catch (err) {
-//         console.error("[WEBHOOK] ⚠️ Failed to save card:", err);
-//       }
-//     }
+// //     // 💳 3️⃣ Save reusable card for returning customers
+// //     if (authorization?.reusable && metadata?.userId) {
+// //       try {
+// //         await prisma.userPaymentMethod.upsert({
+// //           where: { cardToken: authorization.authorization_code },
+// //           create: {
+// //             userId: metadata.userId,
+// //             cardToken: authorization.authorization_code,
+// //             last4: authorization.last4,
+// //             brand: authorization.brand.toLowerCase(),
+// //             isDefault: false,
+// //           },
+// //           update: { updatedAt: now },
+// //         });
+// //       } catch (err) {
+// //         console.error("[WEBHOOK] ⚠️ Failed to save card:", err);
+// //       }
+// //     }
 
-//     // 🧾 4️⃣ Find related payment and order
-//     const payment = await prisma.payment.findUnique({
-//       where: { reference },
-//       include: {
-//         order: {
-//           select: {
-//             id: true,
-//             customerId: true,
-//             vendorId: true,
-//             totalPrice: true,
-//             status: true,
-//             protectedUntil: true,
-//           },
-//         },
-//       },
-//     });
+// //     // 🧾 4️⃣ Find related payment and order
+// //     const payment = await prisma.payment.findUnique({
+// //       where: { reference },
+// //       include: {
+// //         order: {
+// //           select: {
+// //             id: true,
+// //             customerId: true,
+// //             vendorId: true,
+// //             totalPrice: true,
+// //             status: true,
+// //             paymentStatus: true, // Added to check paymentStatus field
+// //             protectedUntil: true,
+// //           },
+// //         },
+// //       },
+// //     });
 
-//     if (!payment || !payment.order) {
-//       console.error(`[WEBHOOK] ❌ Payment or related order not found for ref: ${reference}`);
-//       return res.status(404).send("Payment or order not found");
-//     }
+// //     if (!payment || !payment.order) {
+// //       console.error(`[WEBHOOK] ❌ Payment or related order not found for ref: ${reference}`);
+// //       return res.status(404).send("Payment or order not found");
+// //     }
 
-//     const order = payment.order;
-//     const amountInNaira = amount / 100;
+// //     const order = payment.order;
+// //     const amountInNaira = amount / 100;
 
-//     // 🧍 5️⃣ Verify customer consistency
-//     if (order.customerId !== metadata.userId) {
-//       console.warn(`[WEBHOOK] ⚠️ Customer mismatch for ${reference}`);
-//       return res.status(400).send("Customer ID mismatch");
-//     }
+// //     // 🧍 5️⃣ Verify customer consistency
+// //     if (order.customerId !== metadata.userId) {
+// //       console.warn(`[WEBHOOK] ⚠️ Customer mismatch for ${reference}`);
+// //       return res.status(400).send("Customer ID mismatch");
+// //     }
 
-//     // 💰 6️⃣ Validate amount correctness
-//     if (Math.abs(amountInNaira - order.totalPrice) > 1) {
-//       await prisma.payment.update({
-//         where: { reference },
-//         data: { status: "AMOUNT_MISMATCH", updatedAt: now },
-//       });
-//       return res.status(400).send("Payment amount mismatch");
-//     }
+// //     // 💰 6️⃣ Validate amount correctness
+// //     if (Math.abs(amountInNaira - order.totalPrice) > 1) {
+// //       await prisma.payment.update({
+// //         where: { reference },
+// //         data: { status: "AMOUNT_MISMATCH", updatedAt: now },
+// //       });
+// //       return res.status(400).send("Payment amount mismatch");
+// //     }
 
-//     // 🕒 7️⃣ Check timing safety (using UTC comparisons)
-//     const protectedUntilUtc = order.protectedUntil ? toUtc(order.protectedUntil) : null;
-//     const expiresAtUtc = payment.expiresAt ? toUtc(payment.expiresAt) : null;
+// //     // 🕒 7️⃣ Check timing safety (using UTC comparisons)
+// //     const protectedUntilUtc = order.protectedUntil ? toUtc(order.protectedUntil) : null;
+// //     const expiresAtUtc = payment.expiresAt ? toUtc(payment.expiresAt) : null;
 
-//     const isWithinProtection = protectedUntilUtc ? isBeforeUtc(now, protectedUntilUtc) : false;
-//     const isBeforeExpiry = expiresAtUtc ? isBeforeUtc(now, expiresAtUtc) : false;
+// //     const isWithinProtection = protectedUntilUtc ? isBeforeUtc(now, protectedUntilUtc) : false;
+// //     const isBeforeExpiry = expiresAtUtc ? isBeforeUtc(now, expiresAtUtc) : false;
 
-//     if (!isWithinProtection && !isBeforeExpiry) {
-//       console.warn(
-//         `[WEBHOOK] ⚠️ Late payment ${reference} — outside both protection & expiry windows.`
-//       );
+// //     if (!isWithinProtection && !isBeforeExpiry) {
+// //       console.warn(
+// //         `[WEBHOOK] ⚠️ Late payment ${reference} — outside both protection & expiry windows.`
+// //       );
 
-//       await prisma.payment.update({
-//         where: { reference },
-//         data: { status: "EXPIRED", updatedAt: now },
-//       });
+// //       await prisma.payment.update({
+// //         where: { reference },
+// //         data: { status: "EXPIRED", updatedAt: now },
+// //       });
 
-//       if (order.status === "AWAITING_PAYMENT") {
-//         await prisma.order.update({
-//           where: { id: order.id },
-//           data: {
-//             status: "CANCELLED_UNPAID",
-//             cancellationReason: "LATE_PAYMENT",
-//             cancelledAt: now,
-//           },
-//         });
-//       }
+// //       // FIXED: Allow more statuses to be cancelled for late payment
+// //       const cancellableStatuses = ["AWAITING_PAYMENT", "PENDING", "CREATED"];
+// //       if (cancellableStatuses.includes(order.status)) {
+// //         await prisma.order.update({
+// //           where: { id: order.id },
+// //           data: {
+// //             status: "CANCELLED_UNPAID",
+// //             cancellationReason: "LATE_PAYMENT",
+// //             cancelledAt: now,
+// //           },
+// //         });
+// //       }
 
-//       return res.status(200).send("Ignored: payment came after expiry");
-//     }
+// //       return res.status(200).send("Ignored: payment came after expiry");
+// //     }
 
-//     // ✅ 8️⃣ Mark payment as successful
-//     await prisma.payment.update({
-//       where: { reference },
-//       data: {
-//         status: "SUCCESS",
-//         completedAt: now,
-//         paystackData: data,
-//         updatedAt: now,
-//       },
-//     });
+// //     // ✅ 8️⃣ Mark payment as successful - Use transaction for consistency
+// //     await prisma.$transaction(async (tx) => {
+// //       // Update payment
+// //       await tx.payment.update({
+// //         where: { reference },
+// //         data: {
+// //           status: "SUCCESS",
+// //           completedAt: now,
+// //           paystackData: data,
+// //           updatedAt: now,
+// //         },
+// //       });
 
-//     // ✅ 9️⃣ Update order status safely
-//     if (order.status === "AWAITING_PAYMENT") {
-//       await prisma.order.update({
-//         where: { id: order.id },
-//         data: {
-//           status: "PAYMENT_CONFIRMED",
-//           paidAt: now,
-//         },
-//       });
-//     }
-
-
-//     console.log(
-//       `[WEBHOOK] ✅ Payment ${reference} confirmed successfully for Order ${order.id}. (Protected=${isWithinProtection})`
-//     );
-
-//     return res.sendStatus(200);
-//   } catch (err: any) {
-//     console.error("[WEBHOOK] ❌ Server error:", err?.message || err);
-//     return res.status(500).send("Internal webhook error");
-//   }
-// };
-
-// ✅ Updated Paystack Webhook Handler (Production-Grade)
-export const webhookHandler = async (req: Request, res: Response) => {
-  try {
-    // 🧾 1️⃣ Validate raw body & signature
-    const rawBody = req.body;
-    if (!Buffer.isBuffer(rawBody)) {
-      console.error("[WEBHOOK] ❌ Raw body must be a Buffer.");
-      return res.status(400).send("Invalid body format");
-    }
-
-    const signature = req.headers["x-paystack-signature"] as string | undefined;
-    if (!validatePaystackSignature(rawBody, signature)) {
-      console.warn("[WEBHOOK] ❌ Invalid or missing Paystack signature.");
-      return res.status(401).send("Unauthorized: Invalid signature");
-    }
-
-    // 📦 2️⃣ Parse and validate payload
-    const eventPayload = JSON.parse(rawBody.toString());
-    const parsed = paystackWebhookSchema.safeParse(eventPayload);
-    if (!parsed.success) {
-      console.error("[WEBHOOK] ❌ Invalid event structure:", parsed.error.format());
-      return res.status(400).send("Invalid payload structure");
-    }
-
-    const { event, data } = parsed.data;
-    if (event !== "charge.success") {
-      console.log(`[WEBHOOK] ℹ️ Ignored event: ${event}`);
-      return res.sendStatus(200);
-    }
-
-    const { reference, amount, metadata, authorization } = data;
-    const now = nowUtc(); // ✅ Always UTC
-
-    // 💳 3️⃣ Save reusable card for returning customers
-    if (authorization?.reusable && metadata?.userId) {
-      try {
-        await prisma.userPaymentMethod.upsert({
-          where: { cardToken: authorization.authorization_code },
-          create: {
-            userId: metadata.userId,
-            cardToken: authorization.authorization_code,
-            last4: authorization.last4,
-            brand: authorization.brand.toLowerCase(),
-            isDefault: false,
-          },
-          update: { updatedAt: now },
-        });
-      } catch (err) {
-        console.error("[WEBHOOK] ⚠️ Failed to save card:", err);
-      }
-    }
-
-    // 🧾 4️⃣ Find related payment and order
-    const payment = await prisma.payment.findUnique({
-      where: { reference },
-      include: {
-        order: {
-          select: {
-            id: true,
-            customerId: true,
-            vendorId: true,
-            totalPrice: true,
-            status: true,
-            paymentStatus: true, // Added to check paymentStatus field
-            protectedUntil: true,
-          },
-        },
-      },
-    });
-
-    if (!payment || !payment.order) {
-      console.error(`[WEBHOOK] ❌ Payment or related order not found for ref: ${reference}`);
-      return res.status(404).send("Payment or order not found");
-    }
-
-    const order = payment.order;
-    const amountInNaira = amount / 100;
-
-    // 🧍 5️⃣ Verify customer consistency
-    if (order.customerId !== metadata.userId) {
-      console.warn(`[WEBHOOK] ⚠️ Customer mismatch for ${reference}`);
-      return res.status(400).send("Customer ID mismatch");
-    }
-
-    // 💰 6️⃣ Validate amount correctness
-    if (Math.abs(amountInNaira - order.totalPrice) > 1) {
-      await prisma.payment.update({
-        where: { reference },
-        data: { status: "AMOUNT_MISMATCH", updatedAt: now },
-      });
-      return res.status(400).send("Payment amount mismatch");
-    }
-
-    // 🕒 7️⃣ Check timing safety (using UTC comparisons)
-    const protectedUntilUtc = order.protectedUntil ? toUtc(order.protectedUntil) : null;
-    const expiresAtUtc = payment.expiresAt ? toUtc(payment.expiresAt) : null;
-
-    const isWithinProtection = protectedUntilUtc ? isBeforeUtc(now, protectedUntilUtc) : false;
-    const isBeforeExpiry = expiresAtUtc ? isBeforeUtc(now, expiresAtUtc) : false;
-
-    if (!isWithinProtection && !isBeforeExpiry) {
-      console.warn(
-        `[WEBHOOK] ⚠️ Late payment ${reference} — outside both protection & expiry windows.`
-      );
-
-      await prisma.payment.update({
-        where: { reference },
-        data: { status: "EXPIRED", updatedAt: now },
-      });
-
-      // FIXED: Allow more statuses to be cancelled for late payment
-      const cancellableStatuses = ["AWAITING_PAYMENT", "PENDING", "CREATED"];
-      if (cancellableStatuses.includes(order.status)) {
-        await prisma.order.update({
-          where: { id: order.id },
-          data: {
-            status: "CANCELLED_UNPAID",
-            cancellationReason: "LATE_PAYMENT",
-            cancelledAt: now,
-          },
-        });
-      }
-
-      return res.status(200).send("Ignored: payment came after expiry");
-    }
-
-    // ✅ 8️⃣ Mark payment as successful - Use transaction for consistency
-    await prisma.$transaction(async (tx) => {
-      // Update payment
-      await tx.payment.update({
-        where: { reference },
-        data: {
-          status: "SUCCESS",
-          completedAt: now,
-          paystackData: data,
-          updatedAt: now,
-        },
-      });
-
-      // ✅ 9️⃣ Update order status safely - FIXED VERSION
-      const payableStatuses = ["AWAITING_PAYMENT", "PENDING", "CREATED", "INITIATED"];
+// //       // ✅ 9️⃣ Update order status safely - FIXED VERSION
+// //       const payableStatuses = ["AWAITING_PAYMENT", "PENDING", "CREATED", "INITIATED"];
       
-      if (payableStatuses.includes(order.status)) {
-        await tx.order.update({
-          where: { id: order.id },
-          data: {
-            status: "PAYMENT_CONFIRMED",
-            paymentStatus: "SUCCESS", // Also update paymentStatus field
-            paidAt: now,
-          },
-        });
+// //       if (payableStatuses.includes(order.status)) {
+// //         await tx.order.update({
+// //           where: { id: order.id },
+// //           data: {
+// //             status: "PAYMENT_CONFIRMED",
+// //             paymentStatus: "SUCCESS", // Also update paymentStatus field
+// //             paidAt: now,
+// //           },
+// //         });
         
-        console.log(`[WEBHOOK] ✅ Updated order ${order.id} from ${order.status} to PAYMENT_CONFIRMED`);
-      } else if (order.status === "PAYMENT_CONFIRMED") {
-        console.log(`[WEBHOOK] ℹ️ Order ${order.id} already confirmed, updating paymentStatus only`);
+// //         console.log(`[WEBHOOK] ✅ Updated order ${order.id} from ${order.status} to PAYMENT_CONFIRMED`);
+// //       } else if (order.status === "PAYMENT_CONFIRMED") {
+// //         console.log(`[WEBHOOK] ℹ️ Order ${order.id} already confirmed, updating paymentStatus only`);
         
-        // Still update paymentStatus if order already confirmed
-        await tx.order.update({
-          where: { id: order.id },
-          data: {
-            paymentStatus: "SUCCESS",
-            paidAt: now,
-          },
-        });
-      } else {
-        console.warn(`[WEBHOOK] ⚠️ Order ${order.id} in state ${order.status} cannot accept payment confirmation`);
+// //         // Still update paymentStatus if order already confirmed
+// //         await tx.order.update({
+// //           where: { id: order.id },
+// //           data: {
+// //             paymentStatus: "SUCCESS",
+// //             paidAt: now,
+// //           },
+// //         });
+// //       } else {
+// //         console.warn(`[WEBHOOK] ⚠️ Order ${order.id} in state ${order.status} cannot accept payment confirmation`);
         
-        // At least update paymentStatus for consistency
-        await tx.order.update({
-          where: { id: order.id },
-          data: {
-            paymentStatus: "SUCCESS",
-            paidAt: now,
-          },
-        });
-      }
-    });
-    console.log(
-      `[WEBHOOK] ✅ Payment ${reference} confirmed successfully for Order ${order.id}. (Protected=${isWithinProtection})`
-    );
+// //         // At least update paymentStatus for consistency
+// //         await tx.order.update({
+// //           where: { id: order.id },
+// //           data: {
+// //             paymentStatus: "SUCCESS",
+// //             paidAt: now,
+// //           },
+// //         });
+// //       }
+// //     });
+// //     console.log(
+// //       `[WEBHOOK] ✅ Payment ${reference} confirmed successfully for Order ${order.id}. (Protected=${isWithinProtection})`
+// //     );
 
-    return res.sendStatus(200);
-  } catch (err: any) {
-    console.error("[WEBHOOK] ❌ Server error:", err?.message || err);
-    return res.status(500).send("Internal webhook error");
-  }
-};
+// //     return res.sendStatus(200);
+// //   } catch (err: any) {
+// //     console.error("[WEBHOOK] ❌ Server error:", err?.message || err);
+// //     return res.status(500).send("Internal webhook error");
+// //   }
+// // };
 
 
-// Local Order interface
+
+
+// // Local Order interface
+
+
 export interface Order {
   id: string;
   customerId: string;
@@ -1348,6 +1194,9 @@ export const deleteSavedCard = async (req: AuthRequest, res: Response) => {
 //     });
 //   }
 // };
+
+
+
 
 
 

@@ -898,18 +898,23 @@ class VendorDashboardService {
         }
         return { startDate, endDate };
     }
-    // ==================== REVENUE METHODS (✅ now Payment-based) ====================
+    // ==================== REVENUE METHODS (revert to order-based for consistency) ====================
     async sumSuccessfulPaymentsInRange(start, end) {
-        const agg = await prisma.payment.aggregate({
-            where: {
-                status: client_1.PaymentStatus.SUCCESS,
-                createdAt: { gte: start, lte: end },
-                order: { vendorId: this.vendorId },
-            },
-            _sum: { amount: true }, // amount in kobo
-        });
-        // convert kobo -> naira
-        return (agg._sum.amount || 0) / 100;
+        try {
+            const revenue = await prisma.order.aggregate({
+                where: {
+                    vendorId: this.vendorId,
+                    status: client_1.OrderStatus.COMPLETED,
+                    createdAt: { gte: start, lte: end }
+                },
+                _sum: { totalPrice: true }
+            });
+            return revenue._sum.totalPrice || 0;
+        }
+        catch (error) {
+            console.error('Database connection error in sumSuccessfulPaymentsInRange:', error);
+            return 0;
+        }
     }
     async getRevenueToday() {
         const todayStart = (0, date_fns_1.startOfDay)(new Date());
@@ -921,14 +926,7 @@ class VendorDashboardService {
         return this.sumSuccessfulPaymentsInRange(startDate, endDate);
     }
     async getRevenueAllTime() {
-        const agg = await prisma.payment.aggregate({
-            where: {
-                status: client_1.PaymentStatus.SUCCESS,
-                order: { vendorId: this.vendorId },
-            },
-            _sum: { amount: true },
-        });
-        return (agg._sum.amount || 0) / 100;
+        return this.sumSuccessfulPaymentsInRange(new Date(0), new Date()); // from beginning
     }
     // ==================== ORDER METHODS ====================
     async getOrdersToday() {
