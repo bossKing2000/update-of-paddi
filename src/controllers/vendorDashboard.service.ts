@@ -1043,24 +1043,29 @@ export class VendorDashboardService {
     return { startDate, endDate };
   }
 
-  // ==================== REVENUE METHODS (revert to order-based for consistency) ====================
-  private async sumSuccessfulPaymentsInRange(start: Date, end: Date): Promise<number> {
-    try {
-      const revenue = await prisma.order.aggregate({
-        where: {
-          vendorId: this.vendorId,
-          status: OrderStatus.COMPLETED,
-          createdAt: { gte: start, lte: end }
-        },
-        _sum: { totalPrice: true }
-      });
 
-      return revenue._sum.totalPrice || 0;
-    } catch (error) {
-      console.error('Database connection error in sumSuccessfulPaymentsInRange:', error);
-      return 0;
-    }
+  // ==================== REVENUE METHODS (revert to order-based for consistency) ====================
+private async sumSuccessfulPaymentsInRange(start: Date, end: Date): Promise<number> {
+  try {
+    const revenue = await prisma.order.aggregate({
+      where: {
+        vendorId: this.vendorId,
+        // Include both COMPLETED and PAYMENT_CONFIRMED orders
+        status: {
+          in: [OrderStatus.COMPLETED, OrderStatus.PAYMENT_CONFIRMED]
+        },
+        createdAt: { gte: start, lte: end }
+      },
+      _sum: { totalPrice: true }
+    });
+
+    return revenue._sum.totalPrice || 0;
+  } catch (error) {
+    console.error('Database connection error:', error);
+    return 0;
   }
+}
+
 
   async getRevenueToday(): Promise<number> {
     const todayStart = startOfDay(new Date());
@@ -1078,18 +1083,21 @@ export class VendorDashboardService {
   }
 
   // ==================== ORDER METHODS ====================
-  async getOrdersToday(): Promise<number> {
-    const todayStart = startOfDay(new Date());
-    const todayEnd = endOfDay(new Date());
+async getOrdersToday(): Promise<number> {
+  const todayStart = startOfDay(new Date());
+  const todayEnd = endOfDay(new Date());
 
-    return prisma.order.count({
-      where: {
-        vendorId: this.vendorId,
-        status: OrderStatus.COMPLETED,
-        createdAt: { gte: todayStart, lte: todayEnd },
+  return prisma.order.count({
+    where: {
+      vendorId: this.vendorId,
+      // Include multiple statuses
+      status: {
+        in: [OrderStatus.COMPLETED, OrderStatus.PAYMENT_CONFIRMED]
       },
-    });
-  }
+      createdAt: { gte: todayStart, lte: todayEnd },
+    },
+  });
+}
 
   async getOrdersForPeriod(period: Period): Promise<number> {
     const { startDate, endDate } = this.getRangeForPeriod(period);
@@ -1630,16 +1638,23 @@ export class VendorDashboardService {
   }
 
   private calculateGrowthPercentage(current: number, previous: number): number | null {
-    if (previous === 0 && current === 0) return null;
-    if (previous === 0) return 100;
-    if (current === 0) return -100;
-
-    const growth = ((current - previous) / previous) * 100;
-    if (growth > 1000) return 1000;
-    if (growth < -100) return -100;
-
-    return Math.round(growth * 10) / 10;
-  }
+  // If both are 0, return null for "No previous data"
+  if (previous === 0 && current === 0) return null;
+  
+  // If previous > 0 and current = 0, then it's -100%
+  if (previous > 0 && current === 0) return -100;
+  
+  // If previous = 0 and current > 0, then it's +100%
+  if (previous === 0 && current > 0) return 100;
+  
+  const growth = ((current - previous) / previous) * 100;
+  
+  // Cap at reasonable values
+  if (growth > 1000) return 1000;
+  if (growth < -100) return -100;
+  
+  return Math.round(growth * 10) / 10;
+}
 
   // ==================== CACHE INVALIDATION ====================
   async invalidateCache() {
