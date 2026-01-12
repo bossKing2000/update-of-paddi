@@ -1068,10 +1068,13 @@ private async sumSuccessfulPaymentsInRange(start: Date, end: Date): Promise<numb
 
 
   async getRevenueToday(): Promise<number> {
-    const todayStart = startOfDay(new Date());
-    const todayEnd = endOfDay(new Date());
-    return this.sumSuccessfulPaymentsInRange(todayStart, todayEnd);
-  }
+  // Convert to UTC
+  const today = new Date();
+  const todayStart = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0));
+  const todayEnd = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999));
+  
+  return this.sumSuccessfulPaymentsInRange(todayStart, todayEnd);
+}
 
   async getRevenueForPeriod(period: Period): Promise<number> {
     const { startDate, endDate } = this.getRangeForPeriod(period);
