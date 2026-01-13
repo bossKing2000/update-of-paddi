@@ -48,7 +48,7 @@ router.get("/products/all", authenticate, dashboardController.getAllVendorProduc
 
 // Cache management
 router.delete("/cache/clear", authenticate, dashboardController.clearVendorCache);
-
+ 
 // ====== DEPRECATED ENDPOINTS (keep for backward compatibility) ======
 router.get("/summary", authenticate, dashboardController.getSummary);
 router.get("/products/live", authenticate, dashboardController.getLiveProducts);
