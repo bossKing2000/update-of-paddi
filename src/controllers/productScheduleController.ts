@@ -8,6 +8,8 @@ import { clearProductFromCarts } from "../services/product.service";
 import { Request, Response, RequestHandler } from "express";
 import { clearProductCache } from "../services/clearCaches";
 import { redisProducts } from "../lib/redis";
+import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
+import { ActivityType } from "@prisma/client";
 
 
 
@@ -102,6 +104,29 @@ await Promise.all([
   clearProductCache(productId, req.user.id),
 ]);
 
+// 🚀 Record activity + send notification to vendor
+await recordActivityBundle({
+  actorId: req.user.id,
+  actions: [
+    {
+      type: ActivityType.GENERAL, // or PRODUCT if defined
+      title: isImmediate ? "Product is live!" : "Product scheduled",
+      message: isImmediate
+        ? `Your product "${product.name}" is now live and will be taken down at ${endTime.toISOString()} (UTC).`
+        : `Your product "${product.name}" is scheduled to go live at ${liveTime.toISOString()} (UTC).`,
+      targetId: req.user.id,
+      socketEvent: "GENERAL",
+      metadata: { productId, goLiveAt: liveTime, liveUntil: endTime },
+    },
+  ],
+  audit: {
+    action: isImmediate ? "PRODUCT_LIVE_NOW" : "PRODUCT_SCHEDULED",
+    metadata: { productId, vendorId: req.user.id },
+  },
+  notifyRealtime: true,
+  notifyPush: true,
+});
+
   
 
     }
@@ -168,6 +193,28 @@ export const takeDown = async (req: AuthRequest, res: Response) => {
     await clearProductCache(productId);
     await clearProductFromCarts(productId);
 
+    // 🚀 Record activity + notify vendor
+await recordActivityBundle({
+  actorId: req.user?.id || "system",
+  actions: [
+    {
+      type: ActivityType.GENERAL, // or PRODUCT if defined
+      title: "Product taken down",
+      message: `Your product "${product.name}" has been taken down.`,
+      targetId: product.vendorId, // vendor who owns the product
+      socketEvent: "GENERAL",
+      metadata: { productId },
+    },
+  ],
+  audit: {
+    action: "PRODUCT_TAKEN_DOWN",
+    metadata: { productId, vendorId: product.vendorId },
+  },
+  notifyRealtime: true,
+  notifyPush: true,
+});
+
+
     // Vendor-specific product lists
     await redisProducts.del(`vendor:${product.vendorId}:products`);
     await redisProducts.del(`vendor:${product.vendorId}:products:available`);
@@ -232,6 +279,32 @@ export const extendGrace = async (req: AuthRequest, res: Response) => {
       { productId },
       { delay: extraMinutes * 60 * 1000 }
     );
+    await prisma.productSchedule.update({
+  where: { productId },
+  data: { graceMinutes: (schedule.graceMinutes || 0) + extraMinutes },
+});
+
+// 🚀 Record activity + notify vendor
+await recordActivityBundle({
+  actorId: req.user?.id || "system",
+  actions: [
+    {
+      type: ActivityType.GENERAL, // or PRODUCT if defined
+      title: "Grace period extended",
+      message: `The grace period for your product "${productId}" has been extended by ${extraMinutes} minutes.`,
+      targetId: req.user?.id || undefined,
+      socketEvent: "GENERAL",
+      metadata: { productId, extraMinutes },
+    },
+  ],
+  audit: {
+    action: "GRACE_PERIOD_EXTENDED",
+    metadata: { productId, vendorId: req.user?.id, extraMinutes },
+  },
+  notifyRealtime: true,
+  notifyPush: true,
+});
+
 
     return res.json(successResponse("GRACE_EXTENDED", "Grace period extended successfully."));
   } catch (err) {

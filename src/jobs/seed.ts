@@ -536,23 +536,23 @@ async function main() {
         }
 
         // ✅ Schedule — ONLY ONE PER PRODUCT
-        // scheduleData.push({
-        //   productId,
-        //   goLiveAt: faker.date.soon({ days: 5 }),
-        //   takeDownAt: faker.date.soon({ days: 10 }),
-        //   isLive: faker.datatype.boolean(),
-        //   graceMinutes: faker.number.int({ min: 0, max: 30 }),
-        // });
+        scheduleData.push({
+          productId,
+          goLiveAt: faker.date.soon({ days: 2 }),
+          takeDownAt: faker.date.soon({ days: 10 }),
+          isLive: faker.datatype.boolean(),
+          graceMinutes: faker.number.int({ min: 0, max: 30 }),
+        });
 
-          const goLiveAt = new Date();
-          const takeDownAt = new Date(Date.now() + 90 * 60 * 1000);
-          scheduleData.push({
-            productId,
-            goLiveAt,
-            takeDownAt,
-            isLive: true,
-            graceMinutes: faker.number.int({ min: 0, max: 50 }),
-          });
+          // const goLiveAt = new Date();
+          // const takeDownAt = new Date(Date.now() + 90 * 60 * 1000);
+          // scheduleData.push({
+          //   productId,
+          //   goLiveAt,
+          //   takeDownAt,
+          //   isLive: true,
+          //   graceMinutes: faker.number.int({ min: 0, max: 50 }),
+          // });
 
 
       }

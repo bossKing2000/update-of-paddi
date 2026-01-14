@@ -1,28 +1,3 @@
-// // src/routes/vendorDashboard.routes.ts
-// import { Router } from "express";
-// import { authenticate } from "../middlewares/auth.middleware";
-// import { dashboardController } from "../controllers/vendorDashboard.controller";
-// import { autoInvalidateVendorCache } from "../middlewares/autoInvalidateVendorCache";
-
-// const router = Router();
-
-// router.get("/summary", authenticate, dashboardController.getSummary);
-// router.get("/products/live", authenticate, dashboardController.getLiveProducts);
-// router.get("/products/total", authenticate, dashboardController.getTotalProducts);
-// router.get("/orders/recent", authenticate, dashboardController.getRecentOrders);
-// router.get("/activity/recent", authenticate, dashboardController.getRecentActivity);
-// router.delete("/cache/clear", authenticate, dashboardController.clearVendorCache); // New route
-
-// router.get("/orders/average-value", authenticate, dashboardController.getAverageOrderValue);
-// router.get("/customers/return-rate", authenticate, dashboardController.getCustomerReturnRate);
-// router.get("/orders/peak-hours", authenticate, dashboardController.getPeakHours);
-// router.get("/revenue", authenticate, dashboardController.getRevenueChart);
-// router.get("/products/all", authenticate, dashboardController.getAllVendorProducts); // NEW ENDPOINT
-// router.use("/api/vendor-dashboard/products", authenticate, autoInvalidateVendorCache);
-
-// export default router;
-// // 
-
 
 // src/routes/vendorDashboard.routes.ts
 import { Router } from "express";
