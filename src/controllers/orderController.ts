@@ -380,235 +380,6 @@ export const getSingleOrder = async (req: AuthRequest, res: Response): Promise<v
   }
 };
 
-
-
-// export const updateOrderStatus = async (req: AuthRequest, res: Response): Promise<void> => {
-//   try {
-//     const { orderId } = req.params;
-//     const { status } = req.body;
-//     const userId = req.user?.id;
-//     const userRole = req.user?.role as Role | undefined;
-
-//     // 🔒 1. Authentication
-//     if (!userId || !userRole) {
-//       res.status(401).json(errorResponse("UNAUTHORIZED", "Unauthorized"));
-//       return;
-//     }
-
-//     // 🛑 2. Prevent system-managed transitions
-//     if (status === OrderStatus.PAYMENT_CONFIRMED) {
-//       res
-//         .status(403)
-//         .json(errorResponse("FORBIDDEN", "Payment confirmations are system-managed only"));
-//       return;
-//     }
-
-//     // ⚙️ 3. Validate input
-//     if (!status || !Object.values(OrderStatus).includes(status)) {
-//       res.status(400).json(errorResponse("INVALID_STATUS", "Invalid or missing order status"));
-//       return;
-//     }
-
-//     // 🔍 4. Fetch order (with products and payments)
-//     const order = await prisma.order.findUnique({
-//       where: { id: orderId },
-//       include: {
-//         items: {
-//           include: {
-//             product: {
-//               select: {
-//                 isLive: true,
-//                 productSchedule: { select: { goLiveAt: true, takeDownAt: true } },
-//               },
-//             },
-//           },
-//         },
-//         payments: {
-//           orderBy: { createdAt: "desc" }, // most recent payment first
-//         },
-//       },
-//     });
-
-//     if (!order) {
-//       res.status(404).json(errorResponse("NOT_FOUND", "Order not found"));
-//       return;
-//     }
-
-//     // 🎭 5. Verify ownership
-//     const isVendor = userId === order.vendorId;
-//     const isCustomer = userId === order.customerId;
-//     if (!isVendor && !isCustomer) {
-//       res.status(403).json(errorResponse("FORBIDDEN", "Unauthorized user"));
-//       return;
-//     }
-
-//     const currentStatus = order.status;
-
-//     // 📜 6. Allowed transitions
-//     const transitionRules: Record<OrderStatus, { from: OrderStatus[]; allowedRoles: Role[] }> = {
-//       PENDING: { from: [], allowedRoles: [] },
-//       WAITING_VENDOR_CONFIRMATION: { from: [], allowedRoles: [Role.CUSTOMER] },
-//       WAITING_CUSTOMER_APPROVAL: {
-//         from: [OrderStatus.WAITING_VENDOR_CONFIRMATION],
-//         allowedRoles: [Role.VENDOR],
-//       },
-//       AWAITING_PAYMENT: {
-//         from: [OrderStatus.WAITING_CUSTOMER_APPROVAL, OrderStatus.WAITING_VENDOR_CONFIRMATION],
-//         allowedRoles: [Role.CUSTOMER, Role.VENDOR],
-//       },
-//       PAYMENT_CONFIRMED: { from: [OrderStatus.AWAITING_PAYMENT], allowedRoles: [] },
-//       COOKING: { from: [OrderStatus.PAYMENT_CONFIRMED], allowedRoles: [Role.VENDOR] },
-//       READY_FOR_PICKUP: { from: [OrderStatus.COOKING], allowedRoles: [Role.VENDOR] },
-//       OUT_FOR_DELIVERY: { from: [OrderStatus.READY_FOR_PICKUP], allowedRoles: [Role.VENDOR] },
-//       COMPLETED: { from: [OrderStatus.OUT_FOR_DELIVERY], allowedRoles: [Role.VENDOR] },
-//       CANCELLED: {
-//         from: [
-//           OrderStatus.PENDING,
-//           OrderStatus.WAITING_VENDOR_CONFIRMATION,
-//           OrderStatus.WAITING_CUSTOMER_APPROVAL,
-//           OrderStatus.AWAITING_PAYMENT,
-//           OrderStatus.PAYMENT_CONFIRMED,
-//           OrderStatus.COOKING,
-//           OrderStatus.OUT_FOR_DELIVERY,
-//         ],
-//         allowedRoles: [Role.CUSTOMER, Role.VENDOR],
-//       },
-//       FAILED_DELIVERY: { from: [OrderStatus.OUT_FOR_DELIVERY], allowedRoles: [Role.VENDOR] },
-//       PAYMENT_EXPIRED: { from: [OrderStatus.AWAITING_PAYMENT], allowedRoles: [] },
-//       CANCELLED_UNPAID: {
-//         from: [OrderStatus.AWAITING_PAYMENT, OrderStatus.PAYMENT_EXPIRED],
-//         allowedRoles: [],
-//       },
-//     };
-
-//     // 🧩 7. Validate transition
-//     const rule = transitionRules[status as OrderStatus];
-//     if (!rule) {
-//       res.status(400).json(errorResponse("INVALID_TRANSITION", "Invalid status transition"));
-//       return;
-//     }
-
-//     if (!rule.from.includes(currentStatus)) {
-//       res
-//         .status(400)
-//         .json(
-//           errorResponse(
-//             "INVALID_TRANSITION",
-//             `Cannot transition from ${currentStatus} to ${status}`
-//           )
-//         );
-//       return;
-//     }
-
-//     if (!rule.allowedRoles.includes(userRole)) {
-//       res
-//         .status(403)
-//         .json(errorResponse("FORBIDDEN", "You are not allowed to perform this transition"));
-//       return;
-//     }
-
-//     // 🔄 8. Build update data
-//     let updateData: Prisma.OrderUpdateInput = { status };
-
-//     // ✅ If moving to AWAITING_PAYMENT, validate product live state
-//     if (status === OrderStatus.AWAITING_PAYMENT) {
-//       const firstItem = order.items?.[0];
-//       const product = firstItem?.product;
-
-//       if (!product) {
-//         res
-//           .status(400)
-//           .json(errorResponse("INVALID_ORDER", "Order has no product to validate live status"));
-//         return;
-//       }
-
-//       const now = new Date();
-//       const sched = product.productSchedule;
-//       let productIsLive = false;
-
-//       if (product.isLive) {
-//         productIsLive = true;
-//       } else if (sched?.goLiveAt && sched?.takeDownAt) {
-//         const go = new Date(sched.goLiveAt).getTime();
-//         const take = new Date(sched.takeDownAt).getTime();
-//         productIsLive = now.getTime() >= go && now.getTime() <= take;
-//       }
-
-//       if (!productIsLive) {
-//         res
-//           .status(400)
-//           .json(
-//             errorResponse("PRODUCT_OFFLINE", "Product is not live — cannot move to AWAITING_PAYMENT")
-//           );
-//         return;
-//       }
-//     }
-
-//     // 💡 9. Check payment expiration (from Payment, not Order)
-//     const latestPayment = order.payments?.[0]; // because we ordered DESC by createdAt
-//     if (
-//       latestPayment?.expiresAt &&
-//       new Date() > new Date(latestPayment.expiresAt) &&
-//       status !== OrderStatus.CANCELLED
-//     ) {
-//       updateData.status = OrderStatus.CANCELLED;
-//       updateData.cancelledAt = new Date();
-//       updateData.cancellationReason = "PAYMENT_EXPIRED";
-//     }
-
-//     // 🟥 Manual cancellation
-//     if (status === OrderStatus.CANCELLED) {
-//       updateData.cancelledAt = new Date();
-//       updateData.cancellationReason = isVendor ? "VENDOR_CANCELLED" : "CUSTOMER_CANCELLED";
-//     }
-
-//     // 💾 10. Update DB
-//     const updatedOrder = await prisma.order.update({
-//       where: { id: orderId },
-//       data: updateData,
-//     });
-
-//     // 🔔 11. Notify the other user
-//     const recipientId = isVendor ? order.customerId : order.vendorId;
-//     await recordActivityBundle({
-//       actorId: userId,
-//       orderId,
-//       actions: [
-//         {
-//           type: ActivityType.GENERAL,
-//           title: `Order ${status}`,
-//           message: `Order ${orderId} status has been updated to ${status}`,
-//           targetId: recipientId,
-//           socketEvent: "ORDER",
-//           metadata: { orderId, updatedBy: userRole },
-//         },
-//       ],
-//       audit: {
-//         action: "ORDER_STATUS_UPDATED",
-//         metadata: {
-//           orderId,
-//           updatedBy: userId,
-//           previousStatus: currentStatus,
-//           newStatus: status,
-//         },
-//       },
-//       notifyRealtime: true,
-//       notifyPush: true,
-//     });
-
-//     // ✅ 12. Response
-//     res.status(200).json(
-//       successResponse("ORDER_STATUS_UPDATED", `Order status updated to ${status}`, {
-//         order: updatedOrder,
-//       })
-//     );
-//   } catch (err) {
-//     console.error("❌ updateOrderStatus Error:", err);
-//     res.status(500).json(errorResponse("SERVER_ERROR", "Failed to update order status"));
-//   }
-// };
-
-
 export const createNormalOrder = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user?.id;
@@ -745,8 +516,6 @@ const order = await prisma.order.create({
 };
 
 
-
-
 // 🌟 Customer creates a new special request
 export const createSpecialRequest = async (req: AuthRequest, res: Response) => {
   try {
@@ -812,6 +581,7 @@ export const createSpecialOffer = async (req: AuthRequest, res: Response) => {
     res.status(500).json(errorResponse("SERVER_ERROR", "Failed to create offer"));
   }
 };
+
 
 // 🌟 Customer accepts an offer
 export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
@@ -896,8 +666,6 @@ export const rejectSpecialRequest = async (req: AuthRequest, res: Response) => {
     res.status(500).json(errorResponse("SERVER_ERROR", "Failed to reject request"));
   }
 };
-
-
 
 export const updateOrderStatus = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -1056,11 +824,6 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response): Promis
      return
   }
 };
-
-
-
-
-
 
 export const getVendorOrderStats = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -1322,20 +1085,6 @@ export const getVendorReport = async (req: AuthRequest, res: Response): Promise<
 };
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ✅ Fetch My Notifications (with cache)
 export const getMyNotifications = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -1552,4 +1301,233 @@ export const markAllNotificationsAsRead = async (req: AuthRequest, res: Response
   }
 };
 
+
+
+
+
+// export const updateOrderStatus = async (req: AuthRequest, res: Response): Promise<void> => {
+//   try {
+//     const { orderId } = req.params;
+//     const { status } = req.body;
+//     const userId = req.user?.id;
+//     const userRole = req.user?.role as Role | undefined;
+
+//     // 🔒 1. Authentication
+//     if (!userId || !userRole) {
+//       res.status(401).json(errorResponse("UNAUTHORIZED", "Unauthorized"));
+//       return;
+//     }
+
+//     // 🛑 2. Prevent system-managed transitions
+//     if (status === OrderStatus.PAYMENT_CONFIRMED) {
+//       res
+//         .status(403)
+//         .json(errorResponse("FORBIDDEN", "Payment confirmations are system-managed only"));
+//       return;
+//     }
+
+//     // ⚙️ 3. Validate input
+//     if (!status || !Object.values(OrderStatus).includes(status)) {
+//       res.status(400).json(errorResponse("INVALID_STATUS", "Invalid or missing order status"));
+//       return;
+//     }
+
+//     // 🔍 4. Fetch order (with products and payments)
+//     const order = await prisma.order.findUnique({
+//       where: { id: orderId },
+//       include: {
+//         items: {
+//           include: {
+//             product: {
+//               select: {
+//                 isLive: true,
+//                 productSchedule: { select: { goLiveAt: true, takeDownAt: true } },
+//               },
+//             },
+//           },
+//         },
+//         payments: {
+//           orderBy: { createdAt: "desc" }, // most recent payment first
+//         },
+//       },
+//     });
+
+//     if (!order) {
+//       res.status(404).json(errorResponse("NOT_FOUND", "Order not found"));
+//       return;
+//     }
+
+//     // 🎭 5. Verify ownership
+//     const isVendor = userId === order.vendorId;
+//     const isCustomer = userId === order.customerId;
+//     if (!isVendor && !isCustomer) {
+//       res.status(403).json(errorResponse("FORBIDDEN", "Unauthorized user"));
+//       return;
+//     }
+
+//     const currentStatus = order.status;
+
+//     // 📜 6. Allowed transitions
+//     const transitionRules: Record<OrderStatus, { from: OrderStatus[]; allowedRoles: Role[] }> = {
+//       PENDING: { from: [], allowedRoles: [] },
+//       WAITING_VENDOR_CONFIRMATION: { from: [], allowedRoles: [Role.CUSTOMER] },
+//       WAITING_CUSTOMER_APPROVAL: {
+//         from: [OrderStatus.WAITING_VENDOR_CONFIRMATION],
+//         allowedRoles: [Role.VENDOR],
+//       },
+//       AWAITING_PAYMENT: {
+//         from: [OrderStatus.WAITING_CUSTOMER_APPROVAL, OrderStatus.WAITING_VENDOR_CONFIRMATION],
+//         allowedRoles: [Role.CUSTOMER, Role.VENDOR],
+//       },
+//       PAYMENT_CONFIRMED: { from: [OrderStatus.AWAITING_PAYMENT], allowedRoles: [] },
+//       COOKING: { from: [OrderStatus.PAYMENT_CONFIRMED], allowedRoles: [Role.VENDOR] },
+//       READY_FOR_PICKUP: { from: [OrderStatus.COOKING], allowedRoles: [Role.VENDOR] },
+//       OUT_FOR_DELIVERY: { from: [OrderStatus.READY_FOR_PICKUP], allowedRoles: [Role.VENDOR] },
+//       COMPLETED: { from: [OrderStatus.OUT_FOR_DELIVERY], allowedRoles: [Role.VENDOR] },
+//       CANCELLED: {
+//         from: [
+//           OrderStatus.PENDING,
+//           OrderStatus.WAITING_VENDOR_CONFIRMATION,
+//           OrderStatus.WAITING_CUSTOMER_APPROVAL,
+//           OrderStatus.AWAITING_PAYMENT,
+//           OrderStatus.PAYMENT_CONFIRMED,
+//           OrderStatus.COOKING,
+//           OrderStatus.OUT_FOR_DELIVERY,
+//         ],
+//         allowedRoles: [Role.CUSTOMER, Role.VENDOR],
+//       },
+//       FAILED_DELIVERY: { from: [OrderStatus.OUT_FOR_DELIVERY], allowedRoles: [Role.VENDOR] },
+//       PAYMENT_EXPIRED: { from: [OrderStatus.AWAITING_PAYMENT], allowedRoles: [] },
+//       CANCELLED_UNPAID: {
+//         from: [OrderStatus.AWAITING_PAYMENT, OrderStatus.PAYMENT_EXPIRED],
+//         allowedRoles: [],
+//       },
+//     };
+
+//     // 🧩 7. Validate transition
+//     const rule = transitionRules[status as OrderStatus];
+//     if (!rule) {
+//       res.status(400).json(errorResponse("INVALID_TRANSITION", "Invalid status transition"));
+//       return;
+//     }
+
+//     if (!rule.from.includes(currentStatus)) {
+//       res
+//         .status(400)
+//         .json(
+//           errorResponse(
+//             "INVALID_TRANSITION",
+//             `Cannot transition from ${currentStatus} to ${status}`
+//           )
+//         );
+//       return;
+//     }
+
+//     if (!rule.allowedRoles.includes(userRole)) {
+//       res
+//         .status(403)
+//         .json(errorResponse("FORBIDDEN", "You are not allowed to perform this transition"));
+//       return;
+//     }
+
+//     // 🔄 8. Build update data
+//     let updateData: Prisma.OrderUpdateInput = { status };
+
+//     // ✅ If moving to AWAITING_PAYMENT, validate product live state
+//     if (status === OrderStatus.AWAITING_PAYMENT) {
+//       const firstItem = order.items?.[0];
+//       const product = firstItem?.product;
+
+//       if (!product) {
+//         res
+//           .status(400)
+//           .json(errorResponse("INVALID_ORDER", "Order has no product to validate live status"));
+//         return;
+//       }
+
+//       const now = new Date();
+//       const sched = product.productSchedule;
+//       let productIsLive = false;
+
+//       if (product.isLive) {
+//         productIsLive = true;
+//       } else if (sched?.goLiveAt && sched?.takeDownAt) {
+//         const go = new Date(sched.goLiveAt).getTime();
+//         const take = new Date(sched.takeDownAt).getTime();
+//         productIsLive = now.getTime() >= go && now.getTime() <= take;
+//       }
+
+//       if (!productIsLive) {
+//         res
+//           .status(400)
+//           .json(
+//             errorResponse("PRODUCT_OFFLINE", "Product is not live — cannot move to AWAITING_PAYMENT")
+//           );
+//         return;
+//       }
+//     }
+
+//     // 💡 9. Check payment expiration (from Payment, not Order)
+//     const latestPayment = order.payments?.[0]; // because we ordered DESC by createdAt
+//     if (
+//       latestPayment?.expiresAt &&
+//       new Date() > new Date(latestPayment.expiresAt) &&
+//       status !== OrderStatus.CANCELLED
+//     ) {
+//       updateData.status = OrderStatus.CANCELLED;
+//       updateData.cancelledAt = new Date();
+//       updateData.cancellationReason = "PAYMENT_EXPIRED";
+//     }
+
+//     // 🟥 Manual cancellation
+//     if (status === OrderStatus.CANCELLED) {
+//       updateData.cancelledAt = new Date();
+//       updateData.cancellationReason = isVendor ? "VENDOR_CANCELLED" : "CUSTOMER_CANCELLED";
+//     }
+
+//     // 💾 10. Update DB
+//     const updatedOrder = await prisma.order.update({
+//       where: { id: orderId },
+//       data: updateData,
+//     });
+
+//     // 🔔 11. Notify the other user
+//     const recipientId = isVendor ? order.customerId : order.vendorId;
+//     await recordActivityBundle({
+//       actorId: userId,
+//       orderId,
+//       actions: [
+//         {
+//           type: ActivityType.GENERAL,
+//           title: `Order ${status}`,
+//           message: `Order ${orderId} status has been updated to ${status}`,
+//           targetId: recipientId,
+//           socketEvent: "ORDER",
+//           metadata: { orderId, updatedBy: userRole },
+//         },
+//       ],
+//       audit: {
+//         action: "ORDER_STATUS_UPDATED",
+//         metadata: {
+//           orderId,
+//           updatedBy: userId,
+//           previousStatus: currentStatus,
+//           newStatus: status,
+//         },
+//       },
+//       notifyRealtime: true,
+//       notifyPush: true,
+//     });
+
+//     // ✅ 12. Response
+//     res.status(200).json(
+//       successResponse("ORDER_STATUS_UPDATED", `Order status updated to ${status}`, {
+//         order: updatedOrder,
+//       })
+//     );
+//   } catch (err) {
+//     console.error("❌ updateOrderStatus Error:", err);
+//     res.status(500).json(errorResponse("SERVER_ERROR", "Failed to update order status"));
+//   }
+// };
 

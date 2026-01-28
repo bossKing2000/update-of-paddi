@@ -96,7 +96,7 @@
     });
 
     // Fetch user profile from backend
-    fetch("http://localhost:5000/api/auth/profile", {
+    fetch("https://update-of-paddi.onrender.com/api/auth/profile", {
       headers: { "Authorization": `Bearer ${token}` }
     })
     .then(res => res.json())

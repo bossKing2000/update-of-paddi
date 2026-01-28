@@ -280,4 +280,4 @@ try {
 
 
 
-// npx ts-node src/jobs/updatePopularityScore.ts
+// npx ts-node src\jobs\workers jobs\updatePopularityScore.ts
