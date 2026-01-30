@@ -182,8 +182,8 @@
 /* ============================
    Config & helpers
    ============================ */
-const ORDER_API = "https://update-of-paddi.onrender.com/api/order";
-const PAYMENT_API = "https://update-of-paddi.onrender.com/api/payments";
+const ORDER_API = "http://localhost:5000/api/order";
+const PAYMENT_API = "http://localhost:5000/api/payments";
 const token = localStorage.getItem("token");
 const user = (() => {
   try { return JSON.parse(localStorage.getItem("user") || "{}"); } catch(e){return {}}

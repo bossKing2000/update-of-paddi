@@ -227,7 +227,7 @@
 
     async function fetchSuggestions(q) {
       try {
-        const res = await fetch(`https://update-of-paddi.onrender.com/api/product/p/suggestions?q=${encodeURIComponent(q)}`);
+        const res = await fetch(`http://localhost:5000/api/product/p/suggestions?q=${encodeURIComponent(q)}`);
         const data = await res.json();
         if (data.success && data.data.results.length) {
           suggestionsBox.innerHTML = "";
@@ -261,7 +261,7 @@
       if (!q) return;
       resultsContainer.innerHTML = `<p>Searching for "${q}"...</p>`;
       try {
-        const res = await fetch(`https://update-of-paddi.onrender.com/api/product/p/search?q=${encodeURIComponent(q)}&limit=20&page=1`);
+        const res = await fetch(`http://localhost:5000/api/product/p/search?q=${encodeURIComponent(q)}&limit=20&page=1`);
         const data = await res.json();
         if (data.success && data.data.length) {
           displayResults(data.data);

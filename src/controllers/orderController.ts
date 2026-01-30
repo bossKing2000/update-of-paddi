@@ -9,7 +9,145 @@ import { getIO } from "../socket";
 import { errorResponse, successResponse } from "../validators/codeMessage";
 import { addMinutesUtc, nowUtc, toUtc } from "../utils/time";
 import { uuidv4 } from "zod";
+import { clearProductCache } from "../services/clearCaches";
 
+export const getMyOrders = async (
+  req: AuthRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json(errorResponse("UNAUTHORIZED", "Unauthorized"));
+      return;
+    }
+
+    // ---------------------------
+    // Pagination params
+    // ---------------------------
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Number(req.query.limit) || 10, 50); // hard cap
+    const skip = (page - 1) * limit;
+
+    // ---------------------------
+    // Optional filters (future-proof)
+    // ---------------------------
+    const status = req.query.status as string | undefined;
+    const paymentStatus = req.query.paymentStatus as string | undefined;
+
+    const where: any = {
+      OR: [{ customerId: userId }, { vendorId: userId }],
+      ...(status && { status }),
+      ...(paymentStatus && { paymentStatus }),
+    };
+
+    // ---------------------------
+    // Run queries in parallel
+    // ---------------------------
+    const [orders, total] = await Promise.all([
+      prisma.order.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: {
+          createdAt: "desc", // 🔥 newest first
+        },
+        include: {
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  images: true,
+                  price: true,
+                  isLive: true,
+                },
+              },
+              options: {
+                include: {
+                  productOption: {
+                    select: {
+                      id: true,
+                      name: true,
+                      price: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          customer: {
+            select: {
+              id: true,
+              name: true,
+              avatarUrl: true,
+            },
+          },
+          vendor: {
+            select: {
+              id: true,
+              name: true,
+              brandName: true,
+              brandLogo: true,
+            },
+          },
+          address: {
+            select: {
+              label: true,
+              street: true,
+              city: true,
+            },
+          },
+          assignments: {
+            include: {
+              deliveryPerson: {
+                include: {
+                  user: {
+                    select: {
+                      id: true,
+                      name: true,
+                      phoneNumber: true,
+                      avatarUrl: true,
+                      brandName: true,
+                      brandLogo: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      }),
+
+      prisma.order.count({ where }),
+    ]);
+
+    // ---------------------------
+    // Pagination meta
+    // ---------------------------
+    const totalPages = Math.ceil(total / limit);
+
+    res.status(200).json(
+      successResponse("ORDERS_RETRIEVED", "Orders retrieved successfully", {
+        meta: {
+          total,
+          page,
+          limit,
+          totalPages,
+          hasNext: page < totalPages,
+          hasPrev: page > 1,
+        },
+        orders,
+      })
+    );
+  } catch (error) {
+    console.error("❌ getMyOrders Error:", error);
+    res
+      .status(500)
+      .json(errorResponse("SERVER_ERROR", "Failed to retrieve orders"));
+  }
+};
 
 // export const vendorRespondToSpecialRequest = async (
 //   req: AuthRequest,
@@ -214,79 +352,79 @@ import { uuidv4 } from "zod";
 // };
 
 
-export const getMyOrders = async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const userId = req.user?.id;
-    if (!userId) {
-      res.status(401).json(errorResponse("UNAUTHORIZED", "Unauthorized"));
-      return;
-    }
+// export const getMyOrders = async (req: AuthRequest, res: Response): Promise<void> => {
+//   try {
+//     const userId = req.user?.id;
+//     if (!userId) {
+//       res.status(401).json(errorResponse("UNAUTHORIZED", "Unauthorized"));
+//       return;
+//     }
 
-    const orders = await prisma.order.findMany({
-      where: {
-        OR: [{ customerId: userId }, { vendorId: userId }],
-      },
-      include: {
-        items: {
-          include: {
-            product: {
-              select: {
-                id: true,
-                name: true,
-                images: true,
-                price: true,
-                isLive: true,
-              },
-            },
-            options: {
-              include: {
-                productOption: {
-                  select: {
-                    id: true,
-                    name: true,
-                    price: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-        customer: { select: { id: true, name: true, avatarUrl: true } },
-        vendor: { select: { id: true, name: true, brandName: true, brandLogo: true } },
-        address: { select: { label: true, street: true, city: true } },
-        assignments: {
-          include: {
-            deliveryPerson: {
-              include: {
-                user: {
-                  select: {
-                    id: true,
-                    name: true,
-                    phoneNumber: true,
-                    avatarUrl: true,
-                    brandName: true,
-                    brandLogo: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-    });
+//     const orders = await prisma.order.findMany({
+//       where: {
+//         OR: [{ customerId: userId }, { vendorId: userId }],
+//       },
+//       include: {
+//         items: {
+//           include: {
+//             product: {
+//               select: {
+//                 id: true,
+//                 name: true,
+//                 images: true,
+//                 price: true,
+//                 isLive: true,
+//               },
+//             },
+//             options: {
+//               include: {
+//                 productOption: {
+//                   select: {
+//                     id: true,
+//                     name: true,
+//                     price: true,
+//                   },
+//                 },
+//               },
+//             },
+//           },
+//         },
+//         customer: { select: { id: true, name: true, avatarUrl: true } },
+//         vendor: { select: { id: true, name: true, brandName: true, brandLogo: true } },
+//         address: { select: { label: true, street: true, city: true } },
+//         assignments: {
+//           include: {
+//             deliveryPerson: {
+//               include: {
+//                 user: {
+//                   select: {
+//                     id: true,
+//                     name: true,
+//                     phoneNumber: true,
+//                     avatarUrl: true,
+//                     brandName: true,
+//                     brandLogo: true,
+//                   },
+//                 },
+//               },
+//             },
+//           },
+//         },
+//       },
+//       orderBy: { createdAt: "desc" },
+//     });
 
-    res.status(200).json(
-      successResponse("ORDERS_RETRIEVED", "Orders retrieved successfully", {
-        total: orders.length,
-        orders,
-      })
-    );
-  } catch (error) {
-    console.error("❌ getMyOrders Error:", error);
-    res.status(500).json(errorResponse("SERVER_ERROR", "Failed to retrieve orders"));
-  }
-};
+//     res.status(200).json(
+//       successResponse("ORDERS_RETRIEVED", "Orders retrieved successfully", {
+//         total: orders.length,
+//         orders,
+//       })
+//     );
+//   } catch (error) {
+//     console.error("❌ getMyOrders Error:", error);
+//     res.status(500).json(errorResponse("SERVER_ERROR", "Failed to retrieve orders"));
+//   }
+// };
 
 export const getSingleOrder = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -764,27 +902,53 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response): Promis
     }
 
     // 🔄 Build update data
-    let updateData: Prisma.OrderUpdateInput = { status };
+    // let updateData: Prisma.OrderUpdateInput = { status };
 
-    // 💡 Auto-cancel expired payments
-    const latestPayment = order.payments?.[0];
-    if (latestPayment?.expiresAt && new Date() > new Date(latestPayment.expiresAt) && status !== OrderStatus.CANCELLED) {
-      updateData.status = OrderStatus.CANCELLED;
-      updateData.cancelledAt = new Date();
-      updateData.cancellationReason = "PAYMENT_EXPIRED";
-    }
+    // // 💡 Auto-cancel expired payments
+    // const latestPayment = order.payments?.[0];
+    // if (latestPayment?.expiresAt && new Date() > new Date(latestPayment.expiresAt) && status !== OrderStatus.CANCELLED) {
+    //   updateData.status = OrderStatus.CANCELLED;
+    //   updateData.cancelledAt = new Date();
+    //   updateData.cancellationReason = "PAYMENT_EXPIRED";
+    // }
 
-    // 🟥 Manual cancellation
-    if (status === OrderStatus.CANCELLED) {
-      updateData.cancelledAt = new Date();
-      updateData.cancellationReason = isVendor ? "VENDOR_CANCELLED" : "CUSTOMER_CANCELLED";
-    }
+    // // 🟥 Manual cancellation
+    // if (status === OrderStatus.CANCELLED) {
+    //   updateData.cancelledAt = new Date();
+    //   updateData.cancellationReason = isVendor ? "VENDOR_CANCELLED" : "CUSTOMER_CANCELLED";
+    // }
+    // 🔄 Build update data
+let updateData: Prisma.OrderUpdateInput = { status };
+
+// 💡 Auto-cancel expired payments (only if order not already paid)
+const latestPayment = order.payments?.[0];
+if (
+  latestPayment &&
+  order.paymentStatus !== "SUCCESS" && // ✅ check order's paymentStatus instead
+  latestPayment.expiresAt &&
+  new Date() > new Date(latestPayment.expiresAt) &&
+  status !== OrderStatus.CANCELLED
+) {
+  updateData.status = OrderStatus.CANCELLED;
+  updateData.cancelledAt = new Date();
+  updateData.cancellationReason = "PAYMENT_EXPIRED";
+}
+
+// 🟥 Manual cancellation
+if (status === OrderStatus.CANCELLED) {
+  updateData.cancelledAt = new Date();
+  updateData.cancellationReason = isVendor ? "VENDOR_CANCELLED" : "CUSTOMER_CANCELLED";
+}
+
 
     // 💾 Update DB
     const updatedOrder = await prisma.order.update({
       where: { id: orderId },
       data: updateData,
     });
+    // 🔥 Clear vendor dashboard & order caches
+    await clearProductCache(undefined, order.vendorId);
+
 
     // 🔔 Notify the other party
     const recipientId = isVendor ? order.customerId : order.vendorId;

@@ -58,14 +58,32 @@ export const clearProductCache = async (
     // ----- Vendor related keys -----
     if (vendorId) {
       keysToDelete.push(
-        `vendor:${vendorId}:products`,
-        `vendor:${vendorId}:products:available`,
-        `vendor:${vendorId}:dashboardSummary`,
-        `products:live`,
+      //   `vendor:${vendorId}:products`,
+      //   `vendor:${vendorId}:products:available`,
+      //   `vendor:${vendorId}:dashboardSummary`,
+      //   `products:live`,
+      //   // Order-related vendor caches
+      //  `vendor:${vendorId}:orders`,
+      //  `vendor:${vendorId}:orders:today`,
+      //  `vendor:${vendorId}:orders:week`,
+      //  `vendor:${vendorId}:analytics`,
+      //  `vendor:${vendorId}:recentActivity`,
+    `vendor:${vendorId}:products`,
+    `vendor:${vendorId}:products:available`,
+    `vendor:${vendorId}:dashboardSummary`,
+    `vendor:${vendorId}:orders`,
+    `vendor:${vendorId}:orders:today`,
+    `vendor:${vendorId}:orders:week`,
+    `vendor:${vendorId}:analytics`,
+    `vendor:${vendorId}:recentActivity`,
+    `products:live`,
+
       );
         // Paginated vendor product lists
       await scanAndDelete(redisProducts, [
         `vendor:${vendorId}:products:page:`,
+        `vendor:${vendorId}:orders:page:`,
+
       ]);
     }
 
