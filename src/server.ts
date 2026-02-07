@@ -104,7 +104,7 @@ const allowedOrigins = [
   "http://10.0.2.2:5000",
   "http://localhost:52498",
   "",
-  'http://localhost',
+  "http://localhost:53854",
   "http://127.0.0.1:55257"
 ];
 
