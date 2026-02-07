@@ -720,7 +720,7 @@ export const createSpecialOffer = async (req: AuthRequest, res: Response) => {
   }
 };
 
-
+ 
 // 🌟 Customer accepts an offer
 export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
   try {

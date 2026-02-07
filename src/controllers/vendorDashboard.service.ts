@@ -1,5 +1,4 @@
-
-import { PrismaClient, OrderStatus, PaymentStatus } from "@prisma/client";
+import { PrismaClient, OrderStatus } from "@prisma/client";
 import { startOfDay, endOfDay, subDays, format } from "date-fns";
 import { clearProductCache } from "../services/clearCaches";
 import { redisProducts } from "../lib/redis";
@@ -183,8 +182,6 @@ private async sumSuccessfulPaymentsInRange(start: Date, end: Date): Promise<numb
     return 0;
   }
 }
-
-
 
   async getRevenueToday(): Promise<number> {
   // Convert to UTC
