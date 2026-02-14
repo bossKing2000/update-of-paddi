@@ -26,6 +26,7 @@ import cartRouter from './routes/cartRouter';
 import deliveryRouter from './routes/deliveryRouter';
 import productScheduleRoutes from './routes/productScheduleRoutes';
 import vendorFollowRoutes from './routes/vendorFollowRoutes';
+import seederRoutes from './routes/seeder.routes';
 
 
 // ------------------------------
@@ -136,6 +137,7 @@ app.use('/api/payments', paymentRouter);
 app.use("/api/delivery", deliveryRouter);
 app.use("/api/product", productScheduleRoutes);
 app.use("/api/vendor-follow", vendorFollowRoutes);
+app.use('/api/seeder', seederRoutes);
 app.use("/api/status", productScheduleRoutes);
 app.use("/api/vendor", vendorDashboardRoutes);
 app.use('/api/ai', aiRouter);
