@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getVendorReviewById = exports.getVendorReviewSummary = exports.getVendorReviews = exports.reviewVendor = exports.reportReview = exports.voteReview = exports.deleteReplyToReview = exports.replyToReview = exports.getProductReviewSummary = exports.getProductReviews = exports.deleteReview = exports.updateReview = exports.reviewProduct = void 0;
 const prisma_1 = __importDefault(require("../lib/prisma"));
+const paramUtils_1 = require("../utils/paramUtils");
 const ProductCRUDSchema_1 = require("../validations/ProductCRUDSchema");
 const recordActivityBundle_1 = require("../utils/activityUtils/recordActivityBundle");
 const client_1 = require("@prisma/client");
@@ -70,7 +71,7 @@ const updateReview = async (req, res) => {
             return;
         }
         const review = await prisma_1.default.productReview.findUnique({
-            where: { id: req.params.id },
+            where: { id: (0, paramUtils_1.ensureString)(req.params.id) },
         });
         if (!review || review.customerId !== req.user.id) {
             res.status(403).json({ message: "Unauthorized or review not found" });
@@ -83,7 +84,7 @@ const updateReview = async (req, res) => {
         }
         const imageUrls = extractImagePaths(req.files);
         const updated = await prisma_1.default.productReview.update({
-            where: { id: req.params.id },
+            where: { id: (0, paramUtils_1.ensureString)(req.params.id) },
             data: {
                 ...parsed.data,
                 images: imageUrls.length > 0 ? imageUrls : review.images,
@@ -105,13 +106,13 @@ const deleteReview = async (req, res) => {
             return;
         }
         const review = await prisma_1.default.productReview.findUnique({
-            where: { id: req.params.id },
+            where: { id: (0, paramUtils_1.ensureString)(req.params.id) },
         });
         if (!review || review.customerId !== req.user.id) {
             res.status(403).json({ message: "Unauthorized or review not found" });
             return;
         }
-        await prisma_1.default.productReview.delete({ where: { id: req.params.id } });
+        await prisma_1.default.productReview.delete({ where: { id: (0, paramUtils_1.ensureString)(req.params.id) } });
         res.json({ message: "Review deleted" });
     }
     catch (err) {
@@ -123,7 +124,7 @@ exports.deleteReview = deleteReview;
 // Get product reviews (with optional pagination)
 const getProductReviews = async (req, res) => {
     try {
-        const productId = req.params.productId;
+        const productId = (0, paramUtils_1.ensureString)(req.params.productId);
         const { page = "1", limit = "10" } = req.query;
         const skip = (Number(page) - 1) * Number(limit);
         const take = Number(limit);
@@ -151,7 +152,7 @@ exports.getProductReviews = getProductReviews;
 // Get product review summary
 const getProductReviewSummary = async (req, res) => {
     try {
-        const productId = req.params.productId;
+        const productId = (0, paramUtils_1.ensureString)(req.params.productId);
         const parseResult = ProductCRUDSchema_1.reviewSummaryQuerySchema.safeParse(req.query);
         if (!parseResult.success) {
             res.status(400).json({ error: parseResult.error.issues });
@@ -193,7 +194,7 @@ const replyToReview = async (req, res) => {
             res.status(403).json({ message: "Only vendors can reply to reviews" });
             return;
         }
-        const parsed = ProductCRUDSchema_1.replyToReviewSchema.safeParse({ reviewId: req.params.id, ...req.body });
+        const parsed = ProductCRUDSchema_1.replyToReviewSchema.safeParse({ reviewId: (0, paramUtils_1.ensureString)(req.params.id), ...req.body });
         if (!parsed.success) {
             res.status(400).json({ error: parsed.error.issues });
             return;
@@ -231,14 +232,14 @@ const deleteReplyToReview = async (req, res) => {
             return;
         }
         const reply = await prisma_1.default.vendorReply.findUnique({
-            where: { reviewId: req.params.id },
+            where: { reviewId: (0, paramUtils_1.ensureString)(req.params.id) },
             include: { review: { include: { product: true } } },
         });
         if (!reply || reply.vendorId !== req.user.id) {
             res.status(403).json({ message: "Unauthorized or reply not found" });
             return;
         }
-        await prisma_1.default.vendorReply.delete({ where: { reviewId: req.params.id } });
+        await prisma_1.default.vendorReply.delete({ where: { reviewId: (0, paramUtils_1.ensureString)(req.params.id) } });
         res.json({ message: "Reply deleted successfully" });
     }
     catch (err) {
@@ -255,7 +256,7 @@ const voteReview = async (req, res) => {
             res.status(401).json({ message: "Unauthorized" });
             return;
         }
-        const parsed = ProductCRUDSchema_1.reviewVoteSchema.safeParse({ reviewId: req.params.id, ...req.body });
+        const parsed = ProductCRUDSchema_1.reviewVoteSchema.safeParse({ reviewId: (0, paramUtils_1.ensureString)(req.params.id), ...req.body });
         if (!parsed.success) {
             res.status(400).json({ error: parsed.error.issues });
             return;
@@ -280,7 +281,7 @@ const reportReview = async (req, res) => {
             res.status(401).json({ message: "Unauthorized" });
             return;
         }
-        const parsed = ProductCRUDSchema_1.reportReviewSchema.safeParse({ reviewId: req.params.id, ...req.body });
+        const parsed = ProductCRUDSchema_1.reportReviewSchema.safeParse({ reviewId: (0, paramUtils_1.ensureString)(req.params.id), ...req.body });
         if (!parsed.success) {
             res.status(400).json({ error: parsed.error.issues });
             return;
@@ -387,7 +388,7 @@ exports.reviewVendor = reviewVendor;
 // Get vendor reviews (with pagination)
 const getVendorReviews = async (req, res) => {
     try {
-        const vendorId = req.params.vendorId;
+        const vendorId = (0, paramUtils_1.ensureString)(req.params.vendorId);
         const { page = "1", limit = "10" } = req.query;
         const skip = (Number(page) - 1) * Number(limit);
         const take = Number(limit);
@@ -410,7 +411,7 @@ exports.getVendorReviews = getVendorReviews;
 // Vendor review summary
 const getVendorReviewSummary = async (req, res) => {
     try {
-        const vendorId = req.params.vendorId;
+        const vendorId = (0, paramUtils_1.ensureString)(req.params.vendorId);
         const breakdown = await prisma_1.default.vendorReview.groupBy({
             by: ["rating"],
             where: { vendorId },
@@ -440,7 +441,7 @@ const getVendorReviewSummary = async (req, res) => {
 exports.getVendorReviewSummary = getVendorReviewSummary;
 // Get single review by id
 const getVendorReviewById = async (req, res) => {
-    const reviewId = req.params.reviewId;
+    const reviewId = (0, paramUtils_1.ensureString)(req.params.reviewId);
     const review = await prisma_1.default.vendorReview.findUnique({
         where: { id: reviewId },
         include: { customer: { select: { id: true, name: true, avatarUrl: true } } },

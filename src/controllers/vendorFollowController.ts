@@ -1,5 +1,6 @@
 import {Response } from "express";
 import prisma from "../config/prismaClient";
+import { ensureString } from "../utils/paramUtils";
 import { followVendorSchema, unfollowVendorSchema } from "../validations/vendorFollowSchema";
 import { AuthRequest } from "../middlewares/auth.middleware";
 import { vendorFollowQueue } from "../utils/activityUtils/vendorFollowNotifications";
@@ -70,7 +71,7 @@ export const unfollowVendor = async (req: AuthRequest, res: Response) => {
 // 👁️ Check if user follows a vendor
 export const isFollowingVendor = async (req: AuthRequest, res: Response) => {
   try {
-    const vendorId = req.params.vendorId;
+    const vendorId = ensureString(req.params.vendorId);
     const customerId = req.user!.id;
 
     const follow = await prisma.vendorFollower.findUnique({
@@ -87,7 +88,7 @@ export const isFollowingVendor = async (req: AuthRequest, res: Response) => {
 // 📋 Get all followers of a vendor
 export const getVendorFollowers = async (req: AuthRequest, res: Response) => {
   try {
-    const vendorId = req.params.vendorId;
+    const vendorId = ensureString(req.params.vendorId);
 
     const followers = await prisma.vendorFollower.findMany({
       where: { vendorId },

@@ -1116,10 +1116,77 @@ export const getAllAddresses = async (req: AuthRequest, res: Response): Promise<
 };
 
 // ✅ Update an address (with ownership check)
-export const updateAddress = async (req: AuthRequest, res: Response): Promise<void> => {
-  const { id } = req.params;
-  const userId = req.user?.id;
+// export const updateAddress = async (req: AuthRequest, res: Response): Promise<void> => {
+//   const { id } = req.params;
+//   const userId = req.user?.id;
 
+//   if (!userId) {
+//     res.status(401).json({ message: "Unauthorized" });
+//     return;
+//   }
+
+//   const parsed = createAddressSchema.partial().safeParse(req.body);
+//   if (!parsed.success) {
+//     res.status(400).json({ errors: parsed.error.flatten().fieldErrors });
+//     return;
+//   }
+
+//   try {
+//     const updated = await prisma.address.updateMany({
+//       where: { id, userId }, // ✅ ensures only the owner's address can be updated
+//       data: parsed.data,
+//     });
+
+//     if (updated.count === 0) {
+//       res.status(404).json({ message: "Address not found or not owned by you" });
+//       return;
+//     }
+
+//     const address = await prisma.address.findUnique({ where: { id } });
+
+//     res.status(200).json({ message: "Address updated", address });
+//   } catch (err) {
+//     console.error("Update address error:", err);
+//     res.status(500).json({ error: "Server error" });
+//   }
+// };
+
+// // ✅ Delete an address (with ownership check)
+// export const deleteAddress = async (req: AuthRequest, res: Response): Promise<void> => {
+//   const userId = req.user?.id;
+
+//   if (!userId) {
+//      res.status(401).json({ message: "Unauthorized" });
+//      return;
+//   }
+
+//   const { id } = req.params;
+
+//   try {
+//     const deleted = await prisma.address.deleteMany({
+//       where: { id, userId }, // ✅ ensures only the owner's address can be deleted
+//     });
+
+//     if (deleted.count === 0) {
+//       res.status(404).json({ message: "Address not found or not owned by you" });
+//       return;
+//     }
+
+//     res.status(200).json({ message: "Address deleted" });
+//   } catch (err) {
+//     console.error("Delete address error:", err);
+//     res.status(500).json({ error: "Server error" });
+//   }
+// };
+
+
+// ✅ Update an address (with ownership check)
+export const updateAddress = async (req: AuthRequest, res: Response): Promise<void> => {
+  // Make sure we only get a single string ID
+  const rawId = req.params.id;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+
+  const userId = req.user?.id;
   if (!userId) {
     res.status(401).json({ message: "Unauthorized" });
     return;
@@ -1132,8 +1199,9 @@ export const updateAddress = async (req: AuthRequest, res: Response): Promise<vo
   }
 
   try {
+    // updateMany ensures only the owner's address can be updated
     const updated = await prisma.address.updateMany({
-      where: { id, userId }, // ✅ ensures only the owner's address can be updated
+      where: { id, userId },
       data: parsed.data,
     });
 
@@ -1142,7 +1210,10 @@ export const updateAddress = async (req: AuthRequest, res: Response): Promise<vo
       return;
     }
 
-    const address = await prisma.address.findUnique({ where: { id } });
+    // findUnique expects a single string ID
+    const address = await prisma.address.findUnique({
+      where: { id },
+    });
 
     res.status(200).json({ message: "Address updated", address });
   } catch (err) {
@@ -1154,17 +1225,18 @@ export const updateAddress = async (req: AuthRequest, res: Response): Promise<vo
 // ✅ Delete an address (with ownership check)
 export const deleteAddress = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user?.id;
-
   if (!userId) {
-     res.status(401).json({ message: "Unauthorized" });
-     return;
+    res.status(401).json({ message: "Unauthorized" });
+    return;
   }
 
-  const { id } = req.params;
+  // Ensure ID is a string
+  const rawId = req.params.id;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
 
   try {
     const deleted = await prisma.address.deleteMany({
-      where: { id, userId }, // ✅ ensures only the owner's address can be deleted
+      where: { id, userId }, // only owner's address
     });
 
     if (deleted.count === 0) {

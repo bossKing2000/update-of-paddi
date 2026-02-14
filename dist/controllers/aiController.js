@@ -43,7 +43,7 @@ const localSearchCorrect_1 = require("../AI/localSearchCorrect");
 //   if (!query || typeof query !== 'string') return res.status(400).json({ error: 'Missing query' });
 //   const corrected = await searchService.correctSearchQuery(query); // ✅ correct now
 //   res.json({ corrected });
-// };
+// }; 
 const getRecommendations = async (req, res) => {
     const { userId } = req.query;
     if (!userId || typeof userId !== 'string')

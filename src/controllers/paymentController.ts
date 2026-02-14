@@ -403,10 +403,12 @@ export interface Order {
   totalPrice: number;
 }
 
+import { ensureString } from "../utils/paramUtils";
+
 // GET /api/payments/confirm/:reference
 export const confirmPayment = async (req: Request, res: Response) => {
   try {
-    const { reference } = req.params;
+    const reference = ensureString(req.params.reference);
     // 1️⃣ Check if payment exists
     const existing = await prisma.payment.findUnique({
       where: { reference },
@@ -746,7 +748,7 @@ export async function verifyOrderPayment(orderId: string) {
 // Controller: verify before fulfillment
 // ───────────────────────────────────────────────
 export const verifyPaymentBeforeFulfillment = async (req: AuthRequest, res: Response) => {
-  const { orderId } = req.params;
+  const orderId = ensureString(req.params.orderId);
 
   if (!orderId) {
     return res.status(400).json({ error: "Missing orderId parameter" });
@@ -1054,7 +1056,7 @@ export const setDefaultCard = async (req: AuthRequest, res: Response) => {
  */
 export const deleteSavedCard = async (req: AuthRequest, res: Response) => {
   try {
-    const { cardId } = req.params;
+    const cardId = ensureString(req.params.cardId);
     const userId = req.user!.id;
 
     if (!cardId) {

@@ -482,22 +482,22 @@ async function main() {
                     });
                 }
                 // ✅ Schedule — ONLY ONE PER PRODUCT
-                // scheduleData.push({
-                //   productId,
-                //   goLiveAt: faker.date.soon({ days: 5 }),
-                //   takeDownAt: faker.date.soon({ days: 10 }),
-                //   isLive: faker.datatype.boolean(),
-                //   graceMinutes: faker.number.int({ min: 0, max: 30 }),
-                // });
-                const goLiveAt = new Date();
-                const takeDownAt = new Date(Date.now() + 90 * 60 * 1000);
                 scheduleData.push({
                     productId,
-                    goLiveAt,
-                    takeDownAt,
-                    isLive: true,
-                    graceMinutes: faker_1.faker.number.int({ min: 0, max: 50 }),
+                    goLiveAt: faker_1.faker.date.soon({ days: 2 }),
+                    takeDownAt: faker_1.faker.date.soon({ days: 10 }),
+                    isLive: faker_1.faker.datatype.boolean(),
+                    graceMinutes: faker_1.faker.number.int({ min: 0, max: 30 }),
                 });
+                // const goLiveAt = new Date();
+                // const takeDownAt = new Date(Date.now() + 90 * 60 * 1000);
+                // scheduleData.push({
+                //   productId,
+                //   goLiveAt,
+                //   takeDownAt,
+                //   isLive: true,
+                //   graceMinutes: faker.number.int({ min: 0, max: 50 }),
+                // });
             }
             if (productsData.length)
                 await prisma.product.createMany({ data: productsData });
@@ -588,9 +588,49 @@ async function main() {
     // ==============================
     const engagedCustomers = faker_1.faker.helpers.arrayElements(allCustomers, Math.floor(allCustomers.length * CUSTOMER_ENGAGEMENT));
     const allProducts = await prisma.product.findMany();
+    // Helper function to generate realistic order dates
+    function generateOrderDate() {
+        const today = new Date();
+        // Distribution: 70% past (1-30 days ago), 20% today, 10% future (1-5 days ahead)
+        const random = Math.random();
+        if (random < 0.7) {
+            // Past orders: 1 to 30 days ago
+            const daysAgo = faker_1.faker.number.int({ min: 1, max: 30 });
+            const date = new Date();
+            date.setDate(date.getDate() - daysAgo);
+            // Set random time during business hours (8 AM to 10 PM)
+            date.setHours(faker_1.faker.number.int({ min: 8, max: 22 }));
+            date.setMinutes(faker_1.faker.number.int({ min: 0, max: 59 }));
+            date.setSeconds(faker_1.faker.number.int({ min: 0, max: 59 }));
+            return date;
+        }
+        else if (random < 0.9) {
+            // Today's orders (within last 24 hours)
+            const date = new Date();
+            // For today, allow any time up to now
+            const hoursAgo = faker_1.faker.number.int({ min: 0, max: 23 });
+            const minutesAgo = faker_1.faker.number.int({ min: 0, max: 59 });
+            date.setHours(date.getHours() - hoursAgo);
+            date.setMinutes(date.getMinutes() - minutesAgo);
+            return date;
+        }
+        else {
+            // Future orders: 1 to 5 days ahead (for pre-orders or scheduled orders)
+            const daysAhead = faker_1.faker.number.int({ min: 1, max: 5 });
+            const date = new Date();
+            date.setDate(date.getDate() + daysAhead);
+            // Set random time during business hours
+            date.setHours(faker_1.faker.number.int({ min: 8, max: 22 }));
+            date.setMinutes(faker_1.faker.number.int({ min: 0, max: 59 }));
+            date.setSeconds(faker_1.faker.number.int({ min: 0, max: 59 }));
+            return date;
+        }
+    }
     for (const customer of engagedCustomers) {
         const ordersCount = faker_1.faker.number.int(MAX_ORDERS_PER_CUSTOMER);
         for (let i = 0; i < ordersCount; i++) {
+            // Generate order date with realistic distribution
+            const orderDate = generateOrderDate();
             const vendor = faker_1.faker.helpers.arrayElement(activeVendors);
             const vendorProducts = allProducts.filter((p) => p.vendorId === vendor.id);
             if (!vendorProducts.length)
@@ -603,12 +643,11 @@ async function main() {
                 const subtotal = quantity * product.price;
                 basePrice += subtotal;
                 orderItemsData.push({
-                    orderId: "",
+                    orderId: "", // Will be set later
                     productId: product.id,
                     quantity,
                     unitPrice: product.price,
                     subtotal,
-                    // specialRequest: faker.datatype.boolean() ? faker.lorem.sentence() : null,
                 });
             }
             const extraCharge = faker_1.faker.number.float({ min: 10, max: 5500, fractionDigits: 2 });
@@ -616,6 +655,12 @@ async function main() {
             const orderStatus = pickWeighted(ORDER_STATUS_PROBABILITIES);
             const customerAddresses = await prisma.address.findMany({ where: { userId: customer.id } });
             const address = faker_1.faker.helpers.arrayElement(customerAddresses);
+            // Determine if order should be completed (for paidAt)
+            const isCompleted = orderStatus === client_1.OrderStatus.COMPLETED;
+            // Calculate payment grace period (15 minutes default)
+            const paymentGraceMinutes = 15;
+            const protectedUntil = new Date(orderDate.getTime() + paymentGraceMinutes * 60 * 1000);
+            // First create the order (will get current timestamp for createdAt)
             const order = await prisma.order.create({
                 data: {
                     customerId: customer.id,
@@ -626,30 +671,136 @@ async function main() {
                     totalPrice,
                     status: orderStatus,
                     customerApproval: true,
-                    paidAt: orderStatus === client_1.OrderStatus.COMPLETED ? faker_1.faker.date.recent({ days: 5 }) : null,
+                    // If order is completed, set paidAt to a time shortly after order creation
+                    paidAt: isCompleted
+                        ? new Date(orderDate.getTime() + faker_1.faker.number.int({ min: 30000, max: 3600000 })) // 30 sec to 1 hour later
+                        : null,
+                    // Set payment status based on order status
+                    paymentStatus: isCompleted
+                        ? client_1.PaymentStatus.SUCCESS
+                        : orderStatus === client_1.OrderStatus.CANCELLED
+                            ? client_1.PaymentStatus.FAILED
+                            : client_1.PaymentStatus.PENDING,
+                    // Payment started shortly after order
+                    paymentStartedAt: new Date(orderDate.getTime() + faker_1.faker.number.int({ min: 1000, max: 30000 })), // 1-30 seconds after order
+                    // Protection period for order modification/cancellation
+                    protectedUntil,
+                    // Payment grace period
+                    paymentGraceMinutes,
                 },
             });
-            const itemsToCreate = orderItemsData.map((item) => ({ ...item, orderId: order.id }));
-            if (itemsToCreate.length)
+            // Update the order with our custom created date using raw SQL
+            await prisma.$executeRaw `
+      UPDATE "Order" 
+      SET "createdAt" = ${orderDate}, 
+          "updatedAt" = ${orderDate}
+      WHERE id = ${order.id}
+    `;
+            // Create order items
+            const itemsToCreate = orderItemsData.map((item) => ({
+                ...item,
+                orderId: order.id,
+            }));
+            if (itemsToCreate.length) {
                 await prisma.orderItem.createMany({ data: itemsToCreate });
-            const paymentStatus = pickWeighted(PAYMENT_STATUS_PROBABILITIES);
+                // Update order items with custom timestamps
+                for (const item of itemsToCreate) {
+                    await prisma.$executeRaw `
+          UPDATE "OrderItem"
+          SET "createdAt" = ${orderDate}, 
+              "updatedAt" = ${orderDate}
+          WHERE "orderId" = ${order.id} AND "productId" = ${item.productId}
+        `;
+                }
+            }
+            // Determine payment status (may differ from order status for realism)
+            const paymentStatusProbabilities = [
+                { status: client_1.PaymentStatus.SUCCESS, weight: 0.8 }, // 80% success rate
+                { status: client_1.PaymentStatus.PENDING, weight: 0.1 }, // 10% pending
+                { status: client_1.PaymentStatus.FAILED, weight: 0.1 }, // 10% failed
+            ];
+            const paymentStatus = pickWeighted(paymentStatusProbabilities);
+            // Calculate payment dates relative to the order date
+            const paymentStartedAt = new Date(orderDate.getTime() + faker_1.faker.number.int({ min: 1000, max: 30000 })); // 1-30 seconds after order
+            const paymentCompletedAt = paymentStatus === client_1.PaymentStatus.SUCCESS
+                ? new Date(paymentStartedAt.getTime() + faker_1.faker.number.int({ min: 1000, max: 60000 })) // 1 sec to 1 min later
+                : null;
+            // Payment expires 24 hours after order for pending payments
+            const paymentExpiresAt = new Date(orderDate.getTime() + 24 * 60 * 60 * 1000);
             await prisma.payment.create({
                 data: {
                     userId: customer.id,
                     orderId: order.id,
-                    amount: Math.round(totalPrice * 100),
-                    reference: `SEED-${faker_1.faker.string.alphanumeric(10)}`,
+                    amount: Math.round(totalPrice * 100), // Store in cents
+                    reference: `SEED-${faker_1.faker.string.alphanumeric(10).toUpperCase()}`,
                     status: paymentStatus,
-                    startedAt: faker_1.faker.date.recent({ days: 3 }),
-                    completedAt: paymentStatus === client_1.PaymentStatus.SUCCESS ? faker_1.faker.date.recent({ days: 2 }) : null,
-                    expiresAt: faker_1.faker.date.soon({ days: 5 }),
-                    channel: faker_1.faker.helpers.arrayElement(["card", "bank", "ussd"]),
+                    startedAt: paymentStartedAt,
+                    completedAt: paymentCompletedAt,
+                    expiresAt: paymentExpiresAt,
+                    channel: faker_1.faker.helpers.arrayElement(["card", "bank", "ussd", "mobile_money"]),
                     ipAddress: faker_1.faker.internet.ip(),
                     userAgent: faker_1.faker.internet.userAgent(),
+                    metadata: {
+                        device: faker_1.faker.helpers.arrayElement(["mobile", "desktop", "tablet"]),
+                        browser: faker_1.faker.internet.userAgent(),
+                        os: faker_1.faker.helpers.arrayElement(["iOS", "Android", "Windows", "macOS"]),
+                    },
+                    // Set timestamps to match order date
+                    createdAt: orderDate,
+                    updatedAt: orderDate,
                 },
             });
+            // If order is cancelled, set cancellation time and reason
+            if (orderStatus === client_1.OrderStatus.CANCELLED) {
+                const cancellationTime = new Date(orderDate.getTime() + faker_1.faker.number.int({ min: 60000, max: 3600000 })); // 1 min to 1 hour later
+                // Determine cancellation reason based on timing
+                let cancellationReason = "USER_CANCELLED";
+                if (cancellationTime > protectedUntil) {
+                    cancellationReason = "PAYMENT_EXPIRED";
+                }
+                else if (faker_1.faker.number.float({ min: 0, max: 1 }) < 0.2) {
+                    cancellationReason = "VENDOR_REJECTED";
+                }
+                await prisma.order.update({
+                    where: { id: order.id },
+                    data: {
+                        cancelledAt: cancellationTime,
+                        cancellationReason,
+                        updatedAt: cancellationTime,
+                    },
+                });
+            }
+            // For completed orders, create delivery assignment 30% of the time
+            if (orderStatus === client_1.OrderStatus.COMPLETED && faker_1.faker.number.float({ min: 0, max: 1 }) < 0.3) {
+                // First, check if there are delivery persons available
+                const deliveryPersons = await prisma.deliveryPerson.findMany({
+                    take: 5
+                });
+                if (deliveryPersons.length > 0) {
+                    const deliveryPerson = faker_1.faker.helpers.arrayElement(deliveryPersons);
+                    const assignedAt = new Date(orderDate.getTime() + faker_1.faker.number.int({ min: 300000, max: 1800000 })); // 5-30 minutes after order
+                    await prisma.deliveryAssignment.create({
+                        data: {
+                            orderId: order.id,
+                            deliveryPersonId: deliveryPerson.id, // Use deliveryPersonId, not deliveryUserId
+                            status: "ASSIGNED", // Use string value from your DeliveryStatus enum
+                            assignedAt,
+                            // estimatedDeliveryTime is not in your schema, remove it
+                            createdAt: assignedAt,
+                            updatedAt: assignedAt,
+                        },
+                    });
+                }
+            }
+            // Add a small delay to prevent database overload
+            if (i % 10 === 0) {
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
         }
+        // Log progress
+        console.log(`📦 Created ${ordersCount} orders for customer ${customer.email}`);
     }
+    console.log("💳 Orders, order items, and payments seeded successfully!");
     console.log("💳 Orders, order items, and payments seeded successfully!");
     // ==============================
     // 6️⃣ Clear Redis Cache

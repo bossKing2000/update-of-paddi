@@ -1,13 +1,14 @@
 import { Response } from "express";
 import { AuthRequest } from "../middlewares/auth.middleware";
 import { DeliveryAssignmentService } from "../services/deliveryAssignment";
+import { ensureString, ensureNumber } from "../utils/paramUtils";
 
 export class DeliveryAssignmentController {
 
 
     static async acceptBroadcast(req: AuthRequest, res: Response) {
     try {
-      const { broadcastId } = req.params;
+      const broadcastId = ensureString(req.params.broadcastId);
       const driverId = req.user?.id;
 
       if (!driverId) {
@@ -37,8 +38,9 @@ export class DeliveryAssignmentController {
   }
 
 static async assignOrder(req: AuthRequest, res: Response) {
-  try {
-    const { orderId, driverId } = req.body; // <-- include driverId for manual assignment
+    try {
+    const { orderId } = req.body; // <-- include driverId for manual assignment
+    const driverId = ensureString(req.body.driverId) || req.user?.id;
     if (!orderId) {
       return res.status(400).json({ success: false, message: "orderId is required" });
     }
@@ -53,7 +55,7 @@ static async assignOrder(req: AuthRequest, res: Response) {
 
   static async acceptAssignment(req: AuthRequest, res: Response) {
     try {
-      const { assignmentId } = req.params;
+      const assignmentId = ensureString(req.params.assignmentId);
       const driverId = req.user?.id;
       if (!driverId) return res.status(401).json({ success: false, message: "Unauthorized" });
       if (!assignmentId) return res.status(400).json({ success: false, message: "assignmentId is required" });
@@ -68,7 +70,7 @@ static async assignOrder(req: AuthRequest, res: Response) {
 
   static async declineAssignment(req: AuthRequest, res: Response) {
     try {
-      const { assignmentId } = req.params;
+      const assignmentId = ensureString(req.params.assignmentId);
       if (!assignmentId) return res.status(400).json({ success: false, message: "assignmentId is required" });
 
       const assignment = await DeliveryAssignmentService.handleDecline(assignmentId);
@@ -94,7 +96,7 @@ static async assignOrder(req: AuthRequest, res: Response) {
 
   static async updateDeliveryStatus(req: AuthRequest, res: Response) {
   try {
-    const { assignmentId } = req.params;
+    const assignmentId = ensureString(req.params.assignmentId);
     const { status } = req.body; // PICKED_UP, EN_ROUTE, DELIVERED, CANCELLED
     const driverId = req.user?.id;
 
@@ -111,7 +113,7 @@ static async assignOrder(req: AuthRequest, res: Response) {
 
  static async getAssignmentById(req: AuthRequest, res: Response) {
     try {
-      const { assignmentId } = req.params;
+      const assignmentId = ensureString(req.params.assignmentId);
       const assignment = await DeliveryAssignmentService.getAssignmentById(assignmentId);
       res.json({ success: true, assignment });
     } catch (err: any) {
@@ -122,7 +124,7 @@ static async assignOrder(req: AuthRequest, res: Response) {
 
   static async getDriverHistory(req: AuthRequest, res: Response) {
     try {
-      const { driverId } = req.params;
+      const driverId = ensureString(req.params.driverId);
       const history = await DeliveryAssignmentService.getDriverHistory(driverId);
       res.json({ success: true, history });
     } catch (err: any) {
@@ -133,7 +135,7 @@ static async assignOrder(req: AuthRequest, res: Response) {
 
   static async getCustomerHistory(req: AuthRequest, res: Response) {
     try {
-      const { customerId } = req.params;
+      const customerId = ensureString(req.params.customerId);
       const history = await DeliveryAssignmentService.getCustomerHistory(customerId);
       res.json({ success: true, history });
     } catch (err: any) {
@@ -144,7 +146,7 @@ static async assignOrder(req: AuthRequest, res: Response) {
 
   static async getDriverAnalytics(req: AuthRequest, res: Response) {
     try {
-      const { driverId } = req.params;
+      const driverId = ensureString(req.params.driverId);
       const analytics = await DeliveryAssignmentService.getDriverAnalytics(driverId);
       res.json({ success: true, analytics });
     } catch (err: any) {
@@ -155,7 +157,8 @@ static async assignOrder(req: AuthRequest, res: Response) {
 
   static async getAvailableDrivers(req: AuthRequest, res: Response) {
   try {
-    const { latitude, longitude } = req.query;
+    const latitude = ensureNumber(req.query.latitude);
+    const longitude = ensureNumber(req.query.longitude);
 
     // Optional validation
     if (!latitude || !longitude) {
@@ -164,10 +167,9 @@ static async assignOrder(req: AuthRequest, res: Response) {
         message: "latitude and longitude are required in query",
       });
     }
-
     const drivers = await DeliveryAssignmentService.findAvailableDrivers(
-      Number(latitude),
-      Number(longitude)
+      latitude,
+      longitude
     );
 
     return res.json({ success: true, drivers });

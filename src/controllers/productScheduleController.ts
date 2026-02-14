@@ -4,6 +4,7 @@ import { errorResponse, successResponse } from "../validators/codeMessage";
 import { productLiveQueue } from "../jobs/workers jobs/productLiveWorker";
 import { productDeactivateQueue } from "../jobs/workers jobs/productDeactivateJob";
 import { addMinutesUtc, isBeforeUtc, nowUtc, toUtc } from "../utils/time";
+import { ensureString } from "../utils/paramUtils";
 import { clearProductFromCarts } from "../services/product.service";
 import { Request, Response, RequestHandler } from "express";
 import { clearProductCache } from "../services/clearCaches";
@@ -18,7 +19,7 @@ import { ActivityType } from "@prisma/client";
  */
 export const goLive = async (req: AuthRequest, res: Response) => {
   try {
-    const { id: productId } = req.params;
+    const productId = ensureString(req.params.id);
     const { goLiveAt, takeDownAt, graceMinutes = 15 } = req.body;
 
     if (!req.user || req.user.role !== "VENDOR") {
@@ -170,7 +171,7 @@ await recordActivityBundle({
  */
 export const takeDown = async (req: AuthRequest, res: Response) => {
   try {
-    const { id: productId } = req.params;
+    const productId = ensureString(req.params.id);
 
     // Fetch product
     const product = await prisma.product.findUnique({ where: { id: productId } });
@@ -259,7 +260,7 @@ for (const pattern of searchPatterns) {
  */
 export const extendGrace = async (req: AuthRequest, res: Response) => {
   try {
-    const { id: productId } = req.params;
+    const productId = ensureString(req.params.id);
     const { extraMinutes } = req.body;
 
     if (!extraMinutes || extraMinutes <= 0)

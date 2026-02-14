@@ -10,6 +10,12 @@ const recordActivityBundle_1 = require("../utils/activityUtils/recordActivityBun
 const cartSchema_1 = require("../validations/cartSchema");
 const redis_1 = require("../lib/redis");
 const codeMessage_1 = require("../validators/codeMessage");
+// Normalize Express params/query values to string
+function ensureString(v) {
+    if (v === undefined || v === null)
+        return "";
+    return Array.isArray(v) ? v[0] : String(v);
+}
 // Helper: Calculate cart totals
 const calculateCartTotals = (items) => {
     const basePrice = items.reduce((sum, item) => sum + (item.unitPrice * item.quantity), 0);
@@ -102,7 +108,7 @@ const addToCart = async (req, res) => {
         }
         // Calculate item price with options
         const optionsPrice = product.options
-            .filter(opt => selectedOptions.includes(opt.id))
+            .filter((opt) => selectedOptions.includes(opt.id))
             .reduce((sum, opt) => sum + opt.price, 0);
         const unitPrice = product.price + optionsPrice;
         const subtotal = unitPrice * quantity;
@@ -124,11 +130,11 @@ const addToCart = async (req, res) => {
                 where: { cartItemId: existingItem.id },
             });
             await prisma_1.default.cartItemOption.createMany({
-                data: selectedOptions.map(optionId => ({
+                data: selectedOptions.map((optionId) => ({
                     cartItemId: existingItem.id,
                     productOptionId: optionId,
-                    name: product.options.find(opt => opt.id === optionId).name,
-                    price: product.options.find(opt => opt.id === optionId).price,
+                    name: product.options.find((opt) => opt.id === optionId).name,
+                    price: product.options.find((opt) => opt.id === optionId).price,
                 })),
             });
         }
@@ -142,10 +148,10 @@ const addToCart = async (req, res) => {
                     unitPrice,
                     subtotal,
                     options: {
-                        create: selectedOptions.map(optionId => ({
+                        create: selectedOptions.map((optionId) => ({
                             productOptionId: optionId,
-                            name: product.options.find(opt => opt.id === optionId).name,
-                            price: product.options.find(opt => opt.id === optionId).price,
+                            name: product.options.find((opt) => opt.id === optionId).name,
+                            price: product.options.find((opt) => opt.id === optionId).price,
                         })),
                     },
                     specialRequest,
@@ -176,7 +182,7 @@ exports.addToCart = addToCart;
 // PUT /cart/items/:itemId - Update cart item
 const updateCartItem = async (req, res) => {
     try {
-        const { itemId } = req.params;
+        const itemId = ensureString(req.params.itemId);
         const { quantity, selectedOptions, specialRequest } = req.body;
         // Validate cart item belongs to user
         const item = await prisma_1.default.cartItem.findFirst({
@@ -197,7 +203,7 @@ const updateCartItem = async (req, res) => {
         }
         // Validate options if provided
         if (selectedOptions) {
-            const invalidOptions = selectedOptions.filter((optId) => !item.product.options.some(opt => opt.id === optId));
+            const invalidOptions = selectedOptions.filter((optId) => !item.product.options.some((opt) => opt.id === optId));
             if (invalidOptions.length > 0) {
                 return res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_OPTIONS", "Invalid product options selected", { invalidOptions }));
             }
@@ -210,9 +216,9 @@ const updateCartItem = async (req, res) => {
             updateData.specialRequest = specialRequest;
         // Recalculate price if quantity or options change
         if (quantity !== undefined || selectedOptions) {
-            const finalOptions = selectedOptions || item.options.map(opt => opt.productOptionId);
+            const finalOptions = selectedOptions || item.options.map((opt) => opt.productOptionId);
             const optionsPrice = item.product.options
-                .filter(opt => finalOptions.includes(opt.id))
+                .filter((opt) => finalOptions.includes(opt.id))
                 .reduce((sum, opt) => sum + opt.price, 0);
             const unitPrice = item.product.price + optionsPrice;
             const subtotal = unitPrice * (quantity ?? item.quantity);
@@ -233,8 +239,8 @@ const updateCartItem = async (req, res) => {
                 data: selectedOptions.map((optionId) => ({
                     cartItemId: itemId,
                     productOptionId: optionId,
-                    name: item.product.options.find(opt => opt.id === optionId).name,
-                    price: item.product.options.find(opt => opt.id === optionId).price
+                    name: item.product.options.find((opt) => opt.id === optionId).name,
+                    price: item.product.options.find((opt) => opt.id === optionId).price
                 }))
             });
         }
@@ -426,7 +432,7 @@ exports.checkoutCart = checkoutCart;
 // DELETE /cart/items/:itemId - Remove item from cart
 const removeCartItem = async (req, res) => {
     try {
-        const { itemId } = req.params;
+        const itemId = ensureString(req.params.itemId);
         const userId = req.user.id;
         // Validate cart item belongs to user
         const item = await prisma_1.default.cartItem.findFirst({

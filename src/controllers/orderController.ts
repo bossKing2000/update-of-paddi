@@ -1,6 +1,7 @@
 import {Response } from "express";
 import { AuthRequest } from "../middlewares/auth.middleware";
 import prisma from "../lib/prisma";
+import { ensureString } from "../utils/paramUtils";
 import {ActivityType, Order, OrderStatus, Prisma, Role } from "@prisma/client";
 import dayjs from "dayjs";
 import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
@@ -428,7 +429,7 @@ export const getMyOrders = async (
 
 export const getSingleOrder = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { orderId } = req.params;
+    const orderId = ensureString(req.params.orderId);
     const userId = req.user?.id;
 
     if (!userId) {
@@ -724,8 +725,9 @@ export const createSpecialOffer = async (req: AuthRequest, res: Response) => {
 // 🌟 Customer accepts an offer
 export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
   try {
-    const { offerId } = req.params;
+    const offerId = ensureString(req.params.offerId);
     const userId = req.user?.id;
+    const { vendorNote, extraCharge } = req.body as { vendorNote: string; extraCharge: number };
 
     if (!userId) return res.status(401).json(errorResponse("UNAUTHORIZED", "Unauthorized"));
 
@@ -788,7 +790,7 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
 // 🌟 Customer rejects all offers
 export const rejectSpecialRequest = async (req: AuthRequest, res: Response) => {
   try {
-    const { requestId } = req.params;
+    const requestId = ensureString(req.params.requestId);
     const userId = req.user?.id;
 
     const request = await prisma.specialOrderRequest.findUnique({ where: { id: requestId } });
@@ -807,7 +809,7 @@ export const rejectSpecialRequest = async (req: AuthRequest, res: Response) => {
 
 export const updateOrderStatus = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { orderId } = req.params;
+    const orderId = ensureString(req.params.orderId);
     const { status } = req.body;
     const userId = req.user?.id;
     const userRole = req.user?.role as Role | undefined;
@@ -1315,7 +1317,7 @@ export const getMyNotifications = async (req: AuthRequest, res: Response): Promi
 // ✅ Mark Single Notification as Read
 export const markNotificationAsRead = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { notificationId } = req.params;
+    const notificationId = ensureString(req.params.notificationId);
     const userId = req.user?.id;
 
     if (!userId) {

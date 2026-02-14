@@ -7,6 +7,11 @@ import { addToCartSchema } from "../validations/cartSchema";
 import { ShopCartRedis } from "../lib/redis";
 import { errorResponse, successResponse } from "../validators/codeMessage";
 
+// Normalize Express params/query values to string
+function ensureString(v: any): string {
+  if (v === undefined || v === null) return "";
+  return Array.isArray(v) ? v[0] : String(v);
+}
 
 // Helper: Calculate cart totals
 const calculateCartTotals = (items: Array<{ unitPrice: number; quantity: number }>) => {
@@ -123,8 +128,8 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
 
     // Calculate item price with options
     const optionsPrice = product.options
-      .filter(opt => selectedOptions.includes(opt.id))
-      .reduce((sum, opt) => sum + opt.price, 0);
+      .filter((opt: any) => selectedOptions.includes(opt.id))
+      .reduce((sum: number, opt: any) => sum + opt.price, 0);
 
     const unitPrice = product.price + optionsPrice;
     const subtotal = unitPrice * quantity;
@@ -150,11 +155,11 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
       });
 
       await prisma.cartItemOption.createMany({
-        data: selectedOptions.map(optionId => ({
+        data: selectedOptions.map((optionId: string) => ({
           cartItemId: existingItem.id,
           productOptionId: optionId,
-          name: product.options.find(opt => opt.id === optionId)!.name,
-          price: product.options.find(opt => opt.id === optionId)!.price,
+          name: product.options.find((opt: any) => opt.id === optionId)!.name,
+          price: product.options.find((opt: any) => opt.id === optionId)!.price,
         })),
       });
     } else {
@@ -167,10 +172,10 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
           unitPrice,
           subtotal,
           options: {
-            create: selectedOptions.map(optionId => ({
+            create: selectedOptions.map((optionId: string) => ({
               productOptionId: optionId,
-              name: product.options.find(opt => opt.id === optionId)!.name,
-              price: product.options.find(opt => opt.id === optionId)!.price,
+              name: product.options.find((opt: any) => opt.id === optionId)!.name,
+              price: product.options.find((opt: any) => opt.id === optionId)!.price,
             })),
           },
           specialRequest,
@@ -205,7 +210,7 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
 // PUT /cart/items/:itemId - Update cart item
 export const updateCartItem = async (req: AuthRequest, res: Response) => {
   try {
-    const { itemId } = req.params;
+    const itemId = ensureString(req.params.itemId);
     const { quantity, selectedOptions, specialRequest } = req.body;
 
     // Validate cart item belongs to user
@@ -230,7 +235,7 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
     // Validate options if provided
     if (selectedOptions) {
       const invalidOptions = selectedOptions.filter(
-        (optId: string) => !item.product.options.some(opt => opt.id === optId)
+        (optId: string) => !item.product.options.some((opt: any) => opt.id === optId)
       );
       if (invalidOptions.length > 0) {
         return res.status(400).json(errorResponse(
@@ -248,10 +253,10 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
 
     // Recalculate price if quantity or options change
     if (quantity !== undefined || selectedOptions) {
-      const finalOptions = selectedOptions || item.options.map(opt => opt.productOptionId);
+      const finalOptions = selectedOptions || item.options.map((opt: any) => opt.productOptionId);
       const optionsPrice = item.product.options
-        .filter(opt => finalOptions.includes(opt.id))
-        .reduce((sum, opt) => sum + opt.price, 0);
+        .filter((opt: any) => finalOptions.includes(opt.id))
+        .reduce((sum: number, opt: any) => sum + opt.price, 0);
 
       const unitPrice = item.product.price + optionsPrice;
       const subtotal = unitPrice * (quantity ?? item.quantity);
@@ -276,8 +281,8 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
         data: selectedOptions.map((optionId: string) => ({
           cartItemId: itemId,
           productOptionId: optionId,
-          name: item.product.options.find(opt => opt.id === optionId)!.name,
-          price: item.product.options.find(opt => opt.id === optionId)!.price
+          name: item.product.options.find((opt: any) => opt.id === optionId)!.name,
+          price: item.product.options.find((opt: any) => opt.id === optionId)!.price
         }))
       });
     }
@@ -521,7 +526,7 @@ const order = await prisma.order.create({
 // DELETE /cart/items/:itemId - Remove item from cart
 export const removeCartItem = async (req: AuthRequest, res: Response) => {
   try {
-    const { itemId } = req.params;
+    const itemId = ensureString(req.params.itemId);
     const userId = req.user!.id;
 
     // Validate cart item belongs to user

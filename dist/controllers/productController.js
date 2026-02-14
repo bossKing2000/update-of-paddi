@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getMostPopularProducts = exports.searchProducts = exports.getSearchSuggestions = exports.deleteProduct = exports.archiveProduct = exports.updateProduct = exports.getProductById = exports.getAllProducts = exports.createProduct = exports.computeIsLive = void 0;
 const prisma_1 = __importDefault(require("../lib/prisma"));
+const paramUtils_1 = require("../utils/paramUtils");
 const ProductCRUDSchema_1 = require("../validations/ProductCRUDSchema");
 const client_1 = require("@prisma/client");
 const redis_1 = require("../lib/redis");
@@ -293,9 +294,8 @@ const getAllProducts = async (req, res) => {
 };
 exports.getAllProducts = getAllProducts;
 const getProductById = async (req, res) => {
-    const productId = req.params.id; // ← move outside try
+    const productId = (0, paramUtils_1.ensureString)(req.params.id); // ← move outside try
     try {
-        const productId = req.params.id;
         const cacheKey = redisCacheTiming_1.CACHE_KEYS.PRODUCT_DETAIL(productId);
         const ttl = redisCacheTiming_1.CACHE_TTLS.PRODUCT_DETAIL;
         // 🔹 Helper: compute live status dynamically
@@ -402,7 +402,7 @@ exports.getProductById = getProductById;
 // ✅ PRODUCTION-READY UPDATE PRODUCT CONTROLLER
 // ==========================================================
 const updateProduct = async (req, res) => {
-    const productId = req.params.id;
+    const productId = (0, paramUtils_1.ensureString)(req.params.id);
     try {
         // 1. AUTHENTICATION & AUTHORIZATION
         if (!req.user || req.user.role !== "VENDOR") {
@@ -759,7 +759,7 @@ exports.updateProduct = updateProduct;
 // ✅ Archive Product Controller
 // ==========================================================
 const archiveProduct = async (req, res) => {
-    const productId = req.params.id;
+    const productId = (0, paramUtils_1.ensureString)(req.params.id);
     try {
         if (!req.user || req.user.role !== "VENDOR") {
             res.status(403).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Only vendors can archive products"));
@@ -813,7 +813,7 @@ exports.archiveProduct = archiveProduct;
 // ✅ Delete Product Controller
 // ==========================================================
 const deleteProduct = async (req, res) => {
-    const productId = req.params.id;
+    const productId = (0, paramUtils_1.ensureString)(req.params.id);
     try {
         if (!req.user || req.user.role !== "VENDOR") {
             res.status(403).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Only vendors can delete products"));

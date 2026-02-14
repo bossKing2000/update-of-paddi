@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getFollowedVendors = exports.getVendorFollowers = exports.isFollowingVendor = exports.unfollowVendor = exports.followVendor = void 0;
 const prismaClient_1 = __importDefault(require("../config/prismaClient"));
+const paramUtils_1 = require("../utils/paramUtils");
 const vendorFollowSchema_1 = require("../validations/vendorFollowSchema");
 const vendorFollowNotifications_1 = require("../utils/activityUtils/vendorFollowNotifications");
 const codeMessage_1 = require("../validators/codeMessage");
@@ -65,7 +66,7 @@ exports.unfollowVendor = unfollowVendor;
 // 👁️ Check if user follows a vendor
 const isFollowingVendor = async (req, res) => {
     try {
-        const vendorId = req.params.vendorId;
+        const vendorId = (0, paramUtils_1.ensureString)(req.params.vendorId);
         const customerId = req.user.id;
         const follow = await prismaClient_1.default.vendorFollower.findUnique({
             where: { vendorId_customerId: { vendorId, customerId } },
@@ -81,7 +82,7 @@ exports.isFollowingVendor = isFollowingVendor;
 // 📋 Get all followers of a vendor
 const getVendorFollowers = async (req, res) => {
     try {
-        const vendorId = req.params.vendorId;
+        const vendorId = (0, paramUtils_1.ensureString)(req.params.vendorId);
         const followers = await prismaClient_1.default.vendorFollower.findMany({
             where: { vendorId },
             include: {

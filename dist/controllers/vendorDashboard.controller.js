@@ -92,24 +92,48 @@ class DashboardController {
         }
     }
     // Recent activity
+    // async getRecentActivity(req: AuthRequest, res: Response<ApiResponse<any>>) {
+    //   try {
+    //     if (!req.user) return res.status(401).json({ status: false, message: "Unauthorized", data: null });
+    //     const service = new VendorDashboardService(req.user.id);
+    //     const data = await service.getRecentActivity();
+    //     return res.status(200).json({ 
+    //       status: true, 
+    //       message: "Recent activity loaded", 
+    //       data 
+    //     });
+    //   } catch (error) {
+    //     console.error("Error in getRecentActivity:", error);
+    //     return res.status(500).json({ 
+    //       status: false, 
+    //       message: "Failed to load recent activity", 
+    //       data: null 
+    //     });
+    //   }
+    // }
+    // GET /api/vendor/recent-activity?page=1&limit=20
     async getRecentActivity(req, res) {
         try {
             if (!req.user)
-                return res.status(401).json({ status: false, message: "Unauthorized", data: null });
-            const service = new vendorDashboard_service_1.VendorDashboardService(req.user.id);
-            const data = await service.getRecentActivity();
-            return res.status(200).json({
-                status: true,
-                message: "Recent activity loaded",
-                data
+                return res.status(401).json({ success: false, message: "Unauthorized" });
+            const page = parseInt(req.query.page) || 1;
+            const limit = parseInt(req.query.limit) || 20;
+            // Call the updated service function
+            const vendorService = new vendorDashboard_service_1.VendorDashboardService(req.user.id);
+            const recentActivity = await vendorService.getDetailedRecentActivity({
+                page,
+                limit,
+            });
+            res.status(200).json({
+                success: true,
+                ...recentActivity, // contains data + pagination
             });
         }
         catch (error) {
-            console.error("Error in getRecentActivity:", error);
-            return res.status(500).json({
-                status: false,
-                message: "Failed to load recent activity",
-                data: null
+            console.error("Failed to fetch recent activity:", error);
+            res.status(500).json({
+                success: false,
+                message: "Failed to fetch recent activity",
             });
         }
     }

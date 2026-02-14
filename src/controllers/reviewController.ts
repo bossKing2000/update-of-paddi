@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import prisma from "../lib/prisma";
+import { ensureString } from "../utils/paramUtils";
 import { AuthRequest } from "../middlewares/auth.middleware";
 import {reviewProductSchema,replyToReviewSchema,reviewVoteSchema, reportReviewSchema, reviewSummaryQuerySchema,createVendorReviewSchema,} from "../validations/ProductCRUDSchema";
 import { ZodError } from "zod";
@@ -72,7 +73,7 @@ export const updateReview = async (req: AuthRequest, res: Response): Promise<voi
       return;
     }
     const review = await prisma.productReview.findUnique({
-      where: { id: req.params.id },
+      where: { id: ensureString(req.params.id) },
     });
 
     if (!review || review.customerId !== req.user.id) {
@@ -89,7 +90,7 @@ export const updateReview = async (req: AuthRequest, res: Response): Promise<voi
     const imageUrls = extractImagePaths(req.files);
 
     const updated = await prisma.productReview.update({
-      where: { id: req.params.id },
+      where: { id: ensureString(req.params.id) },
       data: {
         ...parsed.data,
         images: imageUrls.length > 0 ? imageUrls : review.images,
@@ -112,7 +113,7 @@ export const deleteReview = async (req: AuthRequest, res: Response): Promise<voi
     }
 
     const review = await prisma.productReview.findUnique({
-      where: { id: req.params.id },
+      where: { id: ensureString(req.params.id) },
     });
 
     if (!review || review.customerId !== req.user.id) {
@@ -120,7 +121,7 @@ export const deleteReview = async (req: AuthRequest, res: Response): Promise<voi
       return;
     }
 
-    await prisma.productReview.delete({ where: { id: req.params.id } });
+    await prisma.productReview.delete({ where: { id: ensureString(req.params.id) } });
     res.json({ message: "Review deleted" });
   } catch (err) {
     console.error("Delete review error:", err);
@@ -131,7 +132,7 @@ export const deleteReview = async (req: AuthRequest, res: Response): Promise<voi
 // Get product reviews (with optional pagination)
 export const getProductReviews = async (req: Request, res: Response): Promise<void> => {
   try {
-    const productId = req.params.productId;
+    const productId = ensureString(req.params.productId);
     const { page = "1", limit = "10" } = req.query;
 
     const skip = (Number(page) - 1) * Number(limit);
@@ -162,7 +163,7 @@ export const getProductReviews = async (req: Request, res: Response): Promise<vo
 // Get product review summary
 export const getProductReviewSummary = async (req: Request, res: Response): Promise<void> => {
   try {
-    const productId = req.params.productId;
+    const productId = ensureString(req.params.productId);
 
     const parseResult = reviewSummaryQuerySchema.safeParse(req.query);
     if (!parseResult.success) {
@@ -212,7 +213,7 @@ export const replyToReview = async (req: AuthRequest, res: Response): Promise<vo
       return;
     }
 
-    const parsed = replyToReviewSchema.safeParse({ reviewId: req.params.id, ...req.body });
+    const parsed = replyToReviewSchema.safeParse({ reviewId: ensureString(req.params.id), ...req.body });
     if (!parsed.success) {
       res.status(400).json({ error: (parsed.error as ZodError).issues });
       return;
@@ -254,7 +255,7 @@ export const deleteReplyToReview = async (req: AuthRequest, res: Response): Prom
     }
 
     const reply = await prisma.vendorReply.findUnique({
-      where: { reviewId: req.params.id },
+      where: { reviewId: ensureString(req.params.id) },
       include: { review: { include: { product: true } } },
     });
 
@@ -263,7 +264,7 @@ export const deleteReplyToReview = async (req: AuthRequest, res: Response): Prom
       return;
     }
 
-    await prisma.vendorReply.delete({ where: { reviewId: req.params.id } });
+    await prisma.vendorReply.delete({ where: { reviewId: ensureString(req.params.id) } });
     res.json({ message: "Reply deleted successfully" });
   } catch (err) {
     console.error("Delete reply error:", err);
@@ -280,7 +281,7 @@ export const voteReview = async (req: AuthRequest, res: Response): Promise<void>
       return;
     }
 
-    const parsed = reviewVoteSchema.safeParse({ reviewId: req.params.id, ...req.body });
+    const parsed = reviewVoteSchema.safeParse({ reviewId: ensureString(req.params.id), ...req.body });
     if (!parsed.success) {
       res.status(400).json({ error: (parsed.error as ZodError).issues });
       return;
@@ -307,7 +308,7 @@ export const reportReview = async (req: AuthRequest, res: Response): Promise<voi
       return;
     }
 
-    const parsed = reportReviewSchema.safeParse({ reviewId: req.params.id, ...req.body });
+    const parsed = reportReviewSchema.safeParse({ reviewId: ensureString(req.params.id), ...req.body });
     if (!parsed.success) {
       res.status(400).json({ error: (parsed.error as ZodError).issues });
       return;
@@ -433,7 +434,7 @@ export const reviewVendor = async (req: AuthRequest, res: Response): Promise<voi
 // Get vendor reviews (with pagination)
 export const getVendorReviews = async (req: Request, res: Response): Promise<void> => {
   try {
-    const vendorId = req.params.vendorId;
+    const vendorId = ensureString(req.params.vendorId);
     const { page = "1", limit = "10" } = req.query;
 
     const skip = (Number(page) - 1) * Number(limit);
@@ -459,7 +460,7 @@ export const getVendorReviews = async (req: Request, res: Response): Promise<voi
 // Vendor review summary
 export const getVendorReviewSummary = async (req: Request, res: Response): Promise<void> => {
   try {
-    const vendorId = req.params.vendorId;
+    const vendorId = ensureString(req.params.vendorId);
 
     const breakdown = await prisma.vendorReview.groupBy({
       by: ["rating"],
@@ -493,7 +494,7 @@ export const getVendorReviewSummary = async (req: Request, res: Response): Promi
 
 // Get single review by id
 export const getVendorReviewById = async (req: Request, res: Response) => {
-  const reviewId = req.params.reviewId;
+  const reviewId = ensureString(req.params.reviewId);
   const review = await prisma.vendorReview.findUnique({
     where: { id: reviewId },
     include: { customer: { select: { id: true, name: true, avatarUrl: true } } },

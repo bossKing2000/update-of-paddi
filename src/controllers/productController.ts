@@ -1,5 +1,6 @@
 import {Request, Response } from "express";
 import prisma from "../lib/prisma";
+import { ensureString } from "../utils/paramUtils";
 import { AuthRequest } from "../middlewares/auth.middleware";
 import {archiveProductSchema, createProductSchema, updateProductSchema} from "../validations/ProductCRUDSchema";
 import {Category} from "@prisma/client";
@@ -389,9 +390,8 @@ export const getAllProducts = async (
 
 
 export const getProductById = async (req: AuthRequest, res: Response): Promise<void> => {
-    const productId = req.params.id; // ← move outside try
+    const productId = ensureString(req.params.id); // ← move outside try
   try {
-    const productId = req.params.id;
     const cacheKey = CACHE_KEYS.PRODUCT_DETAIL(productId);
     const ttl = CACHE_TTLS.PRODUCT_DETAIL;
 
@@ -517,7 +517,7 @@ export const getProductById = async (req: AuthRequest, res: Response): Promise<v
 // ✅ PRODUCTION-READY UPDATE PRODUCT CONTROLLER
 // ==========================================================
 export const updateProduct = async (req: AuthRequest, res: Response): Promise<void> => {
-  const productId = req.params.id;
+  const productId = ensureString(req.params.id);
 
   try {
     // 1. AUTHENTICATION & AUTHORIZATION
@@ -938,7 +938,7 @@ export const updateProduct = async (req: AuthRequest, res: Response): Promise<vo
 // ✅ Archive Product Controller
 // ==========================================================
 export const archiveProduct = async (req: AuthRequest, res: Response): Promise<void> => {
-  const productId = req.params.id;
+  const productId = ensureString(req.params.id);
 
   try {
     if (!req.user || req.user.role !== "VENDOR") {
@@ -1004,7 +1004,7 @@ export const archiveProduct = async (req: AuthRequest, res: Response): Promise<v
 // ✅ Delete Product Controller
 // ==========================================================
 export const deleteProduct = async (req: AuthRequest, res: Response): Promise<void> => {
-  const productId = req.params.id;
+  const productId = ensureString(req.params.id);
 
   try {
     if (!req.user || req.user.role !== "VENDOR") {

@@ -22,6 +22,7 @@ function initSocket(server) {
         // "http://localhost:3000",
         // "http://127.0.0.1:60308",
         "https://ui-food-paddi.onrender.com",
+        "http://10.0.2.2:5000",
     ];
     if (config_1.default.clientUrl)
         allowedOrigins.push(config_1.default.clientUrl);

@@ -228,4 +228,4 @@ async function updatePopularityScores() {
         console.error("❌ Phase 2 failed:", err);
     }
 }
-// npx ts-node src/jobs/updatePopularityScore.ts
+// npx ts-node src\jobs\workers jobs\updatePopularityScore.ts

@@ -91,7 +91,9 @@ const allowedOrigins = [
     "http://127.0.0.1:8080",
     "http://10.0.2.2:5000",
     "http://localhost:52498",
-    ""
+    "",
+    "http://localhost:53854",
+    "http://127.0.0.1:55257"
 ];
 app.use((0, cors_1.default)({
     origin: (origin, callback) => {

@@ -12,7 +12,7 @@ import { correctQuery } from '../AI/localSearchCorrect';
 
 //   const corrected = await searchService.correctSearchQuery(query); // ✅ correct now
 //   res.json({ corrected });
-// };
+// }; 
 
 export const getRecommendations = async (req: Request, res: Response) => {
   const { userId } = req.query;

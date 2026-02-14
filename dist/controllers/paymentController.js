@@ -138,10 +138,11 @@ const initiateOrderPayment = async (req, res) => {
     }
 };
 exports.initiateOrderPayment = initiateOrderPayment;
+const paramUtils_1 = require("../utils/paramUtils");
 // GET /api/payments/confirm/:reference
 const confirmPayment = async (req, res) => {
     try {
-        const { reference } = req.params;
+        const reference = (0, paramUtils_1.ensureString)(req.params.reference);
         // 1️⃣ Check if payment exists
         const existing = await prisma_1.default.payment.findUnique({
             where: { reference },
@@ -459,7 +460,7 @@ async function verifyOrderPayment(orderId) {
 // Controller: verify before fulfillment
 // ───────────────────────────────────────────────
 const verifyPaymentBeforeFulfillment = async (req, res) => {
-    const { orderId } = req.params;
+    const orderId = (0, paramUtils_1.ensureString)(req.params.orderId);
     if (!orderId) {
         return res.status(400).json({ error: "Missing orderId parameter" });
     }
@@ -739,7 +740,7 @@ exports.setDefaultCard = setDefaultCard;
  */
 const deleteSavedCard = async (req, res) => {
     try {
-        const { cardId } = req.params;
+        const cardId = (0, paramUtils_1.ensureString)(req.params.cardId);
         const userId = req.user.id;
         if (!cardId) {
             return res.status(400).json({

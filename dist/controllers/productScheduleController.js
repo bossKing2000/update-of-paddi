@@ -9,15 +9,18 @@ const codeMessage_1 = require("../validators/codeMessage");
 const productLiveWorker_1 = require("../jobs/workers jobs/productLiveWorker");
 const productDeactivateJob_1 = require("../jobs/workers jobs/productDeactivateJob");
 const time_1 = require("../utils/time");
+const paramUtils_1 = require("../utils/paramUtils");
 const product_service_1 = require("../services/product.service");
 const clearCaches_1 = require("../services/clearCaches");
 const redis_1 = require("../lib/redis");
+const recordActivityBundle_1 = require("../utils/activityUtils/recordActivityBundle");
+const client_1 = require("@prisma/client");
 /**
  * Vendor schedules a product to go live or immediately goes live
  */
 const goLive = async (req, res) => {
     try {
-        const { id: productId } = req.params;
+        const productId = (0, paramUtils_1.ensureString)(req.params.id);
         const { goLiveAt, takeDownAt, graceMinutes = 15 } = req.body;
         if (!req.user || req.user.role !== "VENDOR") {
             return res.status(403).json((0, codeMessage_1.errorResponse)("FORBIDDEN", "Only vendors can perform this."));
@@ -92,6 +95,28 @@ const goLive = async (req, res) => {
             await Promise.all([
                 (0, clearCaches_1.clearProductCache)(productId, req.user.id),
             ]);
+            // 🚀 Record activity + send notification to vendor
+            await (0, recordActivityBundle_1.recordActivityBundle)({
+                actorId: req.user.id,
+                actions: [
+                    {
+                        type: client_1.ActivityType.GENERAL, // or PRODUCT if defined
+                        title: isImmediate ? "Product is live!" : "Product scheduled",
+                        message: isImmediate
+                            ? `Your product "${product.name}" is now live and will be taken down at ${endTime.toISOString()} (UTC).`
+                            : `Your product "${product.name}" is scheduled to go live at ${liveTime.toISOString()} (UTC).`,
+                        targetId: req.user.id,
+                        socketEvent: "GENERAL",
+                        metadata: { productId, goLiveAt: liveTime, liveUntil: endTime },
+                    },
+                ],
+                audit: {
+                    action: isImmediate ? "PRODUCT_LIVE_NOW" : "PRODUCT_SCHEDULED",
+                    metadata: { productId, vendorId: req.user.id },
+                },
+                notifyRealtime: true,
+                notifyPush: true,
+            });
         }
         // Schedule takedown job
         await productDeactivateJob_1.productDeactivateQueue.add("takeDown", { productId }, {
@@ -122,7 +147,7 @@ exports.goLive = goLive;
  */
 const takeDown = async (req, res) => {
     try {
-        const { id: productId } = req.params;
+        const productId = (0, paramUtils_1.ensureString)(req.params.id);
         // Fetch product
         const product = await prismaClient_1.default.product.findUnique({ where: { id: productId } });
         if (!product)
@@ -141,6 +166,26 @@ const takeDown = async (req, res) => {
         // Invalidate caches and remove from carts
         await (0, clearCaches_1.clearProductCache)(productId);
         await (0, product_service_1.clearProductFromCarts)(productId);
+        // 🚀 Record activity + notify vendor
+        await (0, recordActivityBundle_1.recordActivityBundle)({
+            actorId: req.user?.id || "system",
+            actions: [
+                {
+                    type: client_1.ActivityType.GENERAL, // or PRODUCT if defined
+                    title: "Product taken down",
+                    message: `Your product "${product.name}" has been taken down.`,
+                    targetId: product.vendorId, // vendor who owns the product
+                    socketEvent: "GENERAL",
+                    metadata: { productId },
+                },
+            ],
+            audit: {
+                action: "PRODUCT_TAKEN_DOWN",
+                metadata: { productId, vendorId: product.vendorId },
+            },
+            notifyRealtime: true,
+            notifyPush: true,
+        });
         // Vendor-specific product lists
         await redis_1.redisProducts.del(`vendor:${product.vendorId}:products`);
         await redis_1.redisProducts.del(`vendor:${product.vendorId}:products:available`);
@@ -180,7 +225,7 @@ exports.takeDown = takeDown;
  */
 const extendGrace = async (req, res) => {
     try {
-        const { id: productId } = req.params;
+        const productId = (0, paramUtils_1.ensureString)(req.params.id);
         const { extraMinutes } = req.body;
         if (!extraMinutes || extraMinutes <= 0)
             return res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_INPUT", "extraMinutes must be positive."));
@@ -192,6 +237,30 @@ const extendGrace = async (req, res) => {
             data: { graceMinutes: (schedule.graceMinutes || 0) + extraMinutes },
         });
         await productDeactivateJob_1.productDeactivateQueue.add("finalDeactivate", { productId }, { delay: extraMinutes * 60 * 1000 });
+        await prismaClient_1.default.productSchedule.update({
+            where: { productId },
+            data: { graceMinutes: (schedule.graceMinutes || 0) + extraMinutes },
+        });
+        // 🚀 Record activity + notify vendor
+        await (0, recordActivityBundle_1.recordActivityBundle)({
+            actorId: req.user?.id || "system",
+            actions: [
+                {
+                    type: client_1.ActivityType.GENERAL, // or PRODUCT if defined
+                    title: "Grace period extended",
+                    message: `The grace period for your product "${productId}" has been extended by ${extraMinutes} minutes.`,
+                    targetId: req.user?.id || undefined,
+                    socketEvent: "GENERAL",
+                    metadata: { productId, extraMinutes },
+                },
+            ],
+            audit: {
+                action: "GRACE_PERIOD_EXTENDED",
+                metadata: { productId, vendorId: req.user?.id, extraMinutes },
+            },
+            notifyRealtime: true,
+            notifyPush: true,
+        });
         return res.json((0, codeMessage_1.successResponse)("GRACE_EXTENDED", "Grace period extended successfully."));
     }
     catch (err) {

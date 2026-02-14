@@ -2,10 +2,11 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DeliveryAssignmentController = void 0;
 const deliveryAssignment_1 = require("../services/deliveryAssignment");
+const paramUtils_1 = require("../utils/paramUtils");
 class DeliveryAssignmentController {
     static async acceptBroadcast(req, res) {
         try {
-            const { broadcastId } = req.params;
+            const broadcastId = (0, paramUtils_1.ensureString)(req.params.broadcastId);
             const driverId = req.user?.id;
             if (!driverId) {
                 return res
@@ -29,7 +30,8 @@ class DeliveryAssignmentController {
     }
     static async assignOrder(req, res) {
         try {
-            const { orderId, driverId } = req.body; // <-- include driverId for manual assignment
+            const { orderId } = req.body; // <-- include driverId for manual assignment
+            const driverId = (0, paramUtils_1.ensureString)(req.body.driverId) || req.user?.id;
             if (!orderId) {
                 return res.status(400).json({ success: false, message: "orderId is required" });
             }
@@ -43,7 +45,7 @@ class DeliveryAssignmentController {
     }
     static async acceptAssignment(req, res) {
         try {
-            const { assignmentId } = req.params;
+            const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
             const driverId = req.user?.id;
             if (!driverId)
                 return res.status(401).json({ success: false, message: "Unauthorized" });
@@ -59,7 +61,7 @@ class DeliveryAssignmentController {
     }
     static async declineAssignment(req, res) {
         try {
-            const { assignmentId } = req.params;
+            const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
             if (!assignmentId)
                 return res.status(400).json({ success: false, message: "assignmentId is required" });
             const assignment = await deliveryAssignment_1.DeliveryAssignmentService.handleDecline(assignmentId);
@@ -85,7 +87,7 @@ class DeliveryAssignmentController {
     }
     static async updateDeliveryStatus(req, res) {
         try {
-            const { assignmentId } = req.params;
+            const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
             const { status } = req.body; // PICKED_UP, EN_ROUTE, DELIVERED, CANCELLED
             const driverId = req.user?.id;
             if (!driverId)
@@ -102,7 +104,7 @@ class DeliveryAssignmentController {
     }
     static async getAssignmentById(req, res) {
         try {
-            const { assignmentId } = req.params;
+            const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
             const assignment = await deliveryAssignment_1.DeliveryAssignmentService.getAssignmentById(assignmentId);
             res.json({ success: true, assignment });
         }
@@ -113,7 +115,7 @@ class DeliveryAssignmentController {
     }
     static async getDriverHistory(req, res) {
         try {
-            const { driverId } = req.params;
+            const driverId = (0, paramUtils_1.ensureString)(req.params.driverId);
             const history = await deliveryAssignment_1.DeliveryAssignmentService.getDriverHistory(driverId);
             res.json({ success: true, history });
         }
@@ -124,7 +126,7 @@ class DeliveryAssignmentController {
     }
     static async getCustomerHistory(req, res) {
         try {
-            const { customerId } = req.params;
+            const customerId = (0, paramUtils_1.ensureString)(req.params.customerId);
             const history = await deliveryAssignment_1.DeliveryAssignmentService.getCustomerHistory(customerId);
             res.json({ success: true, history });
         }
@@ -135,7 +137,7 @@ class DeliveryAssignmentController {
     }
     static async getDriverAnalytics(req, res) {
         try {
-            const { driverId } = req.params;
+            const driverId = (0, paramUtils_1.ensureString)(req.params.driverId);
             const analytics = await deliveryAssignment_1.DeliveryAssignmentService.getDriverAnalytics(driverId);
             res.json({ success: true, analytics });
         }
@@ -146,7 +148,8 @@ class DeliveryAssignmentController {
     }
     static async getAvailableDrivers(req, res) {
         try {
-            const { latitude, longitude } = req.query;
+            const latitude = (0, paramUtils_1.ensureNumber)(req.query.latitude);
+            const longitude = (0, paramUtils_1.ensureNumber)(req.query.longitude);
             // Optional validation
             if (!latitude || !longitude) {
                 return res.status(400).json({
@@ -154,7 +157,7 @@ class DeliveryAssignmentController {
                     message: "latitude and longitude are required in query",
                 });
             }
-            const drivers = await deliveryAssignment_1.DeliveryAssignmentService.findAvailableDrivers(Number(latitude), Number(longitude));
+            const drivers = await deliveryAssignment_1.DeliveryAssignmentService.findAvailableDrivers(latitude, longitude);
             return res.json({ success: true, drivers });
         }
         catch (err) {
