@@ -331,8 +331,8 @@ async function main() {
   // ==============================
   // CONFIGURABLE ENGAGEMENT PARAMETERS
   // ==============================
-  const CUSTOMER_ENGAGEMENT = 0.7; // 60% of customers place orders
-  const VENDOR_ENGAGEMENT = 0.5;   // 70% of vendors have active products
+  const CUSTOMER_ENGAGEMENT = 0.8; // 60% of customers place orders
+  const VENDOR_ENGAGEMENT = 0.7;   // 70% of vendors have active products
   const MAX_ORDERS_PER_CUSTOMER = { min: 0, max: 5};
   const ORDER_STATUS_PROBABILITIES = [
     { status: OrderStatus.COMPLETED, weight: 0.5 },
