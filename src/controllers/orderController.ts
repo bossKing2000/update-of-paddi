@@ -262,7 +262,7 @@ export const getMyOrders = async (
 //     const hasExtraCharge = !!order.extraCharge && order.extraCharge > 0;
 
 //     // 3️⃣ Determine next status
-//     const nextStatus = hasExtraCharge
+//     const nextStatus = hasExtraCharge 
 //       ? OrderStatus.AWAITING_PAYMENT
 //       : OrderStatus.AWAITING_PAYMENT;
 

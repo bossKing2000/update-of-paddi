@@ -1,4 +1,4 @@
-const apiURL = "http://localhost:5000/api/product";
+const apiURL = "https://update-of-paddi.onrender.com/api/product";
 const productList = document.getElementById("product-list");
 const pageInfo = document.getElementById("pageInfo");
 const prevBtn = document.getElementById("prevPage");

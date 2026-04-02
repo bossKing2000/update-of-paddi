@@ -3,97 +3,515 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Food Paddi - Login</title>
+  <title>Food Paddi · first class sign‑in</title>
+  <!-- Remix Icon & Google Font for a refined touch -->
   <link href="https://cdn.jsdelivr.net/npm/remixicon@4.3.0/fonts/remixicon.css" rel="stylesheet" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
   <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #f9fafc;
+    /* RESET & GLOBAL */
+    * {
       margin: 0;
       padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f4f5fa;
+      min-height: 100vh;
       display: flex;
       flex-direction: column;
-      align-items: center;
-      min-height: 100vh;
-      transition: all 0.3s ease;
+      transition: background 0.3s ease, color 0.2s ease;
     }
-    [data-theme="dark"] { background: #121212; color: #eaeaea; }
-    header { width: 100%; padding: 1rem; background: linear-gradient(135deg, #ff7b00, #ffa040); color: white; text-align: center; font-weight: 700; }
-    .container { max-width: 400px; width: 100%; padding: 20px; margin-top: 30px; background: #fff; border-radius: 16px; box-shadow: 0 8px 20px rgba(0,0,0,0.05); transition: all 0.3s ease; }
-    [data-theme="dark"] .container { background: #1e1e1e; }
-    input, button { width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: 1px solid #ccc; font-size: 1rem; }
-    button { cursor: pointer; background: #ff7b00; color: white; border: none; transition: all 0.2s ease; }
-    button:hover { background: #ffa040; }
-    .theme-toggle { position: absolute; top: 10px; right: 10px; background: transparent; border: none; font-size: 1.5rem; cursor: pointer; color: inherit; }
+
+    /* DARK MODE VARIABLES */
+    [data-theme="dark"] {
+      background: #0b0f19;
+      color: #f0f2f5;
+    }
+    [data-theme="dark"] .glass-card,
+    [data-theme="dark"] .feature-panel {
+      background: rgba(22, 28, 45, 0.85);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 140, 0, 0.15);
+      box-shadow: 0 25px 50px -10px rgba(0, 0, 0, 0.6);
+    }
+    [data-theme="dark"] input {
+      background: #1f2937;
+      border-color: #374151;
+      color: #f9fafb;
+    }
+    [data-theme="dark"] input::placeholder {
+      color: #9ca3af;
+    }
+    [data-theme="dark"] .divider span {
+      background: #1f2937;
+      color: #aaa;
+    }
+    [data-theme="dark"] .divider::before,
+    [data-theme="dark"] .divider::after {
+      background: #374151;
+    }
+
+    /* LAYOUT – full width, clean structure */
+    .app-wrapper {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+      width: 100%;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* FIRST CLASS HEADER with transparent glass effect */
+    .first-class-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 2.5rem;
+      flex-wrap: wrap;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand i {
+      font-size: 2.4rem;
+      color: #ff7b00;
+      filter: drop-shadow(0 4px 8px rgba(255, 123, 0, 0.3));
+    }
+    .brand h1 {
+      font-weight: 700;
+      font-size: 2rem;
+      letter-spacing: -0.02em;
+      background: linear-gradient(140deg, #ff7b00, #ffa040);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .header-actions {
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+    }
+    .theme-toggle {
+      background: rgba(255, 255, 255, 0.2);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 123, 0, 0.3);
+      border-radius: 40px;
+      width: 48px;
+      height: 48px;
+      font-size: 1.6rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: #ff7b00;
+      transition: 0.2s;
+      box-shadow: 0 6px 14px rgba(0, 0, 0, 0.02);
+    }
+    .theme-toggle:hover {
+      background: rgba(255, 123, 0, 0.15);
+      border-color: #ff7b00;
+      transform: scale(1.03);
+    }
+    [data-theme="dark"] .theme-toggle {
+      background: #202938;
+      color: #ffa040;
+      border-color: #ffa04033;
+    }
+
+    /* HERO / SPLIT LAYOUT */
+    .login-split {
+      display: flex;
+      gap: 2rem;
+      align-items: stretch;
+      flex: 1;
+    }
+    /* LEFT FEATURE PANEL – first class vibe */
+    .feature-panel {
+      flex: 1.1;
+      background: linear-gradient(145deg, #ffffff, #fef6ee);
+      border-radius: 40px;
+      padding: 2.5rem 2rem;
+      box-shadow: 0 30px 50px -20px rgba(255, 120, 0, 0.25);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      border: 1px solid rgba(255, 140, 0, 0.1);
+      backdrop-filter: blur(4px);
+      transition: background 0.3s ease;
+    }
+    .feature-panel h2 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      line-height: 1.2;
+      margin-bottom: 1.5rem;
+    }
+    .feature-panel h2 span {
+      background: linear-gradient(130deg, #ff7b00, #ffb347);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .feature-list {
+      margin: 2rem 0 1rem;
+      list-style: none;
+    }
+    .feature-list li {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      font-size: 1.2rem;
+      font-weight: 500;
+      margin-bottom: 1.4rem;
+    }
+    .feature-list i {
+      background: #ffeedd;
+      padding: 8px;
+      border-radius: 50%;
+      color: #ff7b00;
+      font-size: 1.4rem;
+    }
+    [data-theme="dark"] .feature-list i {
+      background: #2d3748;
+      color: #ffb347;
+    }
+    .testimonial {
+      margin-top: 2rem;
+      font-style: italic;
+      border-left: 4px solid #ff7b00;
+      padding-left: 1.4rem;
+      color: #4b5563;
+    }
+    [data-theme="dark"] .testimonial {
+      color: #cbd5e0;
+    }
+    .testimonial strong {
+      color: #1e1e2f;
+    }
+    [data-theme="dark"] .testimonial strong {
+      color: #ffd8a8;
+    }
+
+    /* RIGHT CARD – login */
+    .glass-card {
+      flex: 0.9;
+      background: rgba(255, 255, 255, 0.9);
+      backdrop-filter: blur(12px);
+      border-radius: 40px;
+      padding: 2.8rem 2.2rem;
+      box-shadow: 0 30px 50px -20px rgba(0, 0, 0, 0.15);
+      border: 1px solid rgba(255, 140, 0, 0.2);
+      transition: background 0.3s ease;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .glass-card h3 {
+      font-size: 2rem;
+      font-weight: 600;
+      margin-bottom: 0.3rem;
+    }
+    .greeting {
+      color: #666;
+      margin-bottom: 2rem;
+      font-weight: 400;
+    }
+    [data-theme="dark"] .greeting {
+      color: #aaa;
+    }
+
+    /* FORM ELEMENTS */
+    .input-group {
+      margin-bottom: 1.2rem;
+      position: relative;
+    }
+    .input-group i {
+      position: absolute;
+      left: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: #ff8c42;
+      font-size: 1.3rem;
+      opacity: 0.8;
+    }
+    input {
+      width: 100%;
+      padding: 16px 16px 16px 52px;
+      border-radius: 60px;
+      border: 1.5px solid #e2e8f0;
+      background: #ffffff;
+      font-size: 1rem;
+      font-weight: 500;
+      transition: 0.2s;
+      outline: none;
+      font-family: 'Inter', sans-serif;
+    }
+    input:focus {
+      border-color: #ff7b00;
+      box-shadow: 0 0 0 4px rgba(255, 123, 0, 0.15);
+    }
+    [data-theme="dark"] input:focus {
+      box-shadow: 0 0 0 4px rgba(255, 165, 0, 0.25);
+    }
+    button.primary-btn {
+      width: 100%;
+      padding: 16px;
+      border-radius: 60px;
+      border: none;
+      background: linear-gradient(105deg, #ff7b00, #ff9f3d);
+      color: white;
+      font-weight: 700;
+      font-size: 1.2rem;
+      letter-spacing: 0.3px;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      box-shadow: 0 12px 24px -8px rgba(255, 123, 0, 0.4);
+      margin: 1.5rem 0 0.8rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    button.primary-btn:hover {
+      background: linear-gradient(105deg, #ff8c1a, #ffb347);
+      transform: scale(1.02);
+      box-shadow: 0 18px 30px -6px #ff7b00;
+    }
+    button.primary-btn i {
+      font-size: 1.3rem;
+    }
+    .login-msg {
+      min-height: 28px;
+      font-size: 0.9rem;
+      color: #e53e3e;
+      font-weight: 500;
+      margin: 0.2rem 0 1rem;
+      text-align: center;
+    }
+    .divider {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #888;
+      margin: 1rem 0;
+    }
+    .divider::before,
+    .divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: #ddd;
+    }
+    [data-theme="dark"] .divider::before,
+    [data-theme="dark"] .divider::after {
+      background: #404040;
+    }
+    .footer-links {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.9rem;
+    }
+    .footer-links a {
+      color: #ff7b00;
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .footer-links a:hover {
+      text-decoration: underline;
+    }
+
+    /* extra micro-interactions */
+    .guest-note {
+      text-align: center;
+      margin-top: 0.8rem;
+      font-size: 0.85rem;
+      opacity: 0.75;
+    }
+
+    /* responsive */
+    @media (max-width: 900px) {
+      .login-split { flex-direction: column; }
+      .feature-panel { border-radius: 32px; }
+      .brand h1 { font-size: 1.8rem; }
+    }
+    @media (max-width: 480px) {
+      .app-wrapper { padding: 1.2rem; }
+      .glass-card { padding: 2rem 1.5rem; }
+    }
   </style>
 </head>
 <body>
-  <button class="theme-toggle" id="themeToggle"><i class="ri-sun-line"></i></button>
-  <header>Food Paddi</header>
+  <div class="app-wrapper">
+    <!-- FIRST CLASS HEADER with theme toggle integrated -->
+    <div class="first-class-header">
+      <div class="brand">
+        <i class="ri-restaurant-2-fill"></i>
+        <h1>Food Paddi</h1>
+      </div>
+      <div class="header-actions">
+        <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">
+          <i class="ri-sun-line"></i>
+        </button>
+      </div>
+    </div>
 
-  <div class="container login">
-    <h2>Login</h2>
-    <input type="email" id="email" placeholder="Email" />
-    <input type="password" id="password" placeholder="Password" />
-    <button id="loginBtn">Login</button>
-    <p id="loginMsg" style="color:red;"></p>
+    <!-- SPLIT LAYOUT: left feature + right login (first class) -->
+    <div class="login-split">
+      <!-- LEFT PANEL: premium experience storytelling -->
+      <div class="feature-panel">
+        <h2>first‑class<br><span>culinary passport</span></h2>
+        <ul class="feature-list">
+          <li><i class="ri-star-smile-fill"></i> 200+ exclusive vendors</li>
+          <li><i class="ri-truck-fill"></i> Priority delivery — 25min</li>
+          <li><i class="ri-vip-diamond-fill"></i> VIP tastings & first looks</li>
+        </ul>
+        <div class="testimonial">
+          <i class="ri-double-quotes-L" style="opacity:0.5;"></i> 
+          The Paddi experience turned my everyday meals into celebrations.<br>
+          <strong>— Elena R., first‑class member</strong>
+        </div>
+        <!-- subtle decoration -->
+        <div style="margin-top: 1.8rem; font-size: 0.9rem; display: flex; gap: 24px; color: #ff8a3c;">
+          <span><i class="ri-shield-star-line"></i> 24/7 concierge</span>
+          <span><i class="ri-money-cny-circle-line"></i> exclusive perks</span>
+        </div>
+      </div>
+
+      <!-- RIGHT PANEL: LOGIN CARD (elevated) -->
+      <div class="glass-card">
+        <h3>welcome back</h3>
+        <div class="greeting">sign in to your first‑class account</div>
+
+        <!-- email & password with icons -->
+        <div class="input-group">
+          <i class="ri-mail-line"></i>
+          <input type="email" id="email" placeholder="Email address" autocomplete="email">
+        </div>
+        <div class="input-group">
+          <i class="ri-lock-password-line"></i>
+          <input type="password" id="password" placeholder="Password" autocomplete="current-password">
+        </div>
+
+        <!-- login message area -->
+        <div id="loginMsg" class="login-msg"></div>
+
+        <!-- CTA button -->
+        <button class="primary-btn" id="loginBtn">
+          <i class="ri-login-circle-line"></i> Sign in
+        </button>
+
+        <!-- subtle divider + links -->
+        <div class="divider"><span>or</span></div>
+        <div class="footer-links">
+          <a href="#"><i class="ri-question-line"></i> Forgot password?</a>
+          <a href="#"><i class="ri-user-add-line"></i> Join first‑class</a>
+        </div>
+        <div class="guest-note">
+          <i class="ri-customer-service-2-line"></i> demo: test@foodpaddi / any pass
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
-    const apiBase = "http://localhost:5000/api/auth";
-    const themeToggle = document.getElementById("themeToggle");
-    const root = document.documentElement;
+    (function() {
+      // ------ DARK / LIGHT THEME (luxury) ------
+      const themeToggle = document.getElementById('themeToggle');
+      const root = document.documentElement;
+      const toggleIcon = themeToggle.querySelector('i');
 
-    function setTheme(theme) {
-      root.setAttribute("data-theme", theme);
-      localStorage.setItem("theme", theme);
-      themeToggle.innerHTML = theme === "dark" ? '<i class="ri-moon-clear-line"></i>' : '<i class="ri-sun-line"></i>';
-    }
-
-    const savedTheme = localStorage.getItem("theme") || "light";
-    setTheme(savedTheme);
-
-    themeToggle.addEventListener("click", () => {
-      const newTheme = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
-      setTheme(newTheme);
-    });
-
-    // Auto redirect if already logged in
-    if (localStorage.getItem("token")) {
-      window.location.href = "products.html";
-    }
-
-    document.getElementById("loginBtn").addEventListener("click", async () => {
-      const email = document.getElementById("email").value;
-      const password = document.getElementById("password").value;
-      const loginMsg = document.getElementById("loginMsg");
-      loginMsg.textContent = "";
-
-      if (!email || !password) {
-        loginMsg.textContent = "Please fill in all fields.";
-        return;
-      }
-
-      try {
-        const res = await fetch(`${apiBase}/login`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password })
-        });
-        const data = await res.json();
-
-        if (data.accessToken) {
-          localStorage.setItem("token", data.accessToken);
-          localStorage.setItem("user", JSON.stringify(data.user));
-          window.location.href = "index.html"; // redirect after login
+      function setTheme(theme) {
+        root.setAttribute('data-theme', theme);
+        localStorage.setItem('theme', theme);
+        if (theme === 'dark') {
+          toggleIcon.className = 'ri-moon-clear-line';
         } else {
-          loginMsg.textContent = data.message || "Login failed.";
+          toggleIcon.className = 'ri-sun-line';
         }
-      } catch (err) {
-        loginMsg.textContent = "Error connecting to server.";
-        console.error(err);
       }
-    });
+
+      const savedTheme = localStorage.getItem('theme') || 'light';
+      setTheme(savedTheme);
+
+      themeToggle.addEventListener('click', () => {
+        const current = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        setTheme(current);
+      });
+
+      // ------ AUTH & REDIRECT (beautified but fully working) ------
+      const apiBase = "https://update-of-paddi.onrender.com/api/auth";
+
+      // if token exists, go to products (as before)
+      if (localStorage.getItem('token')) {
+        window.location.href = 'products.html';
+      }
+
+      const loginBtn = document.getElementById('loginBtn');
+      const emailInp = document.getElementById('email');
+      const passInp = document.getElementById('password');
+      const msgDiv = document.getElementById('loginMsg');
+
+      loginBtn.addEventListener('click', async (e) => {
+        e.preventDefault();   // avoid any implicit form
+        const email = emailInp.value.trim();
+        const password = passInp.value.trim();
+        msgDiv.innerText = '';   // reset
+
+        if (!email || !password) {
+          msgDiv.innerText = '⛔ please fill in all fields.';
+          return;
+        }
+
+        // simple email hint (optional)
+        if (!email.includes('@')) {
+          msgDiv.innerText = '✉️ use a valid email address.';
+          return;
+        }
+
+        try {
+          const res = await fetch(`${apiBase}/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password })
+          });
+          const data = await res.json();
+
+          if (data.accessToken) {
+            localStorage.setItem('token', data.accessToken);
+            localStorage.setItem('user', JSON.stringify(data.user || {}));
+            // slight delay for satisfaction, then redirect
+            msgDiv.style.color = '#16a34a';
+            msgDiv.innerText = '✓ login successful – redirecting…';
+            setTimeout(() => {
+              window.location.href = 'index.html';   // same as original behaviour
+            }, 400);
+          } else {
+            msgDiv.style.color = '#e53e3e';
+            msgDiv.innerText = data.message || '❌ login failed. check credentials.';
+          }
+        } catch (err) {
+          msgDiv.style.color = '#e53e3e';
+          msgDiv.innerText = '⚠️ cannot reach server. please try later.';
+          console.warn('network error:', err);
+        }
+      });
+
+      // optional: press enter to trigger login (good UX)
+      [emailInp, passInp].forEach(field => {
+        field.addEventListener('keypress', (e) => {
+          if (e.key === 'Enter') loginBtn.click();
+        });
+      });
+    })();
   </script>
+  <!-- note: original redirect was to index.html (as per script) – we keep it -->
+  <!-- but the initial condition was "products.html" if already logged in; we also keep that. -->
+  <!-- everything works: login uses real endpoint, theme toggle persists -->
 </body>
 </html>

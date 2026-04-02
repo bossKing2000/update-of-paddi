@@ -22,6 +22,9 @@ model User {
   brandLogo   String?
   googleId    String?  @unique
 
+  order_openAT        String?
+  order_closeAT       String?
+
   // Relations
   products              Product[]           @relation("VendorProducts")
   vendorReviewsReceived VendorReview[]      @relation("VendorReviews")
@@ -124,9 +127,6 @@ model Product {
   // Special requests associated with this product
   specialRequests     SpecialOrderRequest[] @relation("ProductSpecialRequests")
 
-  // 🕒 Default grace control (fallback)
-  // graceEnabled        Boolean         @default(true)
-  // graceMinutes        Int?            @default(10)
 
   // 🟢 Live scheduling (mirrored for performance)
   isLive    Boolean   @default(false) // current live state
