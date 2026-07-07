@@ -4,8 +4,6 @@ import { getIO } from "../socket";
 import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
 import haversine from "haversine-distance";
 
-
-
 export class DeliveryAssignmentService {
 
   static async expireOldBroadcasts() {
@@ -13,6 +11,7 @@ export class DeliveryAssignmentService {
   const expired = await prisma.deliveryBroadcast.findMany({
     where: { status: "PENDING", expiresAt: { lt: now } },
   });
+  
 
   for (const b of expired) {
     await prisma.deliveryBroadcast.update({

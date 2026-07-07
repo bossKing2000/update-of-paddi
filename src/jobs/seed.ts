@@ -75,7 +75,7 @@ export function runSeeder() {
 // ==============================
 
 export function getRandomFoodName(): string {
-  const foods = [
+const foods = [
     // 🍔 Global foods you had
     "Cheeseburger", "Margherita Pizza", "California Roll", "Spaghetti Carbonara", "Caesar Salad",
     "Grilled Ribeye Steak", "Club Sandwich", "Beef Taco", "Tom Yum Soup", "Pork Dumplings",
@@ -411,9 +411,9 @@ async function main() {
   // ==============================
   // 1️⃣ USERS (Vendors, Customers, Delivery)
   // ==============================
-  const totalVendors = 200;
-  const totalCustomers = 500;
-  const totalDeliveryGuys = 20;
+  const totalVendors = 1000;
+  const totalCustomers = 4000;
+  const totalDeliveryGuys = 200;
   const usersData: Prisma.UserCreateManyInput[] = [];
 
   function generateSafeUserIdentifiers(role: string, index: number) {
