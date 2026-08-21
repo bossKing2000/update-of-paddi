@@ -1,169 +1,160 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DeliveryAssignmentController = void 0;
+const zod_1 = require("zod");
 const deliveryAssignment_1 = require("../services/deliveryAssignment");
 const paramUtils_1 = require("../utils/paramUtils");
+const apiResponse_1 = require("../utils/apiResponse");
+const AppError_1 = require("../errors/AppError");
+const prisma_1 = __importDefault(require("../lib/prisma"));
+const client_1 = require("@prisma/client");
 class DeliveryAssignmentController {
     static async acceptBroadcast(req, res) {
-        try {
-            const broadcastId = (0, paramUtils_1.ensureString)(req.params.broadcastId);
-            const driverId = req.user?.id;
-            if (!driverId) {
-                return res
-                    .status(401)
-                    .json({ success: false, message: "Unauthorized: driver not found" });
-            }
-            const assignment = await deliveryAssignment_1.DeliveryAssignmentService.acceptBroadcast(broadcastId, driverId);
-            return res.status(200).json({
-                success: true,
-                message: "Broadcast accepted successfully",
-                data: assignment,
-            });
-        }
-        catch (error) {
-            console.error("❌ Accept broadcast error:", error);
-            return res.status(400).json({
-                success: false,
-                message: error.message || "Failed to accept broadcast",
-            });
-        }
+        const broadcastId = (0, paramUtils_1.ensureString)(req.params.broadcastId);
+        const driverId = req.user.id;
+        const assignment = await deliveryAssignment_1.DeliveryAssignmentService.acceptBroadcast(broadcastId, driverId);
+        return (0, apiResponse_1.sendSuccess)(res, { assignment }, "Broadcast accepted successfully");
     }
+    static async getBroadcastOffers(req, res) {
+        const offers = await deliveryAssignment_1.DeliveryAssignmentService.getBroadcastOffersForDriver(req.user.id);
+        return (0, apiResponse_1.sendSuccess)(res, { offers }, "Delivery offers retrieved");
+    }
+    static async declineBroadcast(req, res) {
+        const broadcastId = (0, paramUtils_1.ensureString)(req.params.broadcastId);
+        const broadcast = await deliveryAssignment_1.DeliveryAssignmentService.declineBroadcast(broadcastId, req.user.id);
+        return (0, apiResponse_1.sendSuccess)(res, { broadcastId: broadcast.id }, "Delivery offer declined");
+    }
+    /**
+     * Assign a driver to an order. Two modes:
+     *  - driverId provided -> manual assignment. Restricted to the order's
+     *    own vendor (or an admin) — previously this endpoint had no role
+     *    restriction at all, AND the controller defaulted driverId to the
+     *    caller's own id when none was given, meaning any authenticated
+     *    delivery person could self-assign to any order in the system by
+     *    simply calling this with just an orderId. Both holes are closed.
+     *  - no driverId -> broadcasts to nearby available drivers (the safe
+     *    default). Vendor or admin only.
+     */
     static async assignOrder(req, res) {
-        try {
-            const { orderId } = req.body; // <-- include driverId for manual assignment
-            const driverId = (0, paramUtils_1.ensureString)(req.body.driverId) || req.user?.id;
-            if (!orderId) {
-                return res.status(400).json({ success: false, message: "orderId is required" });
-            }
-            const assignment = await deliveryAssignment_1.DeliveryAssignmentService.assignOrder(orderId, driverId); // <-- pass driverId to service
-            return res.json({ success: true, assignment }); // standardized key "assignment"
-        }
-        catch (err) {
-            console.error("assignOrder error:", err);
-            return res.status(500).json({ success: false, message: err.message || "Server error" });
-        }
+        const { orderId, driverId } = req.body;
+        if (!orderId)
+            throw new AppError_1.ValidationError("orderId is required");
+        const order = await prisma_1.default.order.findUnique({ where: { id: orderId }, select: { vendorId: true } });
+        if (!order)
+            throw new AppError_1.NotFoundError("Order");
+        const isOwnerVendor = req.user.role === client_1.Role.VENDOR && req.user.id === order.vendorId;
+        const isAdmin = req.user.role === client_1.Role.ADMIN;
+        if (!isOwnerVendor && !isAdmin)
+            throw new AppError_1.ForbiddenError("Only this order's vendor can assign a delivery driver");
+        const assignment = await deliveryAssignment_1.DeliveryAssignmentService.assignOrder(orderId, driverId);
+        return (0, apiResponse_1.sendSuccess)(res, { assignment }, "Delivery assignment created");
     }
     static async acceptAssignment(req, res) {
-        try {
-            const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
-            const driverId = req.user?.id;
-            if (!driverId)
-                return res.status(401).json({ success: false, message: "Unauthorized" });
-            if (!assignmentId)
-                return res.status(400).json({ success: false, message: "assignmentId is required" });
-            const assignment = await deliveryAssignment_1.DeliveryAssignmentService.acceptAssignment(assignmentId, driverId);
-            return res.json({ success: true, assignment });
-        }
-        catch (err) {
-            console.error("acceptAssignment error:", err);
-            return res.status(500).json({ success: false, message: err.message || "Server error" });
-        }
+        const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
+        const assignment = await deliveryAssignment_1.DeliveryAssignmentService.acceptAssignment(assignmentId, req.user.id);
+        return (0, apiResponse_1.sendSuccess)(res, { assignment }, "Assignment accepted");
     }
     static async declineAssignment(req, res) {
-        try {
-            const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
-            if (!assignmentId)
-                return res.status(400).json({ success: false, message: "assignmentId is required" });
-            const assignment = await deliveryAssignment_1.DeliveryAssignmentService.handleDecline(assignmentId);
-            return res.json({ success: true, assignment });
-        }
-        catch (err) {
-            console.error("declineAssignment error:", err);
-            return res.status(500).json({ success: false, message: err.message || "Server error" });
-        }
+        const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
+        const assignment = await deliveryAssignment_1.DeliveryAssignmentService.handleDecline(assignmentId, req.user.id);
+        return (0, apiResponse_1.sendSuccess)(res, { assignment }, "Assignment declined");
     }
     static async getCurrentAssignments(req, res) {
-        try {
-            const driverId = req.user?.id;
-            if (!driverId)
-                return res.status(401).json({ success: false, message: "Unauthorized" });
-            const assignments = await deliveryAssignment_1.DeliveryAssignmentService.getActiveAssignmentsForDriver(driverId);
-            return res.json({ success: true, assignments });
-        }
-        catch (err) {
-            console.error("getCurrentAssignments error:", err);
-            return res.status(500).json({ success: false, message: err.message || "Server error" });
-        }
+        const assignments = await deliveryAssignment_1.DeliveryAssignmentService.getActiveAssignmentsForDriver(req.user.id);
+        return (0, apiResponse_1.sendSuccess)(res, { assignments }, "Current assignments retrieved");
     }
     static async updateDeliveryStatus(req, res) {
-        try {
-            const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
-            const { status } = req.body; // PICKED_UP, EN_ROUTE, DELIVERED, CANCELLED
-            const driverId = req.user?.id;
-            if (!driverId)
-                return res.status(401).json({ success: false, message: "Unauthorized" });
-            if (!assignmentId || !status)
-                return res.status(400).json({ success: false, message: "Missing fields" });
-            const result = await deliveryAssignment_1.DeliveryAssignmentService.updateStatus(assignmentId, driverId, status);
-            return res.json({ success: true, result });
+        const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
+        const { status } = req.body;
+        if (!status || !(status in client_1.DeliveryStatus))
+            throw new AppError_1.ValidationError("A valid status is required");
+        if (status === "DELIVERED") {
+            const proof = await prisma_1.default.deliveryProof.findUnique({ where: { assignmentId } });
+            if (!proof || proof.status === "REJECTED") {
+                throw new AppError_1.ConflictError("Submit a valid proof of delivery before completing this assignment");
+            }
         }
-        catch (err) {
-            console.error("updateDeliveryStatus error:", err);
-            return res.status(500).json({ success: false, message: err.message || "Server error" });
-        }
+        const result = await deliveryAssignment_1.DeliveryAssignmentService.updateStatus(assignmentId, req.user.id, status);
+        return (0, apiResponse_1.sendSuccess)(res, { result }, `Delivery status updated to ${status}`);
     }
+    /**
+     * Ownership check added — previously took assignmentId straight from
+     * the URL with no verification the requester was actually involved in
+     * it (the assigned driver, the order's customer/vendor, or an admin).
+     * Any authenticated delivery person could look up any assignment by ID.
+     */
     static async getAssignmentById(req, res) {
-        try {
-            const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
-            const assignment = await deliveryAssignment_1.DeliveryAssignmentService.getAssignmentById(assignmentId);
-            res.json({ success: true, assignment });
-        }
-        catch (err) {
-            console.error("getAssignmentById error:", err);
-            res.status(500).json({ success: false, message: err.message });
-        }
+        const assignmentId = (0, paramUtils_1.ensureString)(req.params.assignmentId);
+        const assignment = await deliveryAssignment_1.DeliveryAssignmentService.getAssignmentById(assignmentId);
+        const userId = req.user.id;
+        const isInvolved = assignment.deliveryPerson.userId === userId ||
+            assignment.order.customerId === userId ||
+            assignment.order.vendorId === userId ||
+            req.user.role === client_1.Role.ADMIN;
+        if (!isInvolved)
+            throw new AppError_1.ForbiddenError("You don't have access to this assignment");
+        return (0, apiResponse_1.sendSuccess)(res, { assignment }, "Assignment retrieved");
     }
+    /**
+     * A driver can only view their own history — previously this took
+     * :driverId straight from the URL with no check that it matched the
+     * caller, meaning any driver could enumerate any other driver's
+     * delivery history.
+     */
     static async getDriverHistory(req, res) {
-        try {
-            const driverId = (0, paramUtils_1.ensureString)(req.params.driverId);
-            const history = await deliveryAssignment_1.DeliveryAssignmentService.getDriverHistory(driverId);
-            res.json({ success: true, history });
+        const driverId = (0, paramUtils_1.ensureString)(req.params.driverId);
+        if (driverId !== req.user.id && req.user.role !== client_1.Role.ADMIN) {
+            throw new AppError_1.ForbiddenError("You can only view your own delivery history");
         }
-        catch (err) {
-            console.error("getDriverHistory error:", err);
-            res.status(500).json({ success: false, message: err.message });
-        }
+        const history = await deliveryAssignment_1.DeliveryAssignmentService.getDriverHistory(driverId);
+        return (0, apiResponse_1.sendSuccess)(res, { history }, "Driver history retrieved");
     }
+    /** Same fix as getDriverHistory — self-only unless admin. */
     static async getCustomerHistory(req, res) {
-        try {
-            const customerId = (0, paramUtils_1.ensureString)(req.params.customerId);
-            const history = await deliveryAssignment_1.DeliveryAssignmentService.getCustomerHistory(customerId);
-            res.json({ success: true, history });
+        const customerId = (0, paramUtils_1.ensureString)(req.params.customerId);
+        if (customerId !== req.user.id && req.user.role !== client_1.Role.ADMIN) {
+            throw new AppError_1.ForbiddenError("You can only view your own delivery history");
         }
-        catch (err) {
-            console.error("getCustomerHistory error:", err);
-            res.status(500).json({ success: false, message: err.message });
-        }
+        const history = await deliveryAssignment_1.DeliveryAssignmentService.getCustomerHistory(customerId);
+        return (0, apiResponse_1.sendSuccess)(res, { history }, "Customer delivery history retrieved");
     }
+    /** Same fix — self-only unless admin. */
     static async getDriverAnalytics(req, res) {
-        try {
-            const driverId = (0, paramUtils_1.ensureString)(req.params.driverId);
-            const analytics = await deliveryAssignment_1.DeliveryAssignmentService.getDriverAnalytics(driverId);
-            res.json({ success: true, analytics });
+        const driverId = (0, paramUtils_1.ensureString)(req.params.driverId);
+        if (driverId !== req.user.id && req.user.role !== client_1.Role.ADMIN) {
+            throw new AppError_1.ForbiddenError("You can only view your own analytics");
         }
-        catch (err) {
-            console.error("getDriverAnalytics error:", err);
-            res.status(500).json({ success: false, message: err.message });
-        }
+        const analytics = await deliveryAssignment_1.DeliveryAssignmentService.getDriverAnalytics(driverId);
+        return (0, apiResponse_1.sendSuccess)(res, { analytics }, "Driver analytics retrieved");
     }
     static async getAvailableDrivers(req, res) {
-        try {
-            const latitude = (0, paramUtils_1.ensureNumber)(req.query.latitude);
-            const longitude = (0, paramUtils_1.ensureNumber)(req.query.longitude);
-            // Optional validation
-            if (!latitude || !longitude) {
-                return res.status(400).json({
-                    success: false,
-                    message: "latitude and longitude are required in query",
-                });
-            }
-            const drivers = await deliveryAssignment_1.DeliveryAssignmentService.findAvailableDrivers(latitude, longitude);
-            return res.json({ success: true, drivers });
-        }
-        catch (err) {
-            console.error("getAvailableDrivers error:", err);
-            return res.status(500).json({ success: false, message: err.message });
-        }
+        const latitude = (0, paramUtils_1.ensureNumber)(req.query.latitude);
+        const longitude = (0, paramUtils_1.ensureNumber)(req.query.longitude);
+        if (!latitude || !longitude)
+            throw new AppError_1.ValidationError("latitude and longitude are required in query");
+        const drivers = await deliveryAssignment_1.DeliveryAssignmentService.findAvailableDrivers(latitude, longitude);
+        return (0, apiResponse_1.sendSuccess)(res, { drivers }, "Available drivers retrieved");
+    }
+    // ── NEW: previously there was no way for a driver to ever update ──
+    // their live position or online status after registration.
+    static async updateLocation(req, res) {
+        const schema = zod_1.z.object({ latitude: zod_1.z.number(), longitude: zod_1.z.number() });
+        const parsed = schema.safeParse(req.body);
+        if (!parsed.success)
+            throw new AppError_1.ValidationError("Valid latitude and longitude are required", parsed.error.flatten().fieldErrors);
+        const driver = await deliveryAssignment_1.DeliveryAssignmentService.updateDriverLocation(req.user.id, parsed.data.latitude, parsed.data.longitude);
+        return (0, apiResponse_1.sendSuccess)(res, { latitude: driver.latitude, longitude: driver.longitude }, "Location updated");
+    }
+    static async setOnlineStatus(req, res) {
+        const schema = zod_1.z.object({ isOnline: zod_1.z.boolean() });
+        const parsed = schema.safeParse(req.body);
+        if (!parsed.success)
+            throw new AppError_1.ValidationError("isOnline (boolean) is required");
+        const driver = await deliveryAssignment_1.DeliveryAssignmentService.setOnlineStatus(req.user.id, parsed.data.isOnline);
+        return (0, apiResponse_1.sendSuccess)(res, { isOnline: driver.isOnline }, parsed.data.isOnline ? "You're now online" : "You're now offline");
     }
 }
 exports.DeliveryAssignmentController = DeliveryAssignmentController;

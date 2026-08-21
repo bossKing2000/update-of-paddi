@@ -2,13 +2,25 @@ import { Request, Response } from "express";
 import prisma from "../lib/prisma";
 import { ensureString } from "../utils/paramUtils";
 import { AuthRequest } from "../middlewares/auth.middleware";
-import {reviewProductSchema,replyToReviewSchema,reviewVoteSchema, reportReviewSchema, reviewSummaryQuerySchema,createVendorReviewSchema,} from "../validations/ProductCRUDSchema";
-import { ZodError } from "zod";
-import { getIO } from "../socket";
+import {
+  reviewProductSchema,
+  replyToReviewSchema,
+  reviewVoteSchema,
+  reportReviewSchema,
+  reviewSummaryQuerySchema,
+  createVendorReviewSchema,
+} from "../validations/ProductCRUDSchema";
+import { OrderStatus, ActivityType } from "@prisma/client";
 import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
-import { ActivityType } from "@prisma/client";
+import { sendSuccess, sendCreated } from "../utils/apiResponse";
+import {
+  NotFoundError,
+  ForbiddenError,
+  ValidationError,
+  ConflictError,
+} from "../errors/AppError";
 
-function getRatingLabel(rating: number): string {
+export function getRatingLabel(rating: number): string {
   if (rating >= 4.5) return "Excellent";
   if (rating >= 4) return "Very Good";
   if (rating >= 3) return "Good";
@@ -16,489 +28,544 @@ function getRatingLabel(rating: number): string {
   return "Poor";
 }
 
-
-// ✅ Utility: Extract Cloudinary URLs from Multer files
 function extractImagePaths(files: AuthRequest["files"]): string[] {
   if (!files || typeof files !== "object" || !("images" in files)) return [];
-  const imageFiles = (files as { [fieldname: string]: Express.Multer.File[] })["images"];
-  return imageFiles.map((file) => file.path); // Already Cloudinary URL
+  const imageFiles = (files as { [fieldname: string]: Express.Multer.File[] })[
+    "images"
+  ];
+  return imageFiles.map((file) => file.path);
+}
+
+export function ratingBreakdown(
+  counts: { rating: number; _count: { rating: number } }[],
+) {
+  return [5, 4, 3, 2, 1].map((star) => {
+    const found = counts.find((c) => c.rating === star);
+    return {
+      stars: star,
+      count: found ? found._count.rating : 0,
+      label: getRatingLabel(star),
+    };
+  });
 }
 
 // ======= PRODUCT REVIEWS =======
-// Create a product review
-export const reviewProduct = async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    if (!req.user || req.user.role !== "CUSTOMER") {
-      res.status(403).json({ message: "Only customers can review products" });
-      return;
-    }
 
-    const parsed = reviewProductSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: (parsed.error as ZodError).issues });
-      return;
-    }
+// POST /reviews/product
+export const reviewProduct = async (req: AuthRequest, res: Response) => {
+  if (!req.user || req.user.role !== "CUSTOMER")
+    throw new ForbiddenError("Only customers can review products");
 
-    const existing = await prisma.productReview.findFirst({
-      where: { productId: parsed.data.productId, customerId: req.user.id },
-    });
+  const parsed = reviewProductSchema.safeParse(req.body);
+  if (!parsed.success)
+    throw new ValidationError(
+      "Invalid review",
+      parsed.error.flatten().fieldErrors,
+    );
 
-    if (existing) {
-      res.status(400).json({ message: "You already reviewed this product" });
-      return;
-    }
+  const existing = await prisma.productReview.findFirst({
+    where: { productId: parsed.data.productId, customerId: req.user.id },
+  });
+  if (existing) throw new ConflictError("You already reviewed this product");
 
-    const imageUrls = extractImagePaths(req.files);
+  // `verifiedPurchase` existed on the schema but was never set or checked
+  // anywhere — any CUSTOMER-role account could review any product without
+  // ever having ordered it, and even a genuine buyer's review was never
+  // actually marked verified. Requiring a completed order containing this
+  // product closes an obvious fake-review / competitor-sabotage vector on
+  // a marketplace with many independent vendors.
+  const hasCompletedOrder = await prisma.orderItem.findFirst({
+    where: {
+      productId: parsed.data.productId,
+      order: { customerId: req.user.id, status: OrderStatus.COMPLETED },
+    },
+    select: { id: true },
+  });
+  if (!hasCompletedOrder)
+    throw new ForbiddenError(
+      "You can only review products from a completed order",
+    );
 
-    const review = await prisma.productReview.create({
-      data: {
-        ...parsed.data,
-        customerId: req.user.id,
-        images: imageUrls,
+  const imageUrls = extractImagePaths(req.files);
+
+  const review = await prisma.productReview.create({
+    data: {
+      ...parsed.data,
+      customerId: req.user.id,
+      images: imageUrls,
+      verifiedPurchase: true,
+    },
+  });
+
+  const product = await prisma.product.findUnique({
+    where: { id: parsed.data.productId },
+    select: { vendorId: true, name: true },
+  });
+  const customer = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { name: true },
+  });
+
+  // Previously nothing notified the vendor when one of their products got
+  // reviewed at all (reviewVendor did this for vendor-profile reviews;
+  // product reviews had no equivalent).
+  if (product) {
+    await recordActivityBundle({
+      req,
+      actorId: req.user.id,
+      actions: [
+        {
+          type: ActivityType.REVIEW_POSTED,
+          title: "New Product Review",
+          message: `${customer?.name || "A customer"} left a ${parsed.data.rating}-star review on "${product.name}".`,
+          targetId: product.vendorId,
+          socketEvent: "REVIEW",
+          metadata: {
+            reviewId: review.id,
+            productId: parsed.data.productId,
+            rating: parsed.data.rating,
+          },
+          relation: "vendor",
+        },
+      ],
+      audit: {
+        action: "PRODUCT_REVIEW_POSTED",
+        metadata: {
+          productId: parsed.data.productId,
+          reviewId: review.id,
+          actorId: req.user.id,
+        },
       },
+      notifyRealtime: true,
+      notifyPush: true,
     });
-
-    res.status(201).json({ message: "Review submitted", review });
-  } catch (err) {
-    console.error("Submit review error:", err);
-    res.status(500).json({ error: "Server error" });
   }
+
+  return sendCreated(res, { review }, "Review submitted");
 };
 
-// Update a product review
-export const updateReview = async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    if (!req.user || req.user.role !== "CUSTOMER") {
-      res.status(403).json({ message: "Only customers can update reviews" });
-      return;
-    }
-    const review = await prisma.productReview.findUnique({
-      where: { id: ensureString(req.params.id) },
-    });
+// PATCH /reviews/product/:id
+export const updateReview = async (req: AuthRequest, res: Response) => {
+  if (!req.user || req.user.role !== "CUSTOMER")
+    throw new ForbiddenError("Only customers can update reviews");
 
-    if (!review || review.customerId !== req.user.id) {
-      res.status(403).json({ message: "Unauthorized or review not found" });
-      return;
-    }
+  const reviewId = ensureString(req.params.id);
+  const review = await prisma.productReview.findUnique({
+    where: { id: reviewId },
+  });
+  if (!review || review.customerId !== req.user.id)
+    throw new ForbiddenError("Unauthorized or review not found");
 
-    const parsed = reviewProductSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: (parsed.error as ZodError).issues });
-      return;
-    }
+  const parsed = reviewProductSchema.safeParse(req.body);
+  if (!parsed.success)
+    throw new ValidationError(
+      "Invalid review",
+      parsed.error.flatten().fieldErrors,
+    );
 
-    const imageUrls = extractImagePaths(req.files);
+  // A review's product must never change after creation — reviewProductSchema
+  // requires productId (since it's also used at creation time), but
+  // spreading it directly into the update meant a customer editing their
+  // own review could pass a *different* productId and silently reassign
+  // their review — with its vote/report history intact — onto an
+  // unrelated product, polluting that product's rating.
+  const { productId: _ignoredProductId, ...updatableFields } = parsed.data;
 
-    const updated = await prisma.productReview.update({
-      where: { id: ensureString(req.params.id) },
-      data: {
-        ...parsed.data,
-        images: imageUrls.length > 0 ? imageUrls : review.images,
-      },
-    });
+  const imageUrls = extractImagePaths(req.files);
 
-    res.json({ message: "Review updated", updated });
-  } catch (err) {
-    console.error("Update review error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
+  const updated = await prisma.productReview.update({
+    where: { id: reviewId },
+    data: {
+      ...updatableFields,
+      images: imageUrls.length > 0 ? imageUrls : review.images,
+    },
+  });
+
+  return sendSuccess(res, { updated }, "Review updated");
 };
 
-// Delete a product review
-export const deleteReview = async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    if (!req.user || req.user.role !== "CUSTOMER") {
-      res.status(403).json({ message: "Only customers can delete reviews" });
-      return;
-    }
+// DELETE /reviews/product/:id
+export const deleteReview = async (req: AuthRequest, res: Response) => {
+  if (!req.user || req.user.role !== "CUSTOMER")
+    throw new ForbiddenError("Only customers can delete reviews");
 
-    const review = await prisma.productReview.findUnique({
-      where: { id: ensureString(req.params.id) },
-    });
+  const reviewId = ensureString(req.params.id);
+  const review = await prisma.productReview.findUnique({
+    where: { id: reviewId },
+  });
+  if (!review || review.customerId !== req.user.id)
+    throw new ForbiddenError("Unauthorized or review not found");
 
-    if (!review || review.customerId !== req.user.id) {
-      res.status(403).json({ message: "Unauthorized or review not found" });
-      return;
-    }
-
-    await prisma.productReview.delete({ where: { id: ensureString(req.params.id) } });
-    res.json({ message: "Review deleted" });
-  } catch (err) {
-    console.error("Delete review error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
+  // Votes/reports/vendor reply are all onDelete: Cascade — cleaned up
+  // automatically, no manual deletion needed here.
+  await prisma.productReview.delete({ where: { id: reviewId } });
+  return sendSuccess(res, {}, "Review deleted");
 };
 
-// Get product reviews (with optional pagination)
-export const getProductReviews = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const productId = ensureString(req.params.productId);
-    const { page = "1", limit = "10" } = req.query;
+// GET /reviews/product/:productId
+export const getProductReviews = async (req: Request, res: Response) => {
+  const productId = ensureString(req.params.productId);
+  const page = Math.max(Number(req.query.page) || 1, 1);
+  const limit = Math.min(Number(req.query.limit) || 10, 50);
+  const skip = (page - 1) * limit;
 
-    const skip = (Number(page) - 1) * Number(limit);
-    const take = Number(limit);
-
-    const reviews = await prisma.productReview.findMany({
+  const [reviews, total] = await Promise.all([
+    prisma.productReview.findMany({
       where: { productId },
       include: {
         customer: { select: { id: true, name: true, avatarUrl: true } },
         reply: true,
         votes: true,
-        reports: true,
       },
       orderBy: { createdAt: "desc" },
       skip,
-      take,
-    });
+      take: limit,
+    }),
+    prisma.productReview.count({ where: { productId } }),
+  ]);
 
-    const total = await prisma.productReview.count({ where: { productId } });
-
-    res.json({ page: Number(page), limit: Number(limit), total, reviews });
-  } catch (err) {
-    console.error("Get reviews error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
+  return sendSuccess(res, { reviews }, "Reviews retrieved", 200, {
+    page,
+    limit,
+    total,
+    totalPages: Math.ceil(total / limit),
+  });
 };
 
-// Get product review summary
-export const getProductReviewSummary = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const productId = ensureString(req.params.productId);
+// GET /reviews/product/:productId/summary
+export const getProductReviewSummary = async (req: Request, res: Response) => {
+  const productId = ensureString(req.params.productId);
 
-    const parseResult = reviewSummaryQuerySchema.safeParse(req.query);
-    if (!parseResult.success) {
-      res.status(400).json({ error: parseResult.error.issues });
-      return;
-    }
+  const parseResult = reviewSummaryQuerySchema.safeParse(req.query);
+  if (!parseResult.success)
+    throw new ValidationError(
+      "Invalid query",
+      parseResult.error.flatten().fieldErrors,
+    );
 
-    const { page = 1, limit = 10 } = parseResult.data;
-
-    const breakdown = await prisma.productReview.groupBy({
+  const [breakdown, average] = await Promise.all([
+    prisma.productReview.groupBy({
       by: ["rating"],
       where: { productId },
       _count: { rating: true },
       orderBy: { rating: "desc" },
-    });
-
-    const average = await prisma.productReview.aggregate({
+    }),
+    prisma.productReview.aggregate({
       where: { productId },
       _avg: { rating: true },
       _count: { rating: true },
-    });
+    }),
+  ]);
 
-    const formattedBreakdown = [5, 4, 3, 2, 1].map((star) => {
-      const found = breakdown.find((b) => b.rating === star);
-      return { stars: star, count: found ? found._count.rating : 0, label: getRatingLabel(star) };
-    });
-
-    res.json({
+  return sendSuccess(
+    res,
+    {
       averageRating: Number(average._avg.rating?.toFixed(2)) || 0,
       totalReviews: average._count.rating,
-      breakdown: formattedBreakdown,
-    });
-  } catch (err) {
-    console.error("Review summary error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
+      breakdown: ratingBreakdown(breakdown),
+    },
+    "Review summary retrieved",
+  );
 };
-
 
 // ===== VENDOR REPLIES =====
 
-// Vendor reply to product review
-export const replyToReview = async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    if (!req.user || req.user.role !== "VENDOR") {
-      res.status(403).json({ message: "Only vendors can reply to reviews" });
-      return;
-    }
+// POST /reviews/product/:id/reply
+export const replyToReview = async (req: AuthRequest, res: Response) => {
+  if (!req.user || req.user.role !== "VENDOR")
+    throw new ForbiddenError("Only vendors can reply to reviews");
 
-    const parsed = replyToReviewSchema.safeParse({ reviewId: ensureString(req.params.id), ...req.body });
-    if (!parsed.success) {
-      res.status(400).json({ error: (parsed.error as ZodError).issues });
-      return;
-    }
+  const parsed = replyToReviewSchema.safeParse({
+    reviewId: ensureString(req.params.id),
+    ...req.body,
+  });
+  if (!parsed.success)
+    throw new ValidationError(
+      "Invalid reply",
+      parsed.error.flatten().fieldErrors,
+    );
 
-    const review = await prisma.productReview.findUnique({
-      where: { id: parsed.data.reviewId },
-      include: { product: true },
-    });
+  const review = await prisma.productReview.findUnique({
+    where: { id: parsed.data.reviewId },
+    include: { product: true },
+  });
+  if (!review || review.product.vendorId !== req.user.id)
+    throw new ForbiddenError("You do not own this product");
 
-    if (!review || review.product.vendorId !== req.user.id) {
-      res.status(403).json({ message: "You do not own this product" });
-      return;
-    }
+  const isNewReply = !(await prisma.vendorReply.findUnique({
+    where: { reviewId: parsed.data.reviewId },
+  }));
 
-    const reply = await prisma.vendorReply.upsert({
-      where: { reviewId: parsed.data.reviewId },
-      update: { message: parsed.data.message },
-      create: {
-        reviewId: parsed.data.reviewId,
-        vendorId: req.user.id,
-        message: parsed.data.message,
+  const reply = await prisma.vendorReply.upsert({
+    where: { reviewId: parsed.data.reviewId },
+    update: { message: parsed.data.message },
+    create: {
+      reviewId: parsed.data.reviewId,
+      vendorId: req.user.id,
+      message: parsed.data.message,
+    },
+  });
+
+  // Previously nothing told the customer their review got a reply at all
+  // — they'd only find out by happening to revisit the product page.
+  if (isNewReply) {
+    await recordActivityBundle({
+      req,
+      actorId: req.user.id,
+      actions: [
+        {
+          type: ActivityType.GENERAL,
+          title: "Vendor replied to your review",
+          message: `The vendor replied to your review on "${review.product.name}".`,
+          targetId: review.customerId,
+          socketEvent: "REVIEW",
+          metadata: { reviewId: review.id, productId: review.productId },
+        },
+      ],
+      audit: {
+        action: "REVIEW_REPLIED",
+        metadata: { reviewId: review.id, vendorId: req.user.id },
       },
+      notifyRealtime: true,
+      notifyPush: true,
     });
-
-    res.json({ message: "Reply added", reply });
-  } catch (err) {
-    console.error("Reply error:", err);
-    res.status(500).json({ error: "Server error" });
   }
+
+  return sendSuccess(res, { reply }, "Reply added");
 };
 
-// Delete vendor reply
-export const deleteReplyToReview = async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    if (!req.user || req.user.role !== "VENDOR") {
-      res.status(403).json({ message: "Only vendors can delete replies" });
-      return;
-    }
+// DELETE /reviews/product/:id/reply
+export const deleteReplyToReview = async (req: AuthRequest, res: Response) => {
+  if (!req.user || req.user.role !== "VENDOR")
+    throw new ForbiddenError("Only vendors can delete replies");
 
-    const reply = await prisma.vendorReply.findUnique({
-      where: { reviewId: ensureString(req.params.id) },
-      include: { review: { include: { product: true } } },
-    });
+  const reviewId = ensureString(req.params.id);
+  const reply = await prisma.vendorReply.findUnique({
+    where: { reviewId },
+    include: { review: { include: { product: true } } },
+  });
+  if (!reply || reply.vendorId !== req.user.id)
+    throw new ForbiddenError("Unauthorized or reply not found");
 
-    if (!reply || reply.vendorId !== req.user.id) {
-      res.status(403).json({ message: "Unauthorized or reply not found" });
-      return;
-    }
-
-    await prisma.vendorReply.delete({ where: { reviewId: ensureString(req.params.id) } });
-    res.json({ message: "Reply deleted successfully" });
-  } catch (err) {
-    console.error("Delete reply error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
+  await prisma.vendorReply.delete({ where: { reviewId } });
+  return sendSuccess(res, {}, "Reply deleted successfully");
 };
 
 // ===== REVIEW VOTES & REPORTS =====
-// Vote on a review
-export const voteReview = async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    if (!req.user) {
-      res.status(401).json({ message: "Unauthorized" });
-      return;
-    }
 
-    const parsed = reviewVoteSchema.safeParse({ reviewId: ensureString(req.params.id), ...req.body });
-    if (!parsed.success) {
-      res.status(400).json({ error: (parsed.error as ZodError).issues });
-      return;
-    }
+// POST /reviews/product/:id/vote
+export const voteReview = async (req: AuthRequest, res: Response) => {
+  if (!req.user) throw new ForbiddenError("Authentication required");
 
-    await prisma.reviewVote.upsert({
-      where: { reviewId_userId: { reviewId: parsed.data.reviewId, userId: req.user.id } },
-      update: { isHelpful: parsed.data.isHelpful },
-      create: { reviewId: parsed.data.reviewId, userId: req.user.id, isHelpful: parsed.data.isHelpful },
-    });
+  const parsed = reviewVoteSchema.safeParse({
+    reviewId: ensureString(req.params.id),
+    ...req.body,
+  });
+  if (!parsed.success)
+    throw new ValidationError(
+      "Invalid vote",
+      parsed.error.flatten().fieldErrors,
+    );
 
-    res.json({ message: "Voted successfully" });
-  } catch (err) {
-    console.error("Vote error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
+  const review = await prisma.productReview.findUnique({
+    where: { id: parsed.data.reviewId },
+    select: { customerId: true },
+  });
+  if (!review) throw new NotFoundError("Review");
+  if (review.customerId === req.user.id)
+    throw new ValidationError("You can't vote on your own review");
+
+  await prisma.reviewVote.upsert({
+    where: {
+      reviewId_userId: { reviewId: parsed.data.reviewId, userId: req.user.id },
+    },
+    update: { isHelpful: parsed.data.isHelpful },
+    create: {
+      reviewId: parsed.data.reviewId,
+      userId: req.user.id,
+      isHelpful: parsed.data.isHelpful,
+    },
+  });
+
+  return sendSuccess(res, {}, "Voted successfully");
 };
 
-// Report a review
-export const reportReview = async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    if (!req.user) {
-      res.status(401).json({ message: "Unauthorized" });
-      return;
-    }
+// POST /reviews/product/:id/report
+export const reportReview = async (req: AuthRequest, res: Response) => {
+  if (!req.user) throw new ForbiddenError("Authentication required");
 
-    const parsed = reportReviewSchema.safeParse({ reviewId: ensureString(req.params.id), ...req.body });
-    if (!parsed.success) {
-      res.status(400).json({ error: (parsed.error as ZodError).issues });
-      return;
-    }
+  const parsed = reportReviewSchema.safeParse({
+    reviewId: ensureString(req.params.id),
+    ...req.body,
+  });
+  if (!parsed.success)
+    throw new ValidationError(
+      "Invalid report",
+      parsed.error.flatten().fieldErrors,
+    );
 
-    await prisma.reviewReport.create({
-      data: { reviewId: parsed.data.reviewId, userId: req.user.id, reason: parsed.data.reason },
-    });
+  const review = await prisma.productReview.findUnique({
+    where: { id: parsed.data.reviewId },
+    select: { id: true },
+  });
+  if (!review) throw new NotFoundError("Review");
 
-    res.json({ message: "Report submitted" });
-  } catch (err) {
-    console.error("Report error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
+  const existing = await prisma.reviewReport.findFirst({
+    where: { reviewId: parsed.data.reviewId, userId: req.user.id },
+  });
+  if (existing) throw new ConflictError("You already reported this review");
+
+  await prisma.reviewReport.create({
+    data: {
+      reviewId: parsed.data.reviewId,
+      userId: req.user.id,
+      reason: parsed.data.reason,
+    },
+  });
+  return sendSuccess(res, {}, "Report submitted");
 };
 
 // ===== VENDOR REVIEWS =====
 
-// Create a vendor review
-// export const reviewVendor = async (req: AuthRequest, res: Response): Promise<void> => {
-//   try {
-//     if (!req.user || req.user.role !== "CUSTOMER") {
-//       res.status(403).json({ message: "Only customers can review vendors" });
-//       return;
-//     }
+// POST /reviews/vendor/:vendorId
+export const reviewVendor = async (req: AuthRequest, res: Response) => {
+  if (!req.user || req.user.role !== "CUSTOMER")
+    throw new ForbiddenError("Only customers can review vendors");
 
-//     const parsed = createVendorReviewSchema.safeParse(req.body);
-//     if (!parsed.success) {
-//       res.status(400).json({ error: (parsed.error as ZodError).issues });
-//       return;
-//     }
+  const parsed = createVendorReviewSchema.safeParse({
+    vendorId: ensureString(req.params.vendorId),
+    ...req.body,
+  });
+  if (!parsed.success)
+    throw new ValidationError(
+      "Invalid review",
+      parsed.error.flatten().fieldErrors,
+    );
 
-//     const existing = await prisma.vendorReview.findFirst({
-//       where: { vendorId: parsed.data.vendorId, customerId: req.user.id },
-//     });
+  const existing = await prisma.vendorReview.findFirst({
+    where: { vendorId: parsed.data.vendorId, customerId: req.user.id },
+  });
+  if (existing) throw new ConflictError("You already reviewed this vendor");
 
-//     if (existing) {
-//       res.status(400).json({ message: "You already reviewed this vendor" });
-//       return;
-//     }
-
-//     const review = await prisma.vendorReview.create({
-//       data: { ...parsed.data, customerId: req.user.id },
-//     });
-
-//     res.status(201).json({ message: "Vendor review submitted", review });
-//   } catch (err) {
-//     console.error("Vendor review error:", err);
-//     res.status(500).json({ error: "Server error" });
-//   }
-// };
-
-
-export const reviewVendor = async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    if (!req.user || req.user.role !== "CUSTOMER") {
-      res.status(403).json({ message: "Only customers can review vendors" });
-      return;
-    }
-
-    const parsed = createVendorReviewSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: (parsed.error as ZodError).issues });
-      return;
-    }
-
-    const existing = await prisma.vendorReview.findFirst({
-      where: { vendorId: parsed.data.vendorId, customerId: req.user.id },
-    });
-
-    if (existing) {
-      res.status(400).json({ message: "You already reviewed this vendor" });
-      return;
-    }
-
-    const review = await prisma.vendorReview.create({
-      data: { ...parsed.data, customerId: req.user.id },
-    });
-
-
-    const customer = await prisma.user.findUnique({
-      where: {id: req.user!.id},
-    });
-
-    const notificationTitle = "New Vendor Review";
-    const notificationMessage = `${customer?.name || "Someone"} submitted a review for you`;
-
-    await recordActivityBundle({
-  req,
-  actorId: req.user.id,
-  actions: [
-    {
-      type: ActivityType.REVIEW_POSTED,
-      title: "New Vendor Review",
-      message: `${customer?.name || "A customer"} submitted a review for you.`,
-      targetId: parsed.data.vendorId,
-      socketEvent: "REVIEW",
-      metadata: { reviewId: review.id, customerId: req.user.id },
-      relation: "vendor",
-    },
-  ],
-  audit: {
-    action: "REVIEW_POSTED",
-    metadata: {
+  // Same verified-purchase requirement as product reviews — previously
+  // anyone with a CUSTOMER account could review any vendor without ever
+  // having ordered from them.
+  const hasCompletedOrder = await prisma.order.findFirst({
+    where: {
       vendorId: parsed.data.vendorId,
-      reviewId: review.id,
-      actorId: req.user.id,
+      customerId: req.user.id,
+      status: OrderStatus.COMPLETED,
     },
-  },
-  notifyRealtime: true,
-  notifyPush: true,
-});
+    select: { id: true },
+  });
+  if (!hasCompletedOrder)
+    throw new ForbiddenError(
+      "You can only review vendors you've ordered from (completed order required)",
+    );
 
-    
-        
-    res.status(201).json({ message: "Vendor review submitted", review });
-  } catch (err) {
-    console.error("Vendor review error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
+  const review = await prisma.vendorReview.create({
+    data: { ...parsed.data, customerId: req.user.id },
+  });
+  const customer = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { name: true },
+  });
+
+  await recordActivityBundle({
+    req,
+    actorId: req.user.id,
+    actions: [
+      {
+        type: ActivityType.REVIEW_POSTED,
+        title: "New Vendor Review",
+        message: `${customer?.name || "A customer"} submitted a review for you.`,
+        targetId: parsed.data.vendorId,
+        socketEvent: "REVIEW",
+        metadata: { reviewId: review.id, customerId: req.user.id },
+        relation: "vendor",
+      },
+    ],
+    audit: {
+      action: "REVIEW_POSTED",
+      metadata: {
+        vendorId: parsed.data.vendorId,
+        reviewId: review.id,
+        actorId: req.user.id,
+      },
+    },
+    notifyRealtime: true,
+    notifyPush: true,
+  });
+
+  return sendCreated(res, { review }, "Vendor review submitted");
 };
 
-// Get vendor reviews (with pagination)
-export const getVendorReviews = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const vendorId = ensureString(req.params.vendorId);
-    const { page = "1", limit = "10" } = req.query;
+// GET /reviews/vendor/:vendorId
+export const getVendorReviews = async (req: Request, res: Response) => {
+  const vendorId = ensureString(req.params.vendorId);
+  const page = Math.max(Number(req.query.page) || 1, 1);
+  const limit = Math.min(Number(req.query.limit) || 10, 50);
+  const skip = (page - 1) * limit;
 
-    const skip = (Number(page) - 1) * Number(limit);
-    const take = Number(limit);
-
-    const reviews = await prisma.vendorReview.findMany({
+  const [reviews, total] = await Promise.all([
+    prisma.vendorReview.findMany({
       where: { vendorId },
-      include: { customer: { select: { id: true, name: true, avatarUrl: true } } },
+      include: {
+        customer: { select: { id: true, name: true, avatarUrl: true } },
+      },
       orderBy: { createdAt: "desc" },
       skip,
-      take,
-    });
+      take: limit,
+    }),
+    prisma.vendorReview.count({ where: { vendorId } }),
+  ]);
 
-    const total = await prisma.vendorReview.count({ where: { vendorId } });
-
-    res.json({ page: Number(page), limit: Number(limit), total, reviews });
-  } catch (err) {
-    console.error("Get vendor reviews error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
+  return sendSuccess(res, { reviews }, "Vendor reviews retrieved", 200, {
+    page,
+    limit,
+    total,
+    totalPages: Math.ceil(total / limit),
+  });
 };
 
-// Vendor review summary
-export const getVendorReviewSummary = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const vendorId = ensureString(req.params.vendorId);
+// GET /reviews/vendor/:vendorId/summary
+export const getVendorReviewSummary = async (req: Request, res: Response) => {
+  const vendorId = ensureString(req.params.vendorId);
 
-    const breakdown = await prisma.vendorReview.groupBy({
+  const [breakdown, average] = await Promise.all([
+    prisma.vendorReview.groupBy({
       by: ["rating"],
       where: { vendorId },
       _count: { rating: true },
       orderBy: { rating: "desc" },
-    });
-
-    const average = await prisma.vendorReview.aggregate({
+    }),
+    prisma.vendorReview.aggregate({
       where: { vendorId },
       _avg: { rating: true },
       _count: { rating: true },
-    });
+    }),
+  ]);
 
-    const formattedBreakdown = [5, 4, 3, 2, 1].map((star) => {
-      const found = breakdown.find((b) => b.rating === star);
-      return { stars: star, count: found ? found._count.rating : 0, label: getRatingLabel(star) };
-    });
-
-    res.json({
+  return sendSuccess(
+    res,
+    {
       averageRating: Number(average._avg.rating?.toFixed(2)) || 0,
       totalReviews: average._count.rating,
-      breakdown: formattedBreakdown,
-    });
-  } catch (err) {
-    console.error("Vendor summary error:", err);
-    res.status(500).json({ error: "Server error" });
-  }
+      breakdown: ratingBreakdown(breakdown),
+    },
+    "Vendor review summary retrieved",
+  );
 };
 
-
-// Get single review by id
+// GET /reviews/vendor/single/:reviewId
 export const getVendorReviewById = async (req: Request, res: Response) => {
   const reviewId = ensureString(req.params.reviewId);
   const review = await prisma.vendorReview.findUnique({
     where: { id: reviewId },
-    include: { customer: { select: { id: true, name: true, avatarUrl: true } } },
+    include: {
+      customer: { select: { id: true, name: true, avatarUrl: true } },
+    },
   });
-  if (!review) return res.status(404).json({ error: "Review not found" });
-  res.json({ review });
+  if (!review) throw new NotFoundError("Review");
+  return sendSuccess(res, { review }, "Review retrieved");
 };

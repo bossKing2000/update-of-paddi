@@ -122,6 +122,7 @@ export const redisSearch = createRedisClient(2);
 export const redisTotalViews = createRedisClient(3);
 export const redisUsersSessions = createRedisClient(4);
 export const ShopCartRedis = createRedisClient(5);
+export const redisPayments = createRedisClient(6);
 
 /**
  * Connect Redis client if not already connected
@@ -144,6 +145,7 @@ export async function ensureRedisReady() {
     await connectRedis(redisTotalViews, "TotalViews");
     await connectRedis(redisUsersSessions, "UserSessions");
     await connectRedis(ShopCartRedis, "ShopCart");
+    await connectRedis(redisPayments, "Payments");
 
     // Health check
     await redisNotifications.ping();

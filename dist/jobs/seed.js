@@ -5,6 +5,10 @@
 // //  to make the html live run this : live-server
 // npx prisma migrate resolve --applied "20251004214831_full_migration"
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.seederState = void 0;
+exports.getSeederStatus = getSeederStatus;
+exports.stopSeeder = stopSeeder;
+exports.runSeeder = runSeeder;
 exports.getRandomFoodName = getRandomFoodName;
 exports.getRandomFoodDescription = getRandomFoodDescription;
 // for locally
@@ -17,6 +21,53 @@ const redis_1 = require("../lib/redis");
 const prisma = new client_1.PrismaClient();
 const BATCH_SIZE = 500;
 const MAX_PRODUCTS_PER_VENDOR = 10;
+// Seeder runtime state (exported for API access)
+exports.seederState = {
+    running: false,
+    current: 0,
+    total: 100,
+    message: 'Idle',
+    stopRequested: false,
+};
+function getSeederStatus() {
+    return {
+        running: exports.seederState.running,
+        progress: `${exports.seederState.current} / ${exports.seederState.total}`,
+        message: exports.seederState.message,
+        stopRequested: exports.seederState.stopRequested,
+    };
+}
+function stopSeeder() {
+    if (!exports.seederState.running)
+        return false;
+    exports.seederState.stopRequested = true;
+    exports.seederState.message = 'Stop requested';
+    return true;
+}
+function runSeeder() {
+    if (exports.seederState.running)
+        return false;
+    exports.seederState.running = true;
+    exports.seederState.stopRequested = false;
+    exports.seederState.current = 0;
+    exports.seederState.total = 100;
+    exports.seederState.message = 'Starting seeder';
+    // Run main in background
+    main()
+        .then(() => {
+        exports.seederState.message = 'Completed';
+    })
+        .catch((err) => {
+        console.error('Seeder failed:', err);
+        exports.seederState.message = `Failed: ${err?.message || err}`;
+    })
+        .finally(() => {
+        exports.seederState.running = false;
+        exports.seederState.stopRequested = false;
+        exports.seederState.current = exports.seederState.total;
+    });
+    return true;
+}
 // ==============================
 // Realistic Random Food Generators
 // ==============================
@@ -296,8 +347,8 @@ async function main() {
     // ==============================
     // CONFIGURABLE ENGAGEMENT PARAMETERS
     // ==============================
-    const CUSTOMER_ENGAGEMENT = 0.7; // 60% of customers place orders
-    const VENDOR_ENGAGEMENT = 0.5; // 70% of vendors have active products
+    const CUSTOMER_ENGAGEMENT = 0.8; // 60% of customers place orders
+    const VENDOR_ENGAGEMENT = 0.7; // 70% of vendors have active products
     const MAX_ORDERS_PER_CUSTOMER = { min: 0, max: 5 };
     const ORDER_STATUS_PROBABILITIES = [
         { status: client_1.OrderStatus.COMPLETED, weight: 0.5 },
@@ -324,9 +375,9 @@ async function main() {
     // ==============================
     // 1️⃣ USERS (Vendors, Customers, Delivery)
     // ==============================
-    const totalVendors = 200;
-    const totalCustomers = 500;
-    const totalDeliveryGuys = 20;
+    const totalVendors = 1000;
+    const totalCustomers = 4000;
+    const totalDeliveryGuys = 200;
     const usersData = [];
     function generateSafeUserIdentifiers(role, index) {
         const cleanName = faker_1.faker.person.firstName().toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -389,6 +440,8 @@ async function main() {
     }
     await prisma.user.createMany({ data: usersData, skipDuplicates: true });
     console.log(`✅ Created ${usersData.length} users (Vendors + Customers + Delivery)`);
+    exports.seederState.current = 10;
+    exports.seederState.message = 'Users created';
     // ==============================
     // 2️⃣ Delivery Profiles
     // ==============================
@@ -409,6 +462,8 @@ async function main() {
     if (deliveryProfilesData.length) {
         await prisma.deliveryPerson.createMany({ data: deliveryProfilesData, skipDuplicates: true });
         console.log(`🚴 Created ${deliveryProfilesData.length} delivery profiles`);
+        exports.seederState.current = 15;
+        exports.seederState.message = 'Delivery profiles created';
     }
     // ==============================
     // 3️⃣ Addresses
@@ -428,6 +483,8 @@ async function main() {
     }));
     await prisma.address.createMany({ data: addressesData, skipDuplicates: true });
     console.log(`✅ Created ${addressesData.length} addresses`);
+    exports.seederState.current = 20;
+    exports.seederState.message = 'Addresses created';
     // ==============================
     // 4️⃣ Products + Options + Reviews
     // ==============================
@@ -516,6 +573,9 @@ async function main() {
             await new Promise((r) => setTimeout(r, 200));
         }
     }
+    // Approximate progress after products seeded
+    exports.seederState.current = 50;
+    exports.seederState.message = 'Products seeded';
     // --------------------------
     // 8️⃣ Customer Carts
     // --------------------------
@@ -559,6 +619,8 @@ async function main() {
         });
     }
     console.log(`🛒 Created carts for ${cartCustomers.length} customers`);
+    exports.seederState.current = 65;
+    exports.seederState.message = 'Carts created';
     // ==============================
     // 5️⃣ Vendor Reviews
     // ==============================
@@ -583,6 +645,8 @@ async function main() {
         }
     }
     console.log("✅ Vendor reviews seeded");
+    exports.seederState.current = 80;
+    exports.seederState.message = 'Vendor reviews created';
     // ==============================
     // 7️⃣ Orders + Order Items + Payments
     // ==============================
@@ -801,6 +865,8 @@ async function main() {
         console.log(`📦 Created ${ordersCount} orders for customer ${customer.email}`);
     }
     console.log("💳 Orders, order items, and payments seeded successfully!");
+    exports.seederState.current = 95;
+    exports.seederState.message = 'Orders seeded';
     console.log("💳 Orders, order items, and payments seeded successfully!");
     // ==============================
     // 6️⃣ Clear Redis Cache
@@ -808,17 +874,23 @@ async function main() {
     try {
         await clearRedisCaches();
         console.log("🧹 Redis caches cleared\n");
+        exports.seederState.current = 100;
+        exports.seederState.message = 'Redis cleared';
     }
     catch (err) {
         console.warn("⚠️ Failed to clear Redis caches:", err);
     }
     console.log("🎉 Seeding completed successfully!\n");
 }
-main()
-    .catch((e) => {
-    console.error("❌ Seeding failed:", e);
-    process.exit(1);
-})
-    .finally(async () => {
-    await prisma.$disconnect();
-});
+// Only run automatically if this file is executed directly (not when imported)
+if (require && require.main === module) {
+    main()
+        .catch((e) => {
+        console.error("❌ Seeding failed:", e);
+        process.exit(1);
+    })
+        .finally(async () => {
+        await prisma.$disconnect();
+    });
+}
+// When imported, caller (e.g., API) should call `runSeeder()` to start the process.

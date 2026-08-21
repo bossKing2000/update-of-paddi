@@ -11,21 +11,9 @@ let io: SocketIOServer | null = null;
  * Initialize Socket.IO
  */
 export function initSocket(server: any) {
-  const allowedOrigins: (string | RegExp)[] = [
-    // "http://127.0.0.1:8080",
-    // "http://localhost:8080",
-    // "http://localhost:3000",
-    // "http://127.0.0.1:60308",
-    "https://ui-food-paddi.onrender.com",
-      "http://10.0.2.2:5000",
-
-  ];
-
-  if (config.clientUrl) allowedOrigins.push(config.clientUrl);
-
   io = new SocketIOServer(server, {
     cors: {
-      origin: allowedOrigins,
+      origin: config.allowedOrigins,
       credentials: true,
     },
   });

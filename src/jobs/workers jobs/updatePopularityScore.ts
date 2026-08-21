@@ -1,5 +1,6 @@
 import prisma from "../../lib/prisma";
 import { redisProducts, redisTotalViews } from "../../lib/redis";
+import { scanKeys } from "../../lib/redisScan";
 import fs from "fs";
 import path from "path";
 import { CACHE_KEYS } from "../../services/redisCacheTiming";
@@ -54,7 +55,7 @@ async function safeExecute<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Prom
 }
 
 async function delPattern(pattern: string) {
-  const keys = await redisProducts.keys(pattern);
+  const keys = await scanKeys(redisProducts, pattern);
   if (keys.length > 0) await redisProducts.del(keys);
 }
 

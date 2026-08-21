@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import {register,login,refreshToken, logout,forgotPassword, getProfile,getAllUsers,selectRole,verifyResetCode,secureResetPassword,verifyEmail,resendVerificationEmail, googleLogin, updateProfile, createAddress, getAllAddresses, updateAddress, deleteAddress,} from '../controllers/auth.controller';
+import {register,login,refreshToken, logout, logoutAllDevices, getMySessions, revokeSession, getLoginHistory, forgotPassword, getProfile,selectRole,verifyResetCode,secureResetPassword,verifyEmail,resendVerificationEmail, googleLogin, updateProfile, createAddress, getAllAddresses, updateAddress, deleteAddress,} from '../controllers/auth.controller';
 import { registerValidator, loginValidator, updateProfileValidator } from '../validators/auth.validator';
 import { validateRequest } from '../middlewares/validateRequest.middleware';
 import { authRateLimiter } from '../middlewares/rateLimiter.middleware';
@@ -8,6 +8,7 @@ import { upload } from '../utils/multer';
 import { trackUserAction } from '../middlewares/tracking.middleware';
 import { geoMiddleware, GeoRequest } from '../middlewares/geo.middleware';
 import { getNearbyVendors } from '../controllers/vendorControllerMapping';
+import { verifyNINService } from '../services/dojah.service';
 
 const router = Router();
 
@@ -19,15 +20,37 @@ router.post('/register',authRateLimiter,upload.single('avatarUrl'),registerValid
 //  POST /login
 //  Authenticate user and return access + refresh tokens
 //  access Public
-// router.post('/login',authRateLimiter,loginValidator,trackUserAction("LOGIN"),validateRequest,async (req: GeoRequest, res: Response) => {await login(req, res);});
 router.post('/login',geoMiddleware,authRateLimiter,loginValidator,trackUserAction("LOGIN"),validateRequest,async (req: GeoRequest, res: Response) => {await login(req, res);});
 
-// router.post('/login',login );
-
 //  POST /logout
-//  Logs out user by clearing cookies or invalidating token
-//  access Public or Private (based on your logic)
-router.post('/logout', async (req: Request, res: Response) => { await logout(req, res);});
+//  Logs out user from this device only (see /logout-all-devices for every device)
+//  access Private
+// Previously had no authenticate middleware at all — req.user was always
+// undefined, so logout always hit the "not authenticated" branch and
+// never actually deleted a session. It has never worked until now.
+router.post('/logout', authenticate, async (req: Request, res: Response) => { await logout(req, res);});
+
+//  POST /logout-all-devices
+//  Revokes every active session and invalidates every outstanding refresh token
+//  access Private
+// Previously existed as a function but was never wired to any route at all.
+router.post('/logout-all-devices', authenticate, async (req: Request, res: Response) => { await logoutAllDevices(req, res); });
+
+//  GET /sessions
+//  Lists every active session (device) for the current user
+//  access Private
+router.get('/sessions', authenticate, async (req: Request, res: Response) => { await getMySessions(req, res); });
+
+//  DELETE /sessions/:sessionId
+//  Revokes one specific device's session without touching any others
+//  access Private
+router.delete('/sessions/:sessionId', authenticate, async (req: Request, res: Response) => { await revokeSession(req, res); });
+
+//  GET /login-history
+//  Recent logins for the current user (device/location/time), for
+//  spotting activity they don't recognize
+//  access Private
+router.get('/login-history', authenticate, async (req: Request, res: Response) => { await getLoginHistory(req, res); });
 
 //  GET /profile
 //  Returns authenticated user's profile
@@ -37,10 +60,10 @@ router.get('/profile', authenticate, async (req: Request, res: Response) => { aw
 //update profile 
 router.patch('/profile', upload.single('avatarUrl'), authenticate, updateProfileValidator, validateRequest, updateProfile);
 
-//  GET /alluser
-//  Returns all users (can be restricted to ADMIN later)
-//  access Public (should be Private in production)
-router.get('/alluser', async (req: Request, res: Response) => { await getAllUsers(req, res);});
+// NOTE: GET /alluser used to live here — no auth, no pagination, dumped
+// every user's email/phone/name/bio to any anonymous caller. Removed.
+// Use GET /api/admin/users instead (paginated, admin-only, built in the
+// Admin domain).
 
 //  POST /select-role
 //  Allows user to choose a role (CUSTOMER, VENDOR) only once
@@ -70,25 +93,17 @@ router.post('/resend-verification', resendVerificationEmail);
 //  POST /verify-reset-code
 //  Verifies email + reset code before allowing password reset
 //  access Public
-router.post('/verify-reset-code', async (req: Request, res: Response) => {await verifyResetCode(req, res);});
+router.post('/verify-reset-code', authRateLimiter, async (req: Request, res: Response) => {await verifyResetCode(req, res);});
 
 //  POST /secure-reset-password
-//  Final step: reset password using token (after code is verified)
+//  Final step: reset password using token (after code is verified).
+//  Now also revokes every existing session, since an account compromise
+//  is often exactly why someone is resetting their password.
 //  access Public
 router.post('/secure-reset-password', async (req: Request, res: Response) => {await secureResetPassword(req, res);});
 
 // post /google-login
 router.post('/google-login',async (req: Request, res: Response) => {await googleLogin(req, res);});
-
-
-//  --- Optional legacy route ---
-//  POST /reset-password
-//  Resets user password directly (older method, currently disabled)
-//  access Public
-// router.post('/reset-password', async (req: Request, res: Response) => {
-//   await resetPassword(req, res);
-// }); this endpoint is still working but due to forget password have inbuilt resend code 
-
 
 router.post('/addresses', authenticate, createAddress);
 router.get('/addresses', authenticate, getAllAddresses);
@@ -97,5 +112,9 @@ router.delete('/addresses/:id', authenticate, deleteAddress);
 
 router.get("/nearby", getNearbyVendors);
 
+//  POST /kyc/verify-nin
+//  Verify a VENDOR or DELIVERY user's NIN via Dojah, flips kycStatus to VERIFIED
+//  access Private (authenticated VENDOR/DELIVERY only — enforced in the service)
+router.post("/kyc/verify-nin", authenticate, verifyNINService);
+
 export default router;
- 

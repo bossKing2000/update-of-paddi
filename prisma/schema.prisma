@@ -22,8 +22,47 @@ model User {
   brandLogo   String?
   googleId    String?  @unique
 
+  // KYC (NIN verification via Dojah) — required for VENDOR and DELIVERY
+  // before they can go live. See src/services/dojah.service.ts.
+  kycStatus KycStatus @default(PENDING)
+  nin       String?   @unique
+  ninData   Json? // raw Dojah verification response, stored for audit/dispute purposes
+
   order_openAT        String?
   order_closeAT       String?
+  // Vendor self-service settings persisted as JSON so the API can evolve without another table.
+  operatingHours      Json?
+  deliveryPreferences Json?
+  serviceAreas        Json?
+
+  // ── Vendor payout fields ──────────────────────────────────────
+  // Didn't exist at all before — there was no way for a vendor to ever
+  // receive a payout through the platform. commissionRate is per-vendor
+  // so it can be negotiated individually rather than being a single
+  // global constant.
+  commissionRate        Float    @default(0.15)
+  bankName              String?
+  bankCode              String? // Paystack bank code, required for transfers (distinct from the display name)
+  bankAccountNumber     String?
+  bankAccountName       String? // set from Paystack's own resolution, not typed in by the vendor
+  paystackRecipientCode String? // set once bank details are verified with Paystack; cleared whenever bank details change
+  vendorPayouts         VendorPayout[] @relation("VendorPayouts")
+  payoutsProcessed      VendorPayout[] @relation("PayoutProcessedBy")
+  vendorPromotions      Promotion[]      @relation("VendorPromotions")
+  promotionUsages       PromotionUsage[] @relation("UserPromotionUsages")
+  vendorSupportTickets  VendorSupportTicket[] @relation("VendorSupportTickets")
+
+  // ── Referrals ──────────────────────────────────────────────────
+  // Didn't exist at all before. Every user gets their own shareable
+  // code (generated on first request rather than at signup, so
+  // existing accounts get one lazily too); referredByUserId records
+  // who they signed up through, if anyone.
+  referralCode     String?  @unique
+  referredByUserId String?
+  referredBy       User?    @relation("UserReferrals", fields: [referredByUserId], references: [id])
+  referredUsers    User[]   @relation("UserReferrals")
+  referralRewardsEarned  ReferralReward[] @relation("ReferralAsReferrer")
+  referralRewardAsInvitee ReferralReward[] @relation("ReferralAsReferred")
 
   // Relations
   products              Product[]           @relation("VendorProducts")
@@ -39,8 +78,11 @@ model User {
   loginHistory          LoginHistory[]      @relation("UserLoginHistory")
   addresses             Address[]           @relation("UserAddresses")
   carts                 Cart[]              @relation("UserCarts")
+  cartSummarySnapshots  CartSummarySnapshot[] @relation("UserCartSnapshots")
   UserPaymentMethod     UserPaymentMethod[]
   deliveryPerson        DeliveryPerson?
+  riderWithdrawalsProcessed RiderWithdrawal[] @relation("RiderWithdrawalProcessedBy")
+  deliveryProofsReviewed    DeliveryProof[]   @relation("DeliveryProofReviewedBy")
 
   tokenVersion               Int                 @default(0)
   createdAt                  DateTime            @default(now())
@@ -49,6 +91,11 @@ model User {
   lastLoginAt                DateTime?
   loginMethod                String?
   isEmailVerified            Boolean             @default(false)
+  // Admin moderation — didn't exist at all before; no way to suspend an
+  // account for fraud/abuse without deleting it outright.
+  isBlocked                  Boolean             @default(false)
+  blockedReason              String?
+  blockedAt                  DateTime?
   emailVerificationToken     String?
   emailVerificationExpiresAt DateTime?
   passwordResetToken         PasswordResetToken? @relation("UserPasswordResetToken")
@@ -180,12 +227,35 @@ model Order {
   addressId        String?
   basePrice        Float
   extraCharge      Float       @default(0)
+  // Delivery fee for this specific order, computed once per vendor at
+  // checkout (see cartSummary.service.ts / deliveryFee.service.ts).
+  // Previously there was no delivery fee concept anywhere — deliveries
+  // were effectively always free and there was no out-of-range check.
+  deliveryFee      Float       @default(0)
   totalPrice       Float
   vendorNote       String?
   customerApproval Boolean     @default(false)
   status           OrderStatus @default(PENDING)
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @default(now()) @updatedAt // ✅ add default
+
+  // Set from the checkout request's Idempotency-Key header. A single
+  // checkout can produce multiple orders (one per vendor in the cart),
+  // all sharing the same key — so this is indexed, not unique, and a
+  // retry with the same key returns the existing order(s) instead of
+  // creating duplicates.
+  idempotencyKey String?
+
+  // Set once this order's revenue has been included in a VendorPayout —
+  // prevents the same completed order from being paid out to the vendor
+  // twice across multiple payout runs.
+  payoutId String?
+  payout   VendorPayout? @relation(fields: [payoutId], references: [id])
+
+  // Set when this order was created from an accepted special-order offer
+  // rather than a normal cart checkout.
+  specialOrderOfferId String?           @unique
+  specialOrderOffer   SpecialOrderOffer? @relation("SpecialOfferOrder", fields: [specialOrderOfferId], references: [id])
 
   customer    User                 @relation("CustomerOrders", fields: [customerId], references: [id], onDelete: Cascade)
   vendor      User                 @relation("VendorOrders", fields: [vendorId], references: [id], onDelete: Cascade)
@@ -214,6 +284,8 @@ model Order {
   @@index([customerId, createdAt])
   @@index([vendorId, createdAt])
   @@index([status])
+  @@index([idempotencyKey])
+  @@index([payoutId])
 }
 
 model OrderItem {
@@ -287,11 +359,20 @@ model ReviewVote {
   @@unique([reviewId, userId])
 }
 
+enum ReviewReportStatus {
+  PENDING
+  RESOLVED
+  DISMISSED
+}
+
 model ReviewReport {
   id        String   @id @default(uuid())
   reviewId  String
   userId    String
   reason    String
+  status    ReviewReportStatus @default(PENDING)
+  resolvedByAdminId String?
+  resolvedAt        DateTime?
   createdAt DateTime @default(now())
 
   review ProductReview @relation(fields: [reviewId], references: [id], onDelete: Cascade)
@@ -352,10 +433,10 @@ model PasswordResetToken {
 model Payment {
   id           String   @id @default(cuid())
   userId       String
-  orderId      String
+  orderId      String // the primary/first order this payment was initiated for
   amount       Int //mount in kobo, e.g. 600000 = ₦6,000.00 ✅
   reference    String   @unique
-  status       String
+  status       PaymentStatus @default(PENDING)
   paystackData Json? // ✅ Add this
   channel      String? // ✅ Optional
   ipAddress    String   @default("unknown") // ✅ fraud logs
@@ -366,6 +447,21 @@ model Payment {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @default(now()) @updatedAt // ✅ add default
   metadata     Json? // ✅ add this line
+
+  // A single checkout can produce multiple orders (one per vendor) that
+  // are paid for together in one Paystack transaction. All orders in that
+  // batch share this key (mirrors Order.idempotencyKey) — the finalizer
+  // looks up every order with a matching key rather than assuming exactly
+  // one order per payment.
+  idempotencyKey String?
+
+  // Self-healing lock so the finalizer (webhook, confirmPayment,
+  // chargeSavedCard, and the verifyPendingPayments job can all reach the
+  // same payment concurrently) only has one active finalization at a
+  // time. A lock older than 2 minutes is treated as abandoned (crashed
+  // process) and reclaimed rather than blocking forever.
+  isProcessing        Boolean   @default(false)
+  processingStartedAt DateTime?
 
   user  User  @relation("UserPayments", fields: [userId], references: [id])
   order Order @relation("OrderPayments", fields: [orderId], references: [id])
@@ -380,6 +476,7 @@ model Payment {
   @@index([userId])
   @@index([orderId])
   @@index([status])
+  @@index([idempotencyKey])
 }
 
 enum Role {
@@ -387,6 +484,26 @@ enum Role {
   VENDOR
   ADMIN
   DELIVERY
+}
+
+enum KycStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum SpecialOrderRequestStatus {
+  PENDING
+  OFFER_MADE
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
+enum SpecialOrderOfferStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
 }
 
 enum Category {
@@ -413,13 +530,33 @@ enum OrderStatus {
   CANCELLED_UNPAID
 }
 
+// Used for both Order.paymentStatus and (as of this pass) Payment.status —
+// previously Payment.status was a raw String and different code paths
+// wrote inconsistent casing ('SUCCESS' vs "success"), which meant a
+// refund-eligibility check or fulfillment check could silently fail
+// depending on which code path had confirmed a given payment. One enum,
+// shared, eliminates that entire class of bug.
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+  DELIVERY
+}
+
+enum ReferralRewardStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
 enum PaymentStatus {
   PENDING
+  INITIATED // user clicked "Pay Now", payment flow started
   SUCCESS
   FAILED
   EXPIRED
+  LATE_PAYMENT // payment arrived after the order's protection/grace window
+  AMOUNT_MISMATCH // amount paid didn't match the order total
   REFUNDED
-  INITIATED // user clicked "Pay Now", payment flow started
 }
 
 model AuditLog {
@@ -438,6 +575,120 @@ model AuditLog {
   createdAt  DateTime @default(now())
 }
 
+// A settlement run for one vendor over a period — the actual mechanism by
+// which money moves from the platform to a vendor's bank account.
+// Previously there was no such model at all; "payout" was just numbers
+// computed on the fly with no record of what had actually been paid.
+// A discount code. vendorId set = scoped to that one vendor's items only
+// (and only counts against that vendor's subtotal/delivery fee in a
+// multi-vendor cart); vendorId null = platform-wide, applies across the
+// whole cart. Deliberately simpler than product/category-level targeting
+// — a vendor-or-platform-wide code covers the common "10% off" /
+// "free delivery" cases without the added complexity of per-product
+// promo rules, which can be added later if there's real demand for it.
+model Promotion {
+  id       String  @id @default(uuid())
+  code     String
+  vendorId String?
+  vendor   User?   @relation("VendorPromotions", fields: [vendorId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+
+  type        DiscountType
+  value       Float // percentage (0-100) or fixed naira amount, depending on type
+  maxDiscount Float? // caps a PERCENTAGE discount's naira value
+
+  isActive Boolean @default(true)
+
+  startsAt  DateTime?
+  expiresAt DateTime?
+
+  usageLimit     Int? // total redemptions allowed, across all users
+  usedCount      Int  @default(0)
+  maxUsesPerUser Int  @default(1)
+
+  minOrderAmount Float @default(0) // minimum subtotal (of the scoped vendor, or whole cart if platform-wide) to qualify
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  usages PromotionUsage[]
+
+  @@unique([vendorId, code])
+  @@index([code])
+  @@index([isActive])
+  @@index([expiresAt])
+}
+
+model PromotionUsage {
+  id          String  @id @default(uuid())
+  promotionId String
+  userId      String
+  orderIds    String[] // every order this redemption's discount was applied across (a multi-vendor checkout batch)
+  promoCode   String
+  discount    Float
+
+  createdAt DateTime @default(now())
+
+  promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  user      User      @relation("UserPromotionUsages", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([promotionId])
+  @@index([userId])
+  @@index([userId, promotionId])
+}
+
+model ReferralReward {
+  id         String @id @default(uuid())
+  referrerId String
+  referredId String
+
+  orderId String? // the referred user's qualifying (first completed) order
+  amount  Float   @default(0)
+
+  status ReferralRewardStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+
+  referrer User @relation("ReferralAsReferrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referred User @relation("ReferralAsReferred", fields: [referredId], references: [id], onDelete: Cascade)
+
+  @@unique([referrerId, referredId])
+  @@index([referrerId])
+  @@index([referredId])
+}
+
+model VendorPayout {
+  id       String @id @default(uuid())
+  vendorId String
+  vendor   User   @relation("VendorPayouts", fields: [vendorId], references: [id])
+
+  grossRevenue Float // total order revenue included in this payout
+  commission   Float // platform's cut
+  amount       Float // net amount actually paid to the vendor
+  orderCount   Int
+
+  periodStart DateTime
+  periodEnd   DateTime
+
+  status        PayoutStatus @default(PENDING)
+  reference     String?      @unique // Paystack transfer reference, once initiated
+  paidAt        DateTime?
+  failureReason String?
+
+  processedByAdminId String?
+  processedByAdmin   User?   @relation("PayoutProcessedBy", fields: [processedByAdminId], references: [id])
+
+  orders Order[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([vendorId])
+  @@index([status])
+}
+
 model RefundRequest {
   id         String       @id @default(uuid())
   user       User         @relation(fields: [userId], references: [id])
@@ -445,8 +696,18 @@ model RefundRequest {
   paymentRef String // Paystack reference
   reason     String
   status     RefundStatus @default(PENDING)
+  adminNote          String?
+  resolvedByAdminId  String?
+  resolvedAt         DateTime?
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
 }
 
 enum RefundStatus {
@@ -461,6 +722,10 @@ model Cart {
   customerId String
   basePrice  Float    @default(0)
   totalPrice Float    @default(0)
+  // Held true for the duration of an in-flight checkout so a second
+  // concurrent checkout request (double-tap, retry) can't race the first
+  // one and create duplicate orders from the same cart.
+  isLocked   Boolean  @default(false)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -501,6 +766,23 @@ model CartItemOption {
   @@index([productOptionId])
 }
 
+// A point-in-time snapshot of what GET /cart/summary showed the customer
+// (per-vendor subtotals, delivery fees, discount, final total). Checkout
+// references a snapshot by id and re-validates the live cart against it —
+// if anything's changed (price, delivery range, etc.) checkout is
+// rejected with a clear "refresh your cart" error instead of silently
+// charging a different amount than what was shown.
+model CartSummarySnapshot {
+  id        String   @id @default(uuid())
+  userId    String
+  snapshot  Json
+  createdAt DateTime @default(now())
+
+  user User @relation("UserCartSnapshots", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
 model UserPaymentMethod {
   id        String   @id @default(uuid())
   userId    String
@@ -519,7 +801,7 @@ model DeliveryPerson {
   user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   vehicleType     String?
   licensePlate    String?
-  status          String               @default("ACTIVE")
+  status          DeliveryPersonStatus @default(ACTIVE)
   rating          Float                @default(0)
   totalDeliveries Int                  @default(0)
   isOnline        Boolean              @default(false)
@@ -529,6 +811,10 @@ model DeliveryPerson {
   assignedOrders  DeliveryAssignment[]
   earnings        DeliveryEarning[]
   walletBalance   Float                @default(0)
+  payoutAccount   RiderPayoutAccount?
+  withdrawals     RiderWithdrawal[]
+  vehicle         RiderVehicle?
+  supportTickets  RiderSupportTicket[]
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
 
@@ -555,6 +841,7 @@ model DeliveryAssignment {
 
   order          Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
   deliveryPerson DeliveryPerson @relation(fields: [deliveryPersonId], references: [id], onDelete: Cascade)
+  proof          DeliveryProof?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -576,6 +863,146 @@ model DeliveryEarning {
 
   deliveryPerson DeliveryPerson @relation(fields: [deliveryPersonId], references: [id])
   order          Order          @relation(fields: [orderId], references: [id])
+}
+
+enum RiderWithdrawalStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
+  CANCELLED
+}
+
+enum RiderVehicleStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum DeliveryProofStatus {
+  SUBMITTED
+  VERIFIED
+  REJECTED
+}
+
+enum RiderSupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+model RiderPayoutAccount {
+  id               String   @id @default(uuid())
+  deliveryPersonId String   @unique
+  bankName         String
+  bankCode         String
+  accountNumber    String
+  accountName      String
+  recipientCode    String?
+  verifiedAt       DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  deliveryPerson DeliveryPerson @relation(fields: [deliveryPersonId], references: [id], onDelete: Cascade)
+  withdrawals    RiderWithdrawal[]
+
+  @@index([bankCode])
+}
+
+model RiderWithdrawal {
+  id                 String                @id @default(uuid())
+  deliveryPersonId   String
+  payoutAccountId    String
+  amount             Float
+  balanceSnapshot    Float
+  status             RiderWithdrawalStatus @default(PENDING)
+  idempotencyKey     String
+  reference          String?               @unique
+  failureReason      String?
+  requestedAt        DateTime              @default(now())
+  processedAt        DateTime?
+  processedByAdminId String?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  deliveryPerson   DeliveryPerson      @relation(fields: [deliveryPersonId], references: [id], onDelete: Cascade)
+  payoutAccount    RiderPayoutAccount @relation(fields: [payoutAccountId], references: [id], onDelete: Restrict)
+  processedByAdmin User?              @relation("RiderWithdrawalProcessedBy", fields: [processedByAdminId], references: [id])
+
+  @@unique([deliveryPersonId, idempotencyKey])
+  @@index([deliveryPersonId, status])
+  @@index([status, requestedAt])
+}
+
+model DeliveryProof {
+  id                 String              @id @default(uuid())
+  assignmentId       String              @unique
+  proofUrl           String
+  mediaType          String
+  recipientName      String?
+  note               String?
+  status             DeliveryProofStatus @default(SUBMITTED)
+  reviewNote         String?
+  submittedAt        DateTime            @default(now())
+  reviewedAt         DateTime?
+  reviewedByAdminId  String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  assignment      DeliveryAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  reviewedByAdmin User?              @relation("DeliveryProofReviewedBy", fields: [reviewedByAdminId], references: [id])
+
+  @@index([status, submittedAt])
+}
+
+model RiderVehicle {
+  id               String             @id @default(uuid())
+  deliveryPersonId String             @unique
+  vehicleType      String
+  licensePlate     String             @unique
+  make             String?
+  model            String?
+  color            String?
+  documentUrl      String?
+  status           RiderVehicleStatus @default(PENDING)
+  reviewNote       String?
+  reviewedAt       DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  deliveryPerson DeliveryPerson @relation(fields: [deliveryPersonId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+model RiderSupportTicket {
+  id               String                   @id @default(uuid())
+  deliveryPersonId String
+  category         String
+  subject          String
+  description      String
+  status           RiderSupportTicketStatus @default(OPEN)
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+
+  deliveryPerson DeliveryPerson @relation(fields: [deliveryPersonId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryPersonId, createdAt])
+  @@index([deliveryPersonId, status])
+}
+
+enum DeliveryPersonStatus {
+  ACTIVE // can receive assignments
+  SUSPENDED // blocked by admin (fraud, complaints, etc.)
+  INACTIVE // deactivated / self-paused
+}
+
+enum DeliveryBroadcastStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
 }
 
 enum DeliveryStatus {
@@ -652,8 +1079,9 @@ model DeliveryBroadcast {
   id               String   @id @default(cuid())
   orderId          String
   driverIds        String[] // Array of driver UUIDs
+  declinedDriverIds String[] @default([]) // riders who explicitly dismissed this offer
   acceptedDriverId String?
-  status           String // "PENDING" | "ACCEPTED" | "EXPIRED"
+  status           DeliveryBroadcastStatus // "PENDING" | "ACCEPTED" | "EXPIRED"
   expiresAt        DateTime
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -705,7 +1133,7 @@ model SpecialOrderRequest {
   productId  String
   quantity   Int
   message    String        // you can use this as "details"
-  status     String   @default("PENDING")
+  status     SpecialOrderRequestStatus @default(PENDING)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -723,12 +1151,16 @@ model SpecialOrderOffer {
   vendorId  String
   price     Float
   message   String?
-  status    String   @default("PENDING")
+  status    SpecialOrderOfferStatus @default(PENDING)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   request SpecialOrderRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
   vendor  User                @relation("VendorSpecialOffers", fields: [vendorId], references: [id], onDelete: Cascade)
+  // Set once this offer is accepted and turned into a real order — lets
+  // support/admin trace an order back to the special-offer negotiation
+  // that produced it.
+  order   Order?              @relation("SpecialOfferOrder")
 }
 
 enum RequestStatus {
@@ -744,4 +1176,27 @@ enum OfferStatus {
   ACCEPTED // customer accepted this offer
   REJECTED // customer rejected
   EXPIRED // offer timed out
+}
+
+enum SupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+model VendorSupportTicket {
+  id          String              @id @default(uuid())
+  vendorId    String
+  category    String
+  subject     String
+  description String
+  status      SupportTicketStatus @default(OPEN)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  vendor User @relation("VendorSupportTickets", fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@index([vendorId, createdAt])
+  @@index([vendorId, status])
 }

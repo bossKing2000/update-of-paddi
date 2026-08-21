@@ -12,5 +12,6 @@ router.post("/follow", auth_middleware_1.authenticate, vendorFollowController_1.
 router.post("/unfollow", auth_middleware_1.authenticate, vendorFollowController_1.unfollowVendor);
 router.get("/status/:vendorId", auth_middleware_1.authenticate, vendorFollowController_1.isFollowingVendor);
 router.get("/vendor/:vendorId/followers", auth_middleware_1.authenticate, vendorFollowController_1.getVendorFollowers);
+router.get("/vendor/:vendorId/follower-count", auth_middleware_1.authenticate, vendorFollowController_1.getVendorFollowerCount);
 router.get("/following", auth_middleware_1.authenticate, vendorFollowController_1.getFollowedVendors);
 exports.default = router;

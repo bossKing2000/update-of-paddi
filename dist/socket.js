@@ -16,19 +16,9 @@ let io = null;
  * Initialize Socket.IO
  */
 function initSocket(server) {
-    const allowedOrigins = [
-        // "http://127.0.0.1:8080",
-        // "http://localhost:8080",
-        // "http://localhost:3000",
-        // "http://127.0.0.1:60308",
-        "https://ui-food-paddi.onrender.com",
-        "http://10.0.2.2:5000",
-    ];
-    if (config_1.default.clientUrl)
-        allowedOrigins.push(config_1.default.clientUrl);
     io = new socket_io_1.Server(server, {
         cors: {
-            origin: allowedOrigins,
+            origin: config_1.default.allowedOrigins,
             credentials: true,
         },
     });

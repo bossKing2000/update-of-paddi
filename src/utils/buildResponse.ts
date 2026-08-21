@@ -14,6 +14,7 @@ export const buildAuthResponse = (user: User & { addresses?: any[] }, accessToke
       bio: user.bio,
       brandLogo: user.brandLogo,
       brandName: user.brandName,
+      kycStatus: user.kycStatus,
       // ✅ FIXED: Use addresses[0] as default address, or empty object
     },
     accessToken,

@@ -7,6 +7,7 @@ exports.runOrderCleanupJob = void 0;
 const time_1 = require("../../utils/time");
 const client_1 = require("@prisma/client");
 const prismaClient_1 = __importDefault(require("../../config/prismaClient"));
+const logger_1 = require("../../lib/logger");
 /**
  * 🧹 Automatically cancels expired or offline orders in batches
  */
@@ -15,7 +16,7 @@ const runOrderCleanupJob = async (batchSize = 1000) => {
     const graceMinutesDefault = 15;
     let offlineUpdated = 0;
     try {
-        console.log("🧹 Running order cleanup job (UTC)...", now.toISOString());
+        logger_1.logger.info({ now: now.toISOString() }, "Running order cleanup job");
         let loopCounter = 0;
         while (true) {
             loopCounter++;
@@ -91,10 +92,10 @@ const runOrderCleanupJob = async (batchSize = 1000) => {
             }
             await new Promise((resolve) => setTimeout(resolve, 50));
         }
-        console.log(`✅ Cleanup done (UTC) → Offline cancelled: ${offlineUpdated}`);
+        logger_1.logger.info({ offlineUpdated }, "Order cleanup job complete");
     }
     catch (err) {
-        console.error("❌ Error in order cleanup job:", err instanceof Error ? err.message : err);
+        logger_1.logger.error({ err }, "Error in order cleanup job");
     }
 };
 exports.runOrderCleanupJob = runOrderCleanupJob;

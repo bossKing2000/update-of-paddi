@@ -1,9 +1,8 @@
-import { PrismaClient, OrderStatus } from "@prisma/client";
+import { OrderStatus } from "@prisma/client";
 import { startOfDay, endOfDay, subDays, format } from "date-fns";
 import { clearProductCache } from "../services/clearCaches";
 import { redisProducts } from "../lib/redis";
-
-const prisma = new PrismaClient();
+import prisma from "../lib/prisma";
 
 
 type Period = "thisWeek" | "lastWeek" | "lastMonth";
@@ -310,36 +309,20 @@ async getOrdersToday(): Promise<number> {
   }
 
   // ==================== REVENUE OVERVIEW (Chart) (✅ Payment-based + fixed) ====================
-  async getRevenueOverview() {
-    const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    const now = new Date();
-
-    // start of week Monday
-    const today = new Date();
-    const dayOfWeek = today.getDay();
-    const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-
-    const startOfWeekDate = new Date(today);
-    startOfWeekDate.setDate(today.getDate() - diffToMonday);
-    startOfWeekDate.setHours(0, 0, 0, 0);
+  async getRevenueOverview(period: Period = "thisWeek") {
+    const { startDate, endDate } = this.getRangeForPeriod(period);
+    const today = endOfDay(new Date());
+    const visibleEnd = endDate > today ? today : endDate;
+    const totalDays = Math.max(Math.floor((endOfDay(visibleEnd).getTime() - startOfDay(startDate).getTime()) / 86_400_000) + 1, 1);
 
     const revenueData = await Promise.all(
-      days.map(async (day, index) => {
-        const dayStart = new Date(startOfWeekDate);
+      Array.from({ length: totalDays }, async (_, index) => {
+        const dayStart = startOfDay(new Date(startDate));
         dayStart.setDate(dayStart.getDate() + index);
-
-        // skip future days
-        if (dayStart > now) {
-          return { day, revenue: 0, chartPercentage: 0 };
-        }
-
-        const dayEnd = new Date(dayStart);
-        dayEnd.setHours(23, 59, 59, 999);
-
-        const revenueValue = await this.sumSuccessfulPaymentsInRange(dayStart, dayEnd);
+        const revenueValue = await this.sumSuccessfulPaymentsInRange(dayStart, endOfDay(dayStart));
 
         return {
-          day,
+          day: period === "lastMonth" ? format(dayStart, "d MMM") : format(dayStart, "EEE"),
           revenue: revenueValue,
           chartPercentage: 0,
         };
@@ -908,4 +891,64 @@ async getOrdersToday(): Promise<number> {
   async invalidateProductCache(productId: string) {
     await clearProductCache(productId, this.vendorId);
   }
+
+  // ==================== PAYOUTS ====================
+  // Previously there was no way to compute what a vendor is owed at all —
+  // no bank fields, no VendorPayout model, nothing.
+  async getPayoutSummary() {
+    const vendor = await prisma.user.findUnique({
+      where: { id: this.vendorId },
+      select: { commissionRate: true, bankName: true, bankAccountNumber: true, bankAccountName: true },
+    });
+    if (!vendor) throw new Error("Vendor not found");
+
+    // Eligible = completed, successfully paid, and not already included
+    // in a previous payout. paymentStatus is checked directly (rather
+    // than joining through Payment) since Order.paymentStatus is kept in
+    // sync by the payment finalizer and already reflects refunds once
+    // refund processing sets it to REFUNDED.
+    const eligibleOrders = await prisma.order.findMany({
+      where: { vendorId: this.vendorId, status: OrderStatus.COMPLETED, paymentStatus: "SUCCESS", payoutId: null },
+      select: { id: true, totalPrice: true, deliveryFee: true },
+    });
+
+    const { grossRevenue, commission, netAvailable } = calculatePayoutAmounts(eligibleOrders, vendor.commissionRate);
+
+    const [payoutHistory, lifetimePaidAgg] = await Promise.all([
+      prisma.vendorPayout.findMany({ where: { vendorId: this.vendorId }, orderBy: { createdAt: "desc" }, take: 20 }),
+      prisma.vendorPayout.aggregate({ where: { vendorId: this.vendorId, status: "PAID" }, _sum: { amount: true } }),
+    ]);
+
+    return {
+      commissionRatePercent: Math.round(vendor.commissionRate * 1000) / 10,
+      bankOnFile: !!(vendor.bankName && vendor.bankAccountNumber),
+      bankAccountName: vendor.bankAccountName,
+      available: { grossRevenue, commission, netAvailable, orderCount: eligibleOrders.length },
+      lifetimePaid: lifetimePaidAgg._sum.amount || 0,
+      payoutHistory: payoutHistory.map((p) => ({
+        id: p.id,
+        amount: p.amount,
+        status: p.status,
+        periodStart: p.periodStart,
+        periodEnd: p.periodEnd,
+        paidAt: p.paidAt,
+        orderCount: p.orderCount,
+        failureReason: p.failureReason,
+      })),
+    };
+  }
+}
+
+/**
+ * Pure payout math, extracted for independent testing — see
+ * tests/unit/payoutCalculation.test.ts. Delivery fee is excluded from
+ * gross revenue since it isn't the vendor's money to begin with (it
+ * belongs to whoever delivers the order), only commission is deducted
+ * from what's left.
+ */
+export function calculatePayoutAmounts(orders: { totalPrice: number; deliveryFee: number }[], commissionRate: number) {
+  const grossRevenue = orders.reduce((sum, o) => sum + (o.totalPrice - o.deliveryFee), 0);
+  const commission = Number((grossRevenue * commissionRate).toFixed(2));
+  const netAvailable = Number((grossRevenue - commission).toFixed(2));
+  return { grossRevenue: Number(grossRevenue.toFixed(2)), commission, netAvailable };
 }

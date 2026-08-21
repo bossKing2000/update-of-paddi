@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.notificationIdParamsSchema = exports.orderIdParamsSchema = exports.approveOrderSchema = exports.vendorResponseSchema = exports.updateOrderStatusSchema = exports.createOrderSchema = exports.orderItemSchema = void 0;
+exports.createSpecialOfferSchema = exports.createSpecialRequestSchema = exports.notificationIdParamsSchema = exports.orderIdParamsSchema = exports.approveOrderSchema = exports.vendorResponseSchema = exports.updateOrderStatusSchema = exports.createOrderSchema = exports.orderItemSchema = void 0;
 // src/validations/order.schema.ts
 const zod_1 = require("zod");
 const client_1 = require("@prisma/client");
@@ -31,4 +31,13 @@ exports.orderIdParamsSchema = zod_1.z.object({
 });
 exports.notificationIdParamsSchema = zod_1.z.object({
     notificationId: zod_1.z.string()
+});
+exports.createSpecialRequestSchema = zod_1.z.object({
+    productId: zod_1.z.string().uuid(),
+    quantity: zod_1.z.number().int().min(1),
+    details: zod_1.z.string().min(1).max(1000),
+});
+exports.createSpecialOfferSchema = zod_1.z.object({
+    price: zod_1.z.coerce.number().positive(),
+    message: zod_1.z.string().max(1000).optional(),
 });

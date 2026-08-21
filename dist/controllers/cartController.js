@@ -3,336 +3,357 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.clearCart = exports.removeCartItem = exports.checkoutCart = exports.updateCartItem = exports.addToCart = exports.getCart = void 0;
+exports.checkoutCart = exports.getCartSummary = exports.clearCart = exports.removeCartItem = exports.updateCartItem = exports.addToCart = exports.getCart = void 0;
+const uuid_1 = require("uuid");
 const prisma_1 = __importDefault(require("../lib/prisma"));
 const client_1 = require("@prisma/client");
 const recordActivityBundle_1 = require("../utils/activityUtils/recordActivityBundle");
 const cartSchema_1 = require("../validations/cartSchema");
 const redis_1 = require("../lib/redis");
-const codeMessage_1 = require("../validators/codeMessage");
+const apiResponse_1 = require("../utils/apiResponse");
+const AppError_1 = require("../errors/AppError");
+const cartSummary_service_1 = require("../services/cartSummary.service");
+const promoService_1 = require("../services/promoService");
+const logger_1 = require("../lib/logger");
 // Normalize Express params/query values to string
 function ensureString(v) {
     if (v === undefined || v === null)
         return "";
     return Array.isArray(v) ? v[0] : String(v);
 }
-// Helper: Calculate cart totals
-const calculateCartTotals = (items) => {
-    const basePrice = items.reduce((sum, item) => sum + (item.unitPrice * item.quantity), 0);
-    return {
-        basePrice,
-        totalPrice: basePrice
-    };
-};
 const CART_TTL_SECONDS = 3600; // 1 hour
+const MAX_SNAPSHOT_AGE_MS = 30 * 60 * 1000; // 30 minutes
+const round = (v) => Number(v.toFixed(2));
+// Helper: Calculate cart totals (base = total; discounts happen at
+// checkout-summary time via cartSummaryService, not stored on the cart).
+const calculateCartTotals = (items) => {
+    const basePrice = round(items.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0));
+    return { basePrice, totalPrice: basePrice };
+};
 // GET /cart - Get current cart
 const getCart = async (req, res) => {
-    try {
-        const userId = req.user.id;
-        // 1️⃣ Try Redis cache first
-        const cacheKey = `cart:user:${userId}`;
-        const cachedCart = await redis_1.ShopCartRedis.get(cacheKey);
-        if (cachedCart) {
-            return res.json((0, codeMessage_1.successResponse)("CART_FETCHED", "Cart retrieved successfully (cache)", JSON.parse(cachedCart)));
-        }
-        // 2️⃣ Fetch cart from DB
-        const cart = await prisma_1.default.cart.findFirst({
-            where: { customerId: userId },
-            include: {
-                items: {
-                    include: {
-                        product: {
-                            include: {
-                                options: true, // all product options
-                                vendor: { select: { id: true, name: true } },
-                                productSchedule: true
-                            },
-                        },
-                        options: { include: { productOption: true } }, // user-selected options
-                    },
+    const userId = req.user.id;
+    const cacheKey = `cart:user:${userId}`;
+    const cachedCart = await redis_1.ShopCartRedis.get(cacheKey);
+    if (cachedCart) {
+        return (0, apiResponse_1.sendSuccess)(res, JSON.parse(cachedCart), "Cart retrieved successfully (cache)");
+    }
+    const cart = await prisma_1.default.cart.findFirst({
+        where: { customerId: userId },
+        include: {
+            items: {
+                include: {
+                    product: { include: { options: true, vendor: { select: { id: true, name: true } }, productSchedule: true } },
+                    options: { include: { productOption: true } },
                 },
             },
-        });
-        // 3️⃣ If no cart exists, return empty cart structure
-        const enrichedCart = cart
-            ? await getEnhancedCart(cart.id)
-            : { id: null, items: [], basePrice: 0, totalPrice: 0 };
-        if (enrichedCart && enrichedCart.items.length > 0) {
-            await redis_1.ShopCartRedis.set(cacheKey, JSON.stringify(enrichedCart), { EX: CART_TTL_SECONDS });
-        }
-        // 4️⃣ Save cart to Redis with TTL
-        // 5️⃣ Return cart
-        res.json((0, codeMessage_1.successResponse)("CART_FETCHED", "Cart retrieved successfully", enrichedCart));
+        },
+    });
+    const enrichedCart = cart ? await getEnhancedCart(cart.id) : { id: null, items: [], basePrice: 0, totalPrice: 0 };
+    if (enrichedCart && enrichedCart.items.length > 0) {
+        await redis_1.ShopCartRedis.set(cacheKey, JSON.stringify(enrichedCart), { EX: CART_TTL_SECONDS });
     }
-    catch (error) {
-        console.error("Get cart error:", error);
-        res.status(500).json((0, codeMessage_1.errorResponse)("CART_FETCH_FAILED", "Failed to retrieve cart"));
-    }
+    return (0, apiResponse_1.sendSuccess)(res, enrichedCart, "Cart retrieved successfully");
 };
 exports.getCart = getCart;
+// POST /cart/items - Add item to cart
 const addToCart = async (req, res) => {
-    try {
-        // ✅ Validate input with Zod
-        const parsed = cartSchema_1.addToCartSchema.safeParse(req.body);
-        if (!parsed.success) {
-            return res.status(422).json((0, codeMessage_1.errorResponse)("INVALID_INPUT", parsed.error.message));
-        }
-        const { productId, quantity = 1, selectedOptions = [], specialRequest } = parsed.data;
-        // Validate product exists
-        const product = await prisma_1.default.product.findUnique({
-            where: { id: productId },
-            include: { options: true, vendor: true },
-        });
-        if (!product) {
-            return res.status(404).json((0, codeMessage_1.errorResponse)("PRODUCT_NOT_FOUND", "Product not found"));
-        }
-        // Reject if product unavailable
-        if (product.archived) {
-            return res.status(400).json((0, codeMessage_1.errorResponse)("PRODUCT_UNAVAILABLE", "Product is out of stock"));
-        }
-        // Validate selected options
-        const invalidOptions = selectedOptions.filter((optId) => !product.options.some(opt => opt.id === optId));
-        if (invalidOptions.length > 0) {
-            return res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_OPTIONS", "Invalid product options selected", { invalidOptions }));
-        }
-        // Get or create cart
-        let cart = await prisma_1.default.cart.findFirst({
-            where: { customerId: req.user.id },
-            include: { items: true },
-        });
-        if (!cart) {
-            cart = await prisma_1.default.cart.create({
-                data: { customerId: req.user.id },
-                include: { items: true },
-            });
-        }
-        // Calculate item price with options
-        const optionsPrice = product.options
-            .filter((opt) => selectedOptions.includes(opt.id))
-            .reduce((sum, opt) => sum + opt.price, 0);
-        const unitPrice = product.price + optionsPrice;
-        const subtotal = unitPrice * quantity;
-        // Check if product already in cart
-        const existingItem = cart.items.find(item => item.productId === productId);
-        if (existingItem) {
-            // Update existing item
-            await prisma_1.default.cartItem.update({
-                where: { id: existingItem.id },
-                data: {
-                    quantity: existingItem.quantity + quantity,
-                    unitPrice,
-                    subtotal,
-                    specialRequest: specialRequest ?? existingItem.specialRequest,
-                },
-            });
-            // Update options
-            await prisma_1.default.cartItemOption.deleteMany({
-                where: { cartItemId: existingItem.id },
-            });
-            await prisma_1.default.cartItemOption.createMany({
-                data: selectedOptions.map((optionId) => ({
-                    cartItemId: existingItem.id,
-                    productOptionId: optionId,
-                    name: product.options.find((opt) => opt.id === optionId).name,
-                    price: product.options.find((opt) => opt.id === optionId).price,
-                })),
-            });
-        }
-        else {
-            // Create new cart item
-            await prisma_1.default.cartItem.create({
-                data: {
-                    cartId: cart.id,
-                    productId,
-                    quantity,
-                    unitPrice,
-                    subtotal,
-                    options: {
-                        create: selectedOptions.map((optionId) => ({
-                            productOptionId: optionId,
-                            name: product.options.find((opt) => opt.id === optionId).name,
-                            price: product.options.find((opt) => opt.id === optionId).price,
-                        })),
-                    },
-                    specialRequest,
-                },
-            });
-        }
-        // Recalculate cart totals
-        const updatedItems = await prisma_1.default.cartItem.findMany({
-            where: { cartId: cart.id },
-        });
-        const totals = calculateCartTotals(updatedItems);
-        await prisma_1.default.cart.update({
-            where: { id: cart.id },
-            data: totals,
-        });
-        // ✅ Return uniform success response
-        const enhancedCart = await getEnhancedCart(cart.id);
-        const cacheKey = `cart:user:${req.user.id}`;
-        await redis_1.ShopCartRedis.set(cacheKey, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
-        res.json((0, codeMessage_1.successResponse)("CART_ITEM_ADDED", "Item added to cart successfully", enhancedCart));
+    const parsed = cartSchema_1.addToCartSchema.safeParse(req.body);
+    if (!parsed.success) {
+        throw new AppError_1.ValidationError("Invalid cart item", parsed.error.flatten().fieldErrors);
     }
-    catch (error) {
-        console.error("Add to cart error:", error);
-        res.status(500).json((0, codeMessage_1.errorResponse)("CART_ADD_FAILED", "Failed to add item to cart"));
+    const { productId, quantity = 1, selectedOptions = [], specialRequest } = parsed.data;
+    const product = await prisma_1.default.product.findUnique({ where: { id: productId }, include: { options: true } });
+    if (!product)
+        throw new AppError_1.NotFoundError("Product");
+    if (product.archived)
+        throw new AppError_1.ValidationError("Product is no longer available");
+    const invalidOptions = selectedOptions.filter((id) => !product.options.some((o) => o.id === id));
+    if (invalidOptions.length > 0) {
+        throw new AppError_1.ValidationError("Invalid product options selected", { invalidOptions });
     }
+    let cart = await prisma_1.default.cart.findFirst({
+        where: { customerId: req.user.id },
+        include: { items: { include: { options: true } } },
+    });
+    if (!cart) {
+        cart = await prisma_1.default.cart.create({
+            data: { customerId: req.user.id },
+            include: { items: { include: { options: true } } },
+        });
+    }
+    const optionsPrice = product.options
+        .filter((o) => selectedOptions.includes(o.id))
+        .reduce((sum, o) => sum + o.price, 0);
+    const unitPrice = product.price + optionsPrice;
+    // Match by product + selected options combo, not just productId — two
+    // cart lines for the same product with different options (e.g. "no
+    // spice" vs "extra spice") are genuinely different line items and must
+    // not get merged into one. Matching by productId alone (the previous
+    // behavior) silently overwrote the first line's options/price whenever
+    // the same product was added again with a different option selection.
+    const newOptionIds = [...selectedOptions].sort();
+    const existingItem = cart.items.find((item) => {
+        const existingOptionIds = item.options.map((o) => o.productOptionId).sort();
+        return item.productId === productId && JSON.stringify(existingOptionIds) === JSON.stringify(newOptionIds);
+    });
+    if (existingItem) {
+        const newQty = existingItem.quantity + quantity;
+        await prisma_1.default.cartItem.update({
+            where: { id: existingItem.id },
+            data: {
+                quantity: newQty,
+                unitPrice,
+                subtotal: round(unitPrice * newQty),
+                specialRequest: specialRequest ?? existingItem.specialRequest,
+            },
+        });
+    }
+    else {
+        await prisma_1.default.cartItem.create({
+            data: {
+                cartId: cart.id,
+                productId,
+                quantity,
+                unitPrice,
+                subtotal: round(unitPrice * quantity),
+                specialRequest,
+                options: {
+                    create: selectedOptions.map((id) => {
+                        const opt = product.options.find((o) => o.id === id);
+                        return { productOptionId: id, name: opt.name, price: opt.price };
+                    }),
+                },
+            },
+        });
+    }
+    const updatedItems = await prisma_1.default.cartItem.findMany({ where: { cartId: cart.id } });
+    await prisma_1.default.cart.update({ where: { id: cart.id }, data: calculateCartTotals(updatedItems) });
+    const enhancedCart = await getEnhancedCart(cart.id);
+    await redis_1.ShopCartRedis.set(`cart:user:${req.user.id}`, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
+    return (0, apiResponse_1.sendCreated)(res, enhancedCart, "Item added to cart successfully");
 };
 exports.addToCart = addToCart;
-// PUT /cart/items/:itemId - Update cart item
+// PATCH /cart/items/:itemId - Update cart item
 const updateCartItem = async (req, res) => {
-    try {
-        const itemId = ensureString(req.params.itemId);
-        const { quantity, selectedOptions, specialRequest } = req.body;
-        // Validate cart item belongs to user
-        const item = await prisma_1.default.cartItem.findFirst({
-            where: {
-                id: itemId,
-                cart: { customerId: req.user.id }
-            },
-            include: {
-                cart: true,
-                product: {
-                    include: { options: true }
-                },
-                options: true
-            }
-        });
-        if (!item) {
-            return res.status(404).json((0, codeMessage_1.errorResponse)("CART_ITEM_NOT_FOUND", "Cart item not found"));
-        }
-        // Validate options if provided
-        if (selectedOptions) {
-            const invalidOptions = selectedOptions.filter((optId) => !item.product.options.some((opt) => opt.id === optId));
-            if (invalidOptions.length > 0) {
-                return res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_OPTIONS", "Invalid product options selected", { invalidOptions }));
-            }
-        }
-        // Prepare update object dynamically
-        const updateData = {};
-        if (quantity !== undefined)
-            updateData.quantity = quantity;
-        if (specialRequest !== undefined)
-            updateData.specialRequest = specialRequest;
-        // Recalculate price if quantity or options change
-        if (quantity !== undefined || selectedOptions) {
-            const finalOptions = selectedOptions || item.options.map((opt) => opt.productOptionId);
-            const optionsPrice = item.product.options
-                .filter((opt) => finalOptions.includes(opt.id))
-                .reduce((sum, opt) => sum + opt.price, 0);
-            const unitPrice = item.product.price + optionsPrice;
-            const subtotal = unitPrice * (quantity ?? item.quantity);
-            updateData.unitPrice = unitPrice;
-            updateData.subtotal = subtotal;
-        }
-        // Update cart item
-        await prisma_1.default.cartItem.update({
-            where: { id: itemId },
-            data: updateData
-        });
-        // Update options if changed
-        if (selectedOptions) {
-            await prisma_1.default.cartItemOption.deleteMany({
-                where: { cartItemId: itemId }
-            });
-            await prisma_1.default.cartItemOption.createMany({
-                data: selectedOptions.map((optionId) => ({
-                    cartItemId: itemId,
-                    productOptionId: optionId,
-                    name: item.product.options.find((opt) => opt.id === optionId).name,
-                    price: item.product.options.find((opt) => opt.id === optionId).price
-                }))
-            });
-        }
-        // Recalculate cart totals
-        const updatedItems = await prisma_1.default.cartItem.findMany({
-            where: { cartId: item.cart.id }
-        });
-        const totals = calculateCartTotals(updatedItems);
-        await prisma_1.default.cart.update({
-            where: { id: item.cart.id },
-            data: totals
-        });
-        // ✅ Return uniform success response
-        const enhancedCart = await getEnhancedCart(item.cart.id);
-        const cacheKey = `cart:user:${req.user.id}`; // backticks!
-        await redis_1.ShopCartRedis.set(cacheKey, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
-        res.json((0, codeMessage_1.successResponse)("CART_ITEM_UPDATED", "Cart item updated successfully", enhancedCart));
+    const itemId = ensureString(req.params.itemId);
+    const parsed = cartSchema_1.updateCartItemSchema.safeParse(req.body);
+    if (!parsed.success) {
+        throw new AppError_1.ValidationError("Invalid update payload", parsed.error.flatten().fieldErrors);
     }
-    catch (error) {
-        console.error("Update cart item error:", error);
-        res.status(500).json((0, codeMessage_1.errorResponse)("CART_UPDATE_FAILED", "Failed to update cart item"));
+    const { quantity, selectedOptions, specialRequest } = parsed.data;
+    const item = await prisma_1.default.cartItem.findFirst({
+        where: { id: itemId, cart: { customerId: req.user.id } },
+        include: { cart: true, product: { include: { options: true } }, options: true },
+    });
+    if (!item)
+        throw new AppError_1.NotFoundError("Cart item");
+    if (selectedOptions) {
+        const invalidOptions = selectedOptions.filter((optId) => !item.product.options.some((opt) => opt.id === optId));
+        if (invalidOptions.length > 0) {
+            throw new AppError_1.ValidationError("Invalid product options selected", { invalidOptions });
+        }
     }
+    const updateData = {};
+    if (quantity !== undefined)
+        updateData.quantity = quantity;
+    if (specialRequest !== undefined)
+        updateData.specialRequest = specialRequest;
+    if (quantity !== undefined || selectedOptions) {
+        const finalOptions = selectedOptions ?? item.options.map((opt) => opt.productOptionId);
+        const optionsPrice = item.product.options
+            .filter((opt) => finalOptions.includes(opt.id))
+            .reduce((sum, opt) => sum + opt.price, 0);
+        const unitPrice = item.product.price + optionsPrice;
+        const qty = quantity ?? item.quantity;
+        updateData.unitPrice = unitPrice;
+        updateData.subtotal = round(unitPrice * qty);
+    }
+    await prisma_1.default.cartItem.update({ where: { id: itemId }, data: updateData });
+    if (selectedOptions) {
+        await prisma_1.default.cartItemOption.deleteMany({ where: { cartItemId: itemId } });
+        const optionData = selectedOptions
+            .map((optionId) => {
+            const opt = item.product.options.find((o) => o.id === optionId);
+            if (!opt)
+                return null;
+            return { cartItemId: itemId, productOptionId: optionId, name: opt.name, price: opt.price };
+        })
+            .filter(Boolean);
+        if (optionData.length > 0)
+            await prisma_1.default.cartItemOption.createMany({ data: optionData });
+    }
+    const updatedItems = await prisma_1.default.cartItem.findMany({ where: { cartId: item.cart.id } });
+    await prisma_1.default.cart.update({ where: { id: item.cart.id }, data: calculateCartTotals(updatedItems) });
+    const enhancedCart = await getEnhancedCart(item.cart.id);
+    await redis_1.ShopCartRedis.set(`cart:user:${req.user.id}`, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
+    return (0, apiResponse_1.sendSuccess)(res, enhancedCart, "Cart item updated successfully");
 };
 exports.updateCartItem = updateCartItem;
-// POST  convert to order 
+// DELETE /cart/items/:itemId - Remove item from cart
+const removeCartItem = async (req, res) => {
+    const itemId = ensureString(req.params.itemId);
+    const userId = req.user.id;
+    const cacheKey = `cart:user:${userId}`;
+    const item = await prisma_1.default.cartItem.findFirst({
+        where: { id: itemId, cart: { customerId: userId } },
+        include: { cart: true },
+    });
+    if (!item)
+        throw new AppError_1.NotFoundError("Cart item");
+    const cartId = item.cart.id;
+    await prisma_1.default.cartItem.delete({ where: { id: itemId } });
+    const remainingItems = await prisma_1.default.cartItem.count({ where: { cartId } });
+    if (remainingItems === 0) {
+        await prisma_1.default.cart.delete({ where: { id: cartId } });
+        await redis_1.ShopCartRedis.del(cacheKey);
+        return (0, apiResponse_1.sendSuccess)(res, { id: null, items: [], basePrice: 0, totalPrice: 0 }, "Cart item removed and cart deleted");
+    }
+    const updatedItems = await prisma_1.default.cartItem.findMany({ where: { cartId } });
+    await prisma_1.default.cart.update({ where: { id: cartId }, data: calculateCartTotals(updatedItems) });
+    const enhancedCart = await getEnhancedCart(cartId);
+    await redis_1.ShopCartRedis.set(cacheKey, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
+    return (0, apiResponse_1.sendSuccess)(res, enhancedCart, "Cart item removed successfully");
+};
+exports.removeCartItem = removeCartItem;
+// DELETE /cart - Clear entire cart
+const clearCart = async (req, res) => {
+    const userId = req.user.id;
+    const cacheKey = `cart:user:${userId}`;
+    const cart = await prisma_1.default.cart.findFirst({ where: { customerId: userId } });
+    if (!cart) {
+        return (0, apiResponse_1.sendSuccess)(res, { id: null, items: [], basePrice: 0, totalPrice: 0 }, "No active cart to clear");
+    }
+    await prisma_1.default.cartItem.deleteMany({ where: { cartId: cart.id } });
+    await prisma_1.default.cart.delete({ where: { id: cart.id } });
+    await redis_1.ShopCartRedis.del(cacheKey);
+    return (0, apiResponse_1.sendSuccess)(res, { id: null, items: [], basePrice: 0, totalPrice: 0 }, "Cart cleared successfully");
+};
+exports.clearCart = clearCart;
+// GET /cart/summary - Priced, vendor-grouped breakdown incl. delivery fee.
+// New endpoint — update-of-paddi previously had no pricing preview at all
+// before committing to checkout, and no delivery fee concept whatsoever.
+const getCartSummary = async (req, res) => {
+    const userId = req.user.id;
+    const addressId = req.query.addressId;
+    const promoCode = req.query.promoCode;
+    const summary = await (0, cartSummary_service_1.cartSummaryService)({ userId, addressId, promoCode });
+    if (summary.vendorBreakdown.length === 0) {
+        return (0, apiResponse_1.sendSuccess)(res, { ...summary, summaryId: null }, "Cart is empty or has no purchasable items");
+    }
+    // Persist a snapshot of exactly what was shown — checkout re-validates
+    // against this by id, so the price the customer confirms is always the
+    // price they were quoted, not whatever the live cart happens to total
+    // to by the time they tap "pay".
+    const summaryId = (0, uuid_1.v4)();
+    await prisma_1.default.cartSummarySnapshot.create({
+        data: { id: summaryId, userId, snapshot: summary },
+    });
+    return (0, apiResponse_1.sendSuccess)(res, { ...summary, summaryId }, "Cart summary generated");
+};
+exports.getCartSummary = getCartSummary;
+// POST /cart/checkout - Convert cart to order(s), one order per vendor
 const checkoutCart = async (req, res) => {
+    const userId = req.user.id;
+    const cacheKey = `cart:user:${userId}`;
+    // Idempotency: a stable client-supplied key means retries (double-tap,
+    // network timeout + resend) return the original result instead of
+    // creating duplicate orders. If the client doesn't send one, a random
+    // key is generated as a fallback so the code path never breaks — but
+    // that fallback provides no dedup protection, so the Flutter client
+    // should always send a stable Idempotency-Key header per checkout
+    // attempt (e.g. generated once when the user taps "Pay" and reused on
+    // any automatic retry of that same tap).
+    const idempotencyKey = String(req.headers["idempotency-key"] || (0, uuid_1.v4)());
+    if (req.headers["idempotency-key"]) {
+        const existingOrders = await prisma_1.default.order.findMany({ where: { idempotencyKey, customerId: userId } });
+        if (existingOrders.length > 0) {
+            return (0, apiResponse_1.sendSuccess)(res, { orders: existingOrders }, "Checkout already processed", 200);
+        }
+    }
+    const { summaryId, addressId } = req.body ?? {};
+    if (!summaryId)
+        throw new AppError_1.ValidationError("summaryId is required");
+    if (!addressId)
+        throw new AppError_1.ValidationError("addressId is required");
+    const address = await prisma_1.default.address.findFirst({ where: { id: addressId, userId } });
+    if (!address)
+        throw new AppError_1.NotFoundError("Address");
+    const snapshot = await prisma_1.default.cartSummarySnapshot.findUnique({ where: { id: summaryId } });
+    if (!snapshot)
+        throw new AppError_1.NotFoundError("Cart summary");
+    if (snapshot.userId !== userId)
+        throw new AppError_1.ConflictError("Unauthorized snapshot access");
+    const snapshotAge = Date.now() - new Date(snapshot.createdAt).getTime();
+    if (snapshotAge > MAX_SNAPSHOT_AGE_MS) {
+        throw new AppError_1.ConflictError("Cart summary has expired. Please refresh your cart.");
+    }
+    const snapshotData = snapshot.snapshot;
+    if (!snapshotData?.vendorBreakdown?.length) {
+        throw new AppError_1.ValidationError("Invalid cart summary data");
+    }
+    const cart = await prisma_1.default.cart.findFirst({
+        where: { customerId: userId },
+        include: { items: { include: { product: { include: { options: true, vendor: true, productSchedule: true } }, options: true } } },
+    });
+    if (!cart || cart.items.length === 0)
+        throw new AppError_1.ValidationError("Your cart is empty");
+    // Archived-item cleanup — remove anything the vendor pulled since it
+    // was added, keep the rest.
+    const archivedItems = cart.items.filter((item) => item.product.archived);
+    if (archivedItems.length > 0) {
+        const archivedItemIds = archivedItems.map((i) => i.id);
+        const removedProductIds = archivedItems.map((i) => i.productId);
+        await prisma_1.default.cartItemOption.deleteMany({ where: { cartItemId: { in: archivedItemIds } } });
+        await prisma_1.default.cartItem.deleteMany({ where: { id: { in: archivedItemIds } } });
+        const remainingItems = await prisma_1.default.cartItem.count({ where: { cartId: cart.id } });
+        if (remainingItems === 0)
+            await prisma_1.default.cart.delete({ where: { id: cart.id } });
+        const updatedCart = remainingItems > 0 ? await getEnhancedCart(cart.id) : { id: null, items: [] };
+        await redis_1.ShopCartRedis.set(cacheKey, JSON.stringify(updatedCart), { EX: CART_TTL_SECONDS });
+        throw new AppError_1.ValidationError("Some products in your cart were removed because they're no longer available.", { removedProductIds });
+    }
+    const now = new Date();
+    const liveItems = cart.items.filter((item) => {
+        const schedule = item.product.productSchedule;
+        const withinSchedule = !schedule || ((!schedule.goLiveAt || schedule.goLiveAt <= now) && (!schedule.takeDownAt || schedule.takeDownAt >= now));
+        return item.product.isLive && withinSchedule;
+    });
+    const offlineItems = cart.items.filter((item) => !liveItems.includes(item));
+    if (liveItems.length === 0) {
+        throw new AppError_1.ValidationError("No products in your cart are currently live. They remain in your cart until the vendor goes live.");
+    }
+    // Lock the cart for the duration of checkout — a second concurrent
+    // checkout attempt on the same cart (double-tap, two browser tabs)
+    // gets rejected instead of racing this one.
+    const cartLock = await prisma_1.default.cart.updateMany({ where: { id: cart.id, isLocked: false }, data: { isLocked: true } });
+    if (cartLock.count === 0) {
+        throw new AppError_1.ConflictError("Checkout already in progress");
+    }
     try {
-        const userId = req.user.id;
-        const cacheKey = `cart:user:${userId}`;
-        const customer = await prisma_1.default.user.findUnique({ where: { id: userId } });
-        const customerName = customer?.name || "Unknown Customer";
-        // 🛒 1. Fetch cart with items, product, options, vendor, and schedule
-        const cart = await prisma_1.default.cart.findFirst({
-            where: { customerId: userId },
-            include: {
-                items: {
-                    include: {
-                        product: {
-                            include: {
-                                options: true,
-                                vendor: true,
-                                productSchedule: true
-                            }
-                        },
-                        options: true
-                    }
-                }
-            }
-        });
-        if (!cart || cart.items.length === 0) {
-            return res.status(400).json((0, codeMessage_1.errorResponse)("CART_EMPTY", "Your cart is empty"));
+        // Revalidate pricing against the live cart — if anything changed
+        // since the snapshot was taken (price edit, vendor went offline,
+        // moved out of delivery range), reject rather than silently charging
+        // a different amount than what was quoted.
+        //
+        // Re-uses the exact promo code the snapshot itself was built with
+        // (rather than requiring the client to resend it) — omitting this
+        // meant the revalidated total never included the discount at all,
+        // which both silently dropped the discount from what got charged AND
+        // made the price-match check below fail every single time a promo
+        // was actually in use (the snapshot's discounted total could never
+        // match a freshly computed full-price total).
+        const promoCodeUsed = snapshotData.promo?.code;
+        const freshSummary = await (0, cartSummary_service_1.cartSummaryService)({ userId, addressId, promoCode: promoCodeUsed });
+        if (freshSummary.warnings.length > 0) {
+            throw new AppError_1.ValidationError(freshSummary.warnings.join(" "));
         }
-        const now = new Date();
-        // 🔹 2. Split items: live vs offline and archived
-        const archivedItems = cart.items.filter(item => item.product.archived);
-        if (archivedItems.length > 0) {
-            const archivedItemIds = archivedItems.map(i => i.id);
-            const removedProductIds = archivedItems.map(i => i.productId);
-            // 🧹 1. Delete related cart item options first
-            await prisma_1.default.cartItemOption.deleteMany({
-                where: { cartItemId: { in: archivedItemIds } },
-            });
-            // 🗑️ 2. Delete archived cart items
-            await prisma_1.default.cartItem.deleteMany({
-                where: { id: { in: archivedItemIds } },
-            });
-            // 🧮 3. If cart now has no items, delete it completely
-            const remainingItems = await prisma_1.default.cartItem.count({
-                where: { cartId: cart.id },
-            });
-            if (remainingItems === 0) {
-                await prisma_1.default.cart.delete({ where: { id: cart.id } });
-            }
-            // 🔁 4. Update Redis cache with current state
-            const updatedCart = remainingItems > 0 ? await getEnhancedCart(cart.id) : { id: null, items: [] };
-            await redis_1.ShopCartRedis.set(cacheKey, JSON.stringify(updatedCart), { EX: 3600 });
-            // 🚫 5. Return response
-            return res.status(400).json((0, codeMessage_1.errorResponse)("PRODUCT_ARCHIVED", "Some products in your cart were removed because they’re no longer available.", { removedProductIds }));
+        const oldTotal = round(snapshotData.finalTotal);
+        const newTotal = round(freshSummary.finalTotal);
+        if (oldTotal !== newTotal) {
+            throw new AppError_1.ConflictError("Cart pricing changed. Please refresh your cart summary.");
         }
-        const liveItems = cart.items.filter(item => {
-            const p = item.product;
-            const schedule = p.productSchedule;
-            // Product must be live and within schedule window if exists
-            const withinSchedule = !schedule || ((!schedule.goLiveAt || schedule.goLiveAt <= now) &&
-                (!schedule.takeDownAt || schedule.takeDownAt >= now));
-            return p.isLive && withinSchedule;
-        });
-        const offlineItems = cart.items.filter(item => !liveItems.includes(item));
-        if (liveItems.length === 0) {
-            return res.status(400).json((0, codeMessage_1.errorResponse)("NO_LIVE_PRODUCTS", "No products in your cart are currently live. They remain in your cart until the vendor goes live."));
-        }
-        // 🧩 3. Group live items by vendorId (1 order per vendor)
+        const vendorPricing = new Map(freshSummary.vendorBreakdown.map((v) => [v.vendorId, v]));
         const groupedByVendor = {};
         for (const item of liveItems) {
             const vId = item.product.vendorId;
@@ -341,36 +362,37 @@ const checkoutCart = async (req, res) => {
             groupedByVendor[vId].push(item);
         }
         const createdOrders = [];
-        // 🧾 4. Create one order per vendor
+        const customer = await prisma_1.default.user.findUnique({ where: { id: userId } });
+        const customerName = customer?.name || "Unknown Customer";
         for (const [vendorId, vendorItems] of Object.entries(groupedByVendor)) {
-            const orderItemsData = vendorItems.map(ci => ({
+            const pricing = vendorPricing.get(vendorId);
+            const rawSubtotal = round(vendorItems.reduce((sum, i) => sum + i.subtotal, 0));
+            const discount = pricing?.discount ?? 0;
+            const basePrice = round(rawSubtotal - discount);
+            const deliveryFee = pricing?.deliveryFee ?? 0;
+            const orderItemsData = vendorItems.map((ci) => ({
                 productId: ci.productId,
                 quantity: ci.quantity,
                 unitPrice: ci.unitPrice,
                 subtotal: ci.subtotal,
-                // specialRequest: ci.specialRequest || null,
-                options: {
-                    create: ci.options.map(opt => ({
-                        optionId: opt.productOptionId,
-                        name: opt.name,
-                        price: opt.price
-                    }))
-                }
+                options: { create: ci.options.map((opt) => ({ optionId: opt.productOptionId, name: opt.name, price: opt.price })) },
             }));
-            const basePrice = orderItemsData.reduce((sum, i) => sum + i.subtotal, 0);
             const order = await prisma_1.default.order.create({
                 data: {
                     customerId: userId,
                     vendorId,
+                    addressId,
                     basePrice,
-                    totalPrice: basePrice,
-                    status: client_1.OrderStatus.AWAITING_PAYMENT, // ← change this
-                    items: { create: orderItemsData }
+                    deliveryFee,
+                    totalPrice: round(basePrice + deliveryFee),
+                    status: client_1.OrderStatus.AWAITING_PAYMENT,
+                    idempotencyKey,
+                    protectedUntil: new Date(Date.now() + 15 * 60 * 1000),
+                    items: { create: orderItemsData },
                 },
-                include: { items: { include: { options: true } } }
+                include: { items: { include: { options: true } } },
             });
             createdOrders.push(order);
-            // Notify vendor & record activity
             await (0, recordActivityBundle_1.recordActivityBundle)({
                 actorId: userId,
                 orderId: order.id,
@@ -383,123 +405,55 @@ const checkoutCart = async (req, res) => {
                         socketEvent: "ORDER",
                         metadata: {
                             type: "ORDER_DETAIL",
-                            route: `/orders/${order.id}`, // 🌐 Web route (for website)
-                            target: {
-                                screen: "order_detail", // 📱 Flutter route name
-                                id: order.id
-                            },
+                            route: `/orders/${order.id}`,
+                            target: { screen: "order_detail", id: order.id },
                             orderId: order.id,
                             customerId: userId,
-                            vendorId: vendorId,
-                            frontendEvent: "NEW_ORDER"
-                        }
-                    }
+                            vendorId,
+                            frontendEvent: "NEW_ORDER",
+                        },
+                    },
                 ],
-                audit: {
-                    action: "ORDER_CREATED",
-                    metadata: {
-                        orderId: order.id,
-                        customerId: userId,
-                        vendorId: vendorId
-                    }
-                },
+                audit: { action: "ORDER_CREATED", metadata: { orderId: order.id, customerId: userId, vendorId } },
                 notifyRealtime: true,
-                notifyPush: true
+                notifyPush: true,
             });
         }
-        // 🔹 5. Remove only live items from cart (keep offline items)
-        if (liveItems.length > 0) {
-            await prisma_1.default.cartItemOption.deleteMany({ where: { cartItemId: { in: liveItems.map(i => i.id) } } });
-            await prisma_1.default.cartItem.deleteMany({ where: { id: { in: liveItems.map(i => i.id) } } });
+        // Redeem the promo now that every order is actually created — this
+        // is the atomic, race-safe increment (see promoService.redeemPromo).
+        // If the promo somehow got exhausted by a concurrent checkout between
+        // the price-match check above and this exact moment, the orders
+        // already created still stand at their (correctly discounted) price
+        // — redemption just silently doesn't record a second usage rather
+        // than unwinding an already-successful checkout over a bookkeeping
+        // race this unlikely.
+        if (freshSummary.promo.applied && freshSummary.promo.promoId) {
+            await (0, promoService_1.redeemPromo)(freshSummary.promo.promoId, userId, createdOrders.map((o) => o.id), freshSummary.promo.code, freshSummary.discount).catch((err) => logger_1.logger.warn({ err, promoId: freshSummary.promo.promoId }, "Failed to record promo redemption (orders already created successfully)"));
         }
-        // If cart has remaining offline items, keep cart; otherwise, delete
+        if (liveItems.length > 0) {
+            await prisma_1.default.cartItemOption.deleteMany({ where: { cartItemId: { in: liveItems.map((i) => i.id) } } });
+            await prisma_1.default.cartItem.deleteMany({ where: { id: { in: liveItems.map((i) => i.id) } } });
+        }
         if (offlineItems.length === 0) {
             await prisma_1.default.cart.delete({ where: { id: cart.id } });
         }
-        // ✅ Update Redis cache
-        const updatedCart = offlineItems.length > 0
-            ? await getEnhancedCart(cart.id)
-            : { id: null, items: [], basePrice: 0, totalPrice: 0 };
-        await redis_1.ShopCartRedis.set(cacheKey, JSON.stringify(updatedCart), { EX: 3600 });
-        res.status(201).json((0, codeMessage_1.successResponse)("CHECKOUT_SUCCESS", "Checkout successful", { orders: createdOrders, cart: updatedCart }));
+        // Snapshot is single-use — once consumed by a successful checkout it
+        // can't be replayed to create a second set of orders.
+        await prisma_1.default.cartSummarySnapshot.delete({ where: { id: summaryId } }).catch(() => { });
+        const updatedCart = offlineItems.length > 0 ? await getEnhancedCart(cart.id) : { id: null, items: [], basePrice: 0, totalPrice: 0 };
+        await redis_1.ShopCartRedis.set(cacheKey, JSON.stringify(updatedCart), { EX: CART_TTL_SECONDS });
+        return (0, apiResponse_1.sendCreated)(res, { orders: createdOrders, cart: updatedCart }, "Checkout successful");
     }
-    catch (error) {
-        console.error("Checkout error:", error);
-        res.status(500).json((0, codeMessage_1.errorResponse)("CHECKOUT_FAILED", "Failed to checkout cart"));
+    finally {
+        // Always release the lock, whether checkout succeeded, failed
+        // validation, or threw unexpectedly.
+        await prisma_1.default.cart.updateMany({ where: { id: cart.id }, data: { isLocked: false } }).catch((err) => {
+            logger_1.logger.error({ err, cartId: cart.id }, "Failed to release cart lock");
+        });
     }
 };
 exports.checkoutCart = checkoutCart;
-// DELETE /cart/items/:itemId - Remove item from cart
-const removeCartItem = async (req, res) => {
-    try {
-        const itemId = ensureString(req.params.itemId);
-        const userId = req.user.id;
-        // Validate cart item belongs to user
-        const item = await prisma_1.default.cartItem.findFirst({
-            where: {
-                id: itemId,
-                cart: { customerId: userId }
-            },
-            include: { cart: true }
-        });
-        if (!item) {
-            return res.status(404).json((0, codeMessage_1.errorResponse)("CART_ITEM_NOT_FOUND", "Cart item not found"));
-        }
-        const cartId = item.cart.id;
-        // Delete item
-        await prisma_1.default.cartItem.delete({ where: { id: itemId } });
-        // Check if cart is now empty
-        const remainingItems = await prisma_1.default.cartItem.count({ where: { cartId } });
-        const cacheKey = `cart:user:${userId}`;
-        if (remainingItems === 0) {
-            await prisma_1.default.cart.delete({ where: { id: cartId } });
-            // Remove cart from Redis
-            await redis_1.ShopCartRedis.del(cacheKey);
-            return res.json((0, codeMessage_1.successResponse)("CART_EMPTY", "Cart item removed and cart deleted", { id: null, items: [], basePrice: 0, totalPrice: 0 }));
-        }
-        // Recalculate totals if cart still has items
-        const updatedItems = await prisma_1.default.cartItem.findMany({ where: { cartId } });
-        const totals = calculateCartTotals(updatedItems);
-        await prisma_1.default.cart.update({ where: { id: cartId }, data: totals });
-        // Update Redis
-        const enhancedCart = await getEnhancedCart(cartId);
-        await redis_1.ShopCartRedis.set(cacheKey, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
-        res.json((0, codeMessage_1.successResponse)("CART_ITEM_REMOVED", "Cart item removed successfully", enhancedCart));
-    }
-    catch (error) {
-        console.error("Remove cart item error:", error);
-        res.status(500).json((0, codeMessage_1.errorResponse)("CART_REMOVE_FAILED", "Failed to remove cart item"));
-    }
-};
-exports.removeCartItem = removeCartItem;
-// DELETE /cart - Clear entire cart
-const clearCart = async (req, res) => {
-    try {
-        const userId = req.user.id;
-        const cacheKey = `cart:user:${userId}`;
-        const cart = await prisma_1.default.cart.findFirst({
-            where: { customerId: req.user.id }
-        });
-        if (!cart) {
-            return res.json({ message: "No active cart to clear" });
-        }
-        await prisma_1.default.cartItem.deleteMany({
-            where: { cartId: cart.id }
-        });
-        await prisma_1.default.cart.delete({
-            where: { id: cart.id }
-        });
-        // ✅ Clear Redis cache
-        await redis_1.ShopCartRedis.del(cacheKey);
-        res.json((0, codeMessage_1.successResponse)("CART_CLEARED", "Cart cleared successfully", { id: null, items: [], basePrice: 0, totalPrice: 0 }));
-    }
-    catch (error) {
-        console.error("Clear cart error:", error);
-        res.status(500).json({ error: "Failed to clear cart" });
-    }
-};
-exports.clearCart = clearCart;
-// Helper: Get enhanced cart data
+// Helper: Get enhanced cart data (product info, live/offline status, priced options)
 async function getEnhancedCart(cartId) {
     const cart = await prisma_1.default.cart.findUnique({
         where: { id: cartId },
@@ -510,62 +464,58 @@ async function getEnhancedCart(cartId) {
                         include: {
                             options: true,
                             vendor: { select: { id: true, name: true } },
-                            productSchedule: true // include schedule to check live window
-                        }
+                            productSchedule: true, // needed to determine live/offline status
+                        },
                     },
-                    options: { include: { productOption: true } }
-                }
-            }
-        }
+                    options: { include: { productOption: true } },
+                },
+            },
+        },
     });
     if (!cart)
         return null;
     const now = new Date();
-    const enrichedItems = cart.items.map(item => {
-        const selectedOptionIds = item.options.map(opt => opt.productOptionId);
+    const enrichedItems = cart.items.map((item) => {
+        const selectedOptionIds = item.options.map((opt) => opt.productOptionId);
         const product = item.product;
         const schedule = product.productSchedule;
-        // Determine if the product is currently live
-        const withinSchedule = !schedule || ((!schedule.goLiveAt || schedule.goLiveAt <= now) &&
-            (!schedule.takeDownAt || schedule.takeDownAt >= now));
+        const withinSchedule = !schedule || ((!schedule.goLiveAt || schedule.goLiveAt <= now) && (!schedule.takeDownAt || schedule.takeDownAt >= now));
         const productonline = product.isLive && withinSchedule;
         return {
             id: item.id,
             productId: item.productId,
             quantity: item.quantity,
             unitPrice: item.unitPrice,
-            subtotal: item.unitPrice * item.quantity,
+            subtotal: round(item.unitPrice * item.quantity),
             specialRequest: item.specialRequest || null,
-            productonline, // NEW: true if product is live and can be ordered
+            productonline, // true if product is live and can be ordered right now
             product: {
                 id: product.id,
                 name: product.name,
                 price: product.price,
-                image: product.images,
-                vendor: {
-                    id: product.vendor.id,
-                    name: product.vendor.name
-                },
-                options: product.options.map(opt => ({
+                images: product.images || [],
+                video: product.video || [],
+                vendor: { id: product.vendor.id, name: product.vendor.name },
+                options: product.options.map((opt) => ({
                     id: opt.id,
                     name: opt.name,
                     price: opt.price,
-                    selected: selectedOptionIds.includes(opt.id)
-                }))
+                    selected: selectedOptionIds.includes(opt.id),
+                })),
             },
-            selectedOptions: item.options.map(opt => ({
+            selectedOptions: item.options.map((opt) => ({
                 id: opt.id,
                 cartItemId: opt.cartItemId,
                 productOptionId: opt.productOptionId,
                 name: opt.productOption.name,
-                price: opt.productOption.price
-            }))
+                price: opt.productOption.price,
+            })),
         };
     });
     return {
         id: cart.id,
         items: enrichedItems,
         basePrice: cart.basePrice,
-        totalPrice: cart.totalPrice
+        totalPrice: cart.totalPrice,
     };
 }

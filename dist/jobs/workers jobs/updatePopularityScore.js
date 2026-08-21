@@ -8,6 +8,7 @@ exports.resetPopularityJob = resetPopularityJob;
 exports.updatePopularityScores = updatePopularityScores;
 const prisma_1 = __importDefault(require("../../lib/prisma"));
 const redis_1 = require("../../lib/redis");
+const redisScan_1 = require("../../lib/redisScan");
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const redisCacheTiming_1 = require("../../services/redisCacheTiming");
@@ -49,7 +50,7 @@ async function safeExecute(fn, retries = MAX_RETRIES) {
     }
 }
 async function delPattern(pattern) {
-    const keys = await redis_1.redisProducts.keys(pattern);
+    const keys = await (0, redisScan_1.scanKeys)(redis_1.redisProducts, pattern);
     if (keys.length > 0)
         await redis_1.redisProducts.del(keys);
 }

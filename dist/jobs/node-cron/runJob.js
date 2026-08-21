@@ -7,43 +7,54 @@ const node_cron_1 = __importDefault(require("node-cron"));
 const orderCleanupJob_1 = require("../workers jobs/orderCleanupJob");
 const verifyPendingPayments_1 = require("../payment/worker/verifyPendingPayments");
 const fixLiveStatusJob_1 = require("../workers jobs/fixLiveStatusJob");
+const deliveryAssignment_1 = require("../../services/deliveryAssignment");
+const logger_1 = require("../../lib/logger");
 /**
  * 🧹 Order Cleanup Job
- * Runs every 5 minutes to cancel stale or unpaid orders.
+ * Runs every 3 minutes to cancel stale or unpaid orders.
  */
-node_cron_1.default.schedule("*/3 * * * * ", async () => {
+node_cron_1.default.schedule("*/3 * * * *", async () => {
     try {
         await (0, orderCleanupJob_1.runOrderCleanupJob)();
     }
     catch (err) {
-        console.error("[CRON] Order cleanup job failed:", err);
+        logger_1.logger.error({ err }, "[CRON] Order cleanup job failed");
     }
 });
 /**
  * 💳 Verify Pending Payments Job
- * Runs every 1 minute to auto-verify stuck or delayed transactions.s
+ * Runs every 1 minute to auto-verify stuck or delayed transactions.
  */
-node_cron_1.default.schedule("*/1 * * * * ", async () => {
+node_cron_1.default.schedule("*/1 * * * *", async () => {
     try {
         await (0, verifyPendingPayments_1.verifyPendingPayments)();
     }
     catch (err) {
-        console.error("[CRON] Verify pending payments failed:", err);
+        logger_1.logger.error({ err }, "[CRON] Verify pending payments failed");
     }
 });
 /**
  * 🟢 Fix Live Status Job
- * Runs every 1 minute to ensure product `isLive` status matches schedule.
+ * Runs every 5 minutes to ensure product `isLive` status matches schedule.
  */
-// In your cron setup
-node_cron_1.default.schedule('*/5 * * * * ', () => {
-    console.log('⏰ Running scheduled product status fix...');
+node_cron_1.default.schedule("*/5 * * * *", () => {
     (0, fixLiveStatusJob_1.fixLiveStatusJob)(false)
-        .then(result => {
-        console.log(`✅ Scheduled check: Updated ${result.updatedCount} products`);
-    })
-        .catch(err => {
-        console.error('⚠️ Scheduled check failed:', err.message);
-    });
+        .then((result) => logger_1.logger.info({ updatedCount: result.updatedCount }, "[CRON] Product status fix completed"))
+        .catch((err) => logger_1.logger.error({ err }, "[CRON] Product status fix failed"));
 });
-// console.log("[CRON] 🕒 Order cleanup and payment verification jobs scheduled.");
+/**
+ * 🚚 Expire Stale Delivery Broadcasts
+ * Runs every 1 minute — catches broadcasts whose 30-second acceptance
+ * window passed with no driver responding, and retries assignment.
+ * Previously this logic existed but was never scheduled anywhere, so an
+ * order broadcast to drivers who never responded (neither accepted nor
+ * declined) would sit unassigned forever.
+ */
+node_cron_1.default.schedule("*/1 * * * *", async () => {
+    try {
+        await deliveryAssignment_1.DeliveryAssignmentService.expireOldBroadcasts();
+    }
+    catch (err) {
+        logger_1.logger.error({ err }, "[CRON] Expire delivery broadcasts job failed");
+    }
+});

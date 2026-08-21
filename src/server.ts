@@ -3,8 +3,6 @@ import helmet from 'helmet';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
-import morgan from 'morgan';
-import chalk from 'chalk';
 import path from 'path';
 import fs from 'fs';
 import http from "http";
@@ -13,7 +11,13 @@ import { PrismaClient } from '@prisma/client';
 import config from './config/config';
 import { ensureRedisReady, redisProducts } from './lib/redis';
 import { setupSearch } from './lib/setupSearch';
-import { errorHandler } from './middlewares/error.middleware';
+import { errorHandler, notFoundHandler } from './middlewares/error.middleware';
+import { requestIdMiddleware } from './middlewares/requestId.middleware';
+import { authenticate, authorizeAdmin } from './middlewares/auth.middleware';
+import { logger } from './lib/logger';
+import pinoHttp from 'pino-http';
+import swaggerUi from 'swagger-ui-express';
+import { openApiDocument } from './docs/openapi';
 // import { webhookHandler } from './controllers/paymentController';
 import { initSocket } from './socket';
 
@@ -21,6 +25,7 @@ import authRoutes from './routes/auth.routes';
 import productRoutes from './routes/productRoutes';
 import reviewRoutes from './routes/reviewRoutes';
 import orderRouter from './routes/orderRouter';
+import notificationRouter from './routes/notificationRouter';
 import paymentRouter from './routes/paymentRoute';
 import cartRouter from './routes/cartRouter';
 import deliveryRouter from './routes/deliveryRouter';
@@ -45,7 +50,13 @@ import "./jobs/workers jobs/productDeactivateJob";
 import "./jobs/workers jobs/vendorFollowWorker";
 import "./jobs/workers jobs/productLiveWorker";
 import vendorDashboardRoutes from './routes/vendorDashboard.routes';
+import vendorSettingsRoutes from './routes/vendorSettings.routes';
+import vendorSupportRoutes from './routes/vendorSupport.routes';
 import aiRouter from './routes/aiRouter';
+import adminRoutes from './routes/admin.routes';
+import promoRoutes from './routes/promoRoutes';
+import referralRoutes from './routes/referralRoutes';
+import { riderOperationsAdminRoutes, riderOperationsRoutes, riderProofReadRoutes } from './routes/riderOperations.routes';
 import { ProductImageService } from './jobs/sripts/backfillThumbnails';
 import { fixLiveStatusJob } from './jobs/workers jobs/fixLiveStatusJob';
 import { paystackWebhookHandler } from './controllers/webhook';
@@ -74,39 +85,34 @@ app.post('/api/payments/webhook', express.raw({ type: 'application/json' }), pay
 const uploadDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
-// Logger with chalk
-morgan.token('statusColor', (_req, res) => {
-  const status = res.statusCode;
-  if (status >= 500) return chalk.red(status.toString());
-  if (status >= 400) return chalk.yellow(status.toString());
-  if (status >= 300) return chalk.cyan(status.toString());
-  if (status >= 200) return chalk.green(status.toString());
-  return status.toString();
-});
+// Request ID first — every subsequent log line (including the HTTP access
+// log below) is tagged with it, so a single request is traceable end to end.
+app.use(requestIdMiddleware);
 
+// Structured HTTP access logging (replaces morgan+chalk). JSON in
+// production for log aggregators, pretty-printed in dev via the same
+// pino instance used everywhere else in the app.
 app.use(
-  morgan((tokens, req, res) => [
-    chalk.gray(`[${tokens.date(req, res, 'iso')}]`),
-    chalk.magenta(tokens.method(req, res)),
-    chalk.blue(tokens.url(req, res)),
-    chalk.white(tokens['statusColor'](req, res)),
-    chalk.gray(`- ${tokens['response-time'](req, res)} ms`)
-  ].join(' '))
+  pinoHttp({
+    logger,
+    genReqId: (req) => (req as any).id,
+    customLogLevel: (_req, res, err) => {
+      if (err || res.statusCode >= 500) return 'error';
+      if (res.statusCode >= 400) return 'warn';
+      return 'info';
+    },
+    // Don't spam logs with successful health-check pings.
+    autoLogging: {
+      ignore: (req) => req.url === '/healthz',
+    },
+  })
 );
 
 app.use(helmet());
 
-const allowedOrigins = [
-  config.clientUrl,
-  "http://127.0.0.1:60308",
-  "https://ui-food-paddi.onrender.com",
-  "https://ceeb2aee.food-paddi-website.pages.dev",
-  "http://127.0.0.1:5500",
-];
-
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) callback(null, true);
+    if (!origin || config.allowedOrigins.includes(origin)) callback(null, true);
     else callback(new Error("Not allowed by CORS"));
   },
   credentials: true
@@ -123,24 +129,65 @@ app.use('/favicon.ico', express.static('public/favicon.ico'));
 app.use("/receipts", express.static(path.join(__dirname, "../receipts")));
 
 // Routes
+// API docs — on by default in dev, opt-in in production via ENABLE_API_DOCS=true
+// (a payments/KYC backend's docs shouldn't be publicly browsable by default).
+if (!config.isProduction || process.env.ENABLE_API_DOCS === 'true') {
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiDocument));
+}
+
 app.use('/api/auth', authRoutes);
 app.use('/api/product', productRoutes);
 app.use('/api/review', reviewRoutes);
 app.use('/api/order', orderRouter);
+app.use('/api/notifications', notificationRouter);
 app.use('/api/cart', cartRouter);
 app.use('/api/payments', paymentRouter);
 app.use("/api/delivery", deliveryRouter);
+app.use("/api/delivery", riderProofReadRoutes);
 app.use("/api/product", productScheduleRoutes);
 app.use("/api/vendor-follow", vendorFollowRoutes);
 app.use('/api/seeder', seederRoutes);
-app.use("/api/status", productScheduleRoutes);
 app.use("/api/vendor", vendorDashboardRoutes);
+app.use("/api/vendor/settings", vendorSettingsRoutes);
+app.use("/api/vendor/support", vendorSupportRoutes);
 app.use('/api/ai', aiRouter);
+app.use('/api/admin', adminRoutes);
+app.use('/api/promotions', promoRoutes);
+app.use('/api/referrals', referralRoutes);
+app.use('/api/rider', riderOperationsRoutes);
+app.use('/api/admin/rider', riderOperationsAdminRoutes);
 
 
 // Root & health endpoints
 app.get('/', (_req: Request, res: Response) => res.send('🚀 Food Paddi Backend API is running'));
+
+// Liveness: "is the process up" — always fast, no downstream checks.
+// Use for platform health checks that just need a quick 200.
 app.get('/healthz', (_req: Request, res: Response) => res.status(200).send('OK'));
+
+// Readiness: "can this instance actually serve traffic" — checks the
+// database and cache it depends on. Use this for load-balancer routing
+// decisions or pre-deploy smoke tests.
+app.get('/readyz', async (_req: Request, res: Response) => {
+  const checks: Record<string, boolean> = {};
+
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    checks.database = true;
+  } catch {
+    checks.database = false;
+  }
+
+  try {
+    await redisProducts.ping();
+    checks.redis = true;
+  } catch {
+    checks.redis = false;
+  }
+
+  const healthy = Object.values(checks).every(Boolean);
+  res.status(healthy ? 200 : 503).json({ status: healthy ? 'ok' : 'degraded', checks });
+});
 
 // Disable cache for job control endpoints
 app.use(
@@ -155,8 +202,10 @@ app.use(
 );
 
 // ▶ Start/Resume job
-// Popularity job endpoints
-app.get("/run-popularity-job", async (_req, res) => {
+// Popularity job endpoints — ADMIN ONLY.
+// These were previously mounted with no auth at all: any anonymous caller
+// on the internet could trigger, cancel, or reset this job. Locked down now.
+app.get("/run-popularity-job", authenticate, authorizeAdmin, async (_req, res) => {
   if (jobRunning) return res.json({ message: "Job is already running" });
 
   jobRunning = true;
@@ -174,7 +223,7 @@ app.get("/run-popularity-job", async (_req, res) => {
 
  
 // ▶ Progress endpoint
-app.get("/popularity-progress", async (_req, res) => {
+app.get("/popularity-progress", authenticate, authorizeAdmin, async (_req, res) => {
   try {
     const data = await redisProducts.get("job:popularity:progress");
     if (!data) return res.json({ total: 0, processed: 0, percent: 0 });
@@ -187,7 +236,7 @@ app.get("/popularity-progress", async (_req, res) => {
  
 
 // ▶ Cancel job
-app.get("/cancel-popularity-job", (_req, res) => {
+app.get("/cancel-popularity-job", authenticate, authorizeAdmin, (_req, res) => {
   if (!jobRunning) return res.json({ message: "No job is running" });
 
   cancelPopularityJob();
@@ -196,7 +245,7 @@ app.get("/cancel-popularity-job", (_req, res) => {
 
 
 // ▶ Reset job
-app.get("/reset-popularity-job", async (_req, res) => {
+app.get("/reset-popularity-job", authenticate, authorizeAdmin, async (_req, res) => {
   try {
     const result = await resetPopularityJob();
     jobRunning = false;
@@ -209,6 +258,10 @@ app.get("/reset-popularity-job", async (_req, res) => {
 });
 
 // Error handler
+// Unmatched routes -> 404
+app.use(notFoundHandler);
+
+// Central error handler — must be last
 app.use(errorHandler);
 
 // ------------------------------
@@ -249,144 +302,110 @@ app.use(errorHandler);
 //   }
 // };
 
+/**
+ * Runs the non-critical startup maintenance tasks (search index setup,
+ * thumbnail backfill, product live-status fix) in the background, after
+ * the server is already listening. None of these should ever delay port
+ * binding — a slow backfill previously ran *before* server.listen(),
+ * which risks failing a platform's deploy health check on a large catalog.
+ */
+async function runBackgroundStartupTasks() {
+  try {
+    await setupSearch();
+    logger.info('Search setup completed');
+  } catch (err) {
+    logger.error({ err }, 'Search setup failed (non-critical)');
+  }
+
+  try {
+    logger.info('Running thumbnail backfill...');
+    const initialHealth = await ProductImageService.healthCheck();
+    logger.info(
+      { percentage: initialHealth.percentage, healthy: initialHealth.healthy, total: initialHealth.total },
+      'Initial thumbnail health'
+    );
+
+    if (initialHealth.missing > 0) {
+      const productsWithoutThumbnails = await prisma.product.findMany({
+        where: { OR: [{ thumbnail: null }, { thumbnail: '' }], images: { isEmpty: false } },
+        select: { id: true },
+        take: 2000,
+      });
+
+      const batchSize = 100;
+      const productIds = productsWithoutThumbnails.map((p) => p.id);
+      let processedCount = 0;
+
+      for (let i = 0; i < productIds.length; i += batchSize) {
+        const batch = productIds.slice(i, i + batchSize);
+        try {
+          await ProductImageService.batchEnsureThumbnails(batch);
+          processedCount += batch.length;
+        } catch (batchError) {
+          logger.warn({ err: batchError, batchIndex: i / batchSize }, 'Thumbnail batch failed, continuing');
+        }
+      }
+
+      logger.info({ processedCount }, 'Thumbnail backfill complete');
+    } else {
+      logger.info('All products already have thumbnails');
+    }
+  } catch (error) {
+    logger.warn({ err: error }, 'Thumbnail backfill encountered an error (non-critical)');
+  }
+
+  fixLiveStatusJob(true)
+    .then(() => logger.info('Background product status check completed'))
+    .catch((err) => logger.error({ err }, 'Background product status check failed (non-critical)'));
+}
+
 const startServer = async () => {
   try {
     await ensureRedisReady();
-    console.log('✅ Redis connected');
+    logger.info('Redis connected');
 
     await prisma.$connect();
-    console.log('✅ PostgreSQL connected');
+    logger.info('PostgreSQL connected');
 
-    // ──────────────────────────────────────────────────────
-    // NEW: Run thumbnail backfill on server startup
-    // ──────────────────────────────────────────────────────
-    try {
-      console.log('🔍 Running thumbnail backfill on server startup...');
-      
-      // Step 1: Check initial health status
-      const initialHealth = await ProductImageService.healthCheck();
-      console.log(`📊 Initial thumbnail health: ${initialHealth.percentage}% (${initialHealth.healthy}/${initialHealth.total} products)`);
-      
-      if (initialHealth.missing > 0) {
-        console.log(`🔄 Found ${initialHealth.missing} products without thumbnails, starting backfill...`);
-        
-        // Step 2: Find products that need thumbnails
-        const productsWithoutThumbnails = await prisma.product.findMany({
-          where: {
-            OR: [
-              { thumbnail: null },
-              { thumbnail: '' }
-            ],
-            images: {
-              isEmpty: false // Only products that actually have images
-            }
-          },
-          select: { id: true },
-          take: 2000 // Process up to 2000 products per startup
-        });
-
-        console.log(`📊 Processing ${productsWithoutThumbnails.length} products...`);
-
-        if (productsWithoutThumbnails.length > 0) {
-          // Step 3: Process in batches
-          const batchSize = 100;
-          const productIds = productsWithoutThumbnails.map(p => p.id);
-          let processedCount = 0;
-          
-          for (let i = 0; i < productIds.length; i += batchSize) {
-            const batch = productIds.slice(i, i + batchSize);
-            
-            try {
-              await ProductImageService.batchEnsureThumbnails(batch);
-              processedCount += batch.length;
-              
-              // Log progress every 500 products
-              if (processedCount % 500 === 0) {
-                console.log(`   Progress: ${processedCount}/${productIds.length} products`);
-              }
-            } catch (batchError) {
-              console.warn(`   ⚠️ Batch ${i/batchSize + 1} failed, continuing with next batch:`, batchError);
-              // Continue with next batch even if one fails
-            }
-          }
-          
-          console.log(`✅ Backfilled thumbnails for ${processedCount} products`);
-          
-          // Step 4: Final health check
-          const finalHealth = await ProductImageService.healthCheck();
-          console.log(`📊 Final thumbnail health: ${finalHealth.percentage}% (${finalHealth.healthy}/${finalHealth.total} products)`);
-          
-          if (finalHealth.missing > 0) {
-            console.log(`⚠️  Note: ${finalHealth.missing} products still without thumbnails (products without images)`);
-          } else {
-            console.log('🎉 All products with images now have thumbnails!');
-          }
-        } else {
-          console.log('✅ No products found without thumbnails');
-        }
-      } else {
-        console.log('✅ All products already have thumbnails!');
-      }
-      
-    } catch (error) {
-      console.warn('⚠️  Thumbnail backfill encountered an error (non-critical), continuing server startup:', error);
-      // Don't crash the server if backfill fails
-    }
-    // ──────────────────────────────────────────────────────
-
-    try {
-      await setupSearch();
-      console.log('✅ Search setup completed');
-    } catch (err) {
-      console.error('⚠️ Search setup failed:', err);
-    }
-
-    // ──────────────────────────────────────────────────────
-    // SAFE UPDATE: Run fixLiveStatusJob in background
-    // (Doesn't block server startup like before)
-    // ──────────────────────────────────────────────────────
-    console.log('🔄 Starting product status fix in background (non-blocking)...');
-    
-    // Start the job but don't wait for it - run in background
-    const startupFixPromise = fixLiveStatusJob(true)
-      .then(() => {
-        // console.log('✅ Background product status check completed');
-      })
-      .catch(err => {
-        // Don't crash the server if this fails
-        console.error('⚠️ Background product status check failed (non-critical):', err.message || err);
-      });
-    
-    // Optional: Track this promise if you need to wait for it later
-    // You can store it somewhere if needed, but we don't await it here
-    
-    // Add a safety timeout: if it takes more than 2 minutes, log a warning
-    setTimeout(() => {
-      startupFixPromise.then(() => {
-        // Already completed, nothing to do
-      }).catch(() => {
-        // Already handled
-      });
-    }, 2 * 60 * 1000); // 2 minutes
-    
-    // ──────────────────────────────────────────────────────
-
-    console.log(`🌐 SERVER_URL: ${process.env.SERVER_URL}`);
+    logger.info({ serverUrl: config.serverUrl }, 'Starting server');
 
     const server = http.createServer(app);
     initSocket(server);
 
-    server.listen(5000, "0.0.0.0", () => {
-      console.log(`🚀 Server running at http://localhost:${config.port}`);
-      
+    server.listen(config.port, '0.0.0.0', () => {
+      logger.info({ port: config.port }, 'Server running');
+
       // Delay cron job start slightly to let server stabilize
       startKeepAlive();
 
-
+      // Fire-and-forget background maintenance — never blocks the port
+      // from being bound, which is what health checks actually wait on.
+      void runBackgroundStartupTasks();
     });
 
-  } catch (error) { 
-    console.error('❌ Failed to start server:', error);
+    // Graceful shutdown — important on platforms (Render/Railway/K8s) that
+    // send SIGTERM before killing the process on redeploy/scale-down, so
+    // in-flight requests get to finish instead of being dropped.
+    const shutdown = (signal: string) => {
+      logger.info({ signal }, 'Shutdown signal received, closing server gracefully');
+      server.close(async () => {
+        try {
+          await prisma.$disconnect();
+          logger.info('Shutdown complete');
+          process.exit(0);
+        } catch (err) {
+          logger.error({ err }, 'Error during shutdown');
+          process.exit(1);
+        }
+      });
+      // Force-exit if graceful shutdown hangs
+      setTimeout(() => process.exit(1), 10_000).unref();
+    };
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+  } catch (error) {
+    logger.error({ err: error }, 'Failed to start server');
     process.exit(1);
   }
 };

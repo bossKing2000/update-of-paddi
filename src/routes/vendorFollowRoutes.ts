@@ -1,5 +1,5 @@
 import express from "express";
-import { followVendor, unfollowVendor, isFollowingVendor,getVendorFollowers,getFollowedVendors,} from "../controllers/vendorFollowController";
+import { followVendor, unfollowVendor, isFollowingVendor, getVendorFollowers, getVendorFollowerCount, getFollowedVendors } from "../controllers/vendorFollowController";
 import { authenticate } from "../middlewares/auth.middleware";
 
 const router = express.Router();
@@ -9,6 +9,7 @@ router.post("/follow", authenticate, followVendor);
 router.post("/unfollow", authenticate, unfollowVendor);
 router.get("/status/:vendorId", authenticate, isFollowingVendor);
 router.get("/vendor/:vendorId/followers", authenticate, getVendorFollowers);
+router.get("/vendor/:vendorId/follower-count", authenticate, getVendorFollowerCount);
 router.get("/following", authenticate, getFollowedVendors);
 
 export default router;

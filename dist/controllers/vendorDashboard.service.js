@@ -1,11 +1,15 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.VendorDashboardService = void 0;
+exports.calculatePayoutAmounts = calculatePayoutAmounts;
 const client_1 = require("@prisma/client");
 const date_fns_1 = require("date-fns");
 const clearCaches_1 = require("../services/clearCaches");
 const redis_1 = require("../lib/redis");
-const prisma = new client_1.PrismaClient();
+const prisma_1 = __importDefault(require("../lib/prisma"));
 class VendorDashboardService {
     constructor(vendorId) {
         this.vendorId = vendorId;
@@ -123,7 +127,7 @@ class VendorDashboardService {
     // ==================== REVENUE METHODS (revert to order-based for consistency) ====================
     async sumSuccessfulPaymentsInRange(start, end) {
         try {
-            const revenue = await prisma.order.aggregate({
+            const revenue = await prisma_1.default.order.aggregate({
                 where: {
                     vendorId: this.vendorId,
                     // Include both COMPLETED and PAYMENT_CONFIRMED orders
@@ -159,7 +163,7 @@ class VendorDashboardService {
     async getOrdersToday() {
         const todayStart = (0, date_fns_1.startOfDay)(new Date());
         const todayEnd = (0, date_fns_1.endOfDay)(new Date());
-        return prisma.order.count({
+        return prisma_1.default.order.count({
             where: {
                 vendorId: this.vendorId,
                 // Include multiple statuses
@@ -172,7 +176,7 @@ class VendorDashboardService {
     }
     async getOrdersForPeriod(period) {
         const { startDate, endDate } = this.getRangeForPeriod(period);
-        return prisma.order.count({
+        return prisma_1.default.order.count({
             where: {
                 vendorId: this.vendorId,
                 status: client_1.OrderStatus.COMPLETED,
@@ -181,7 +185,7 @@ class VendorDashboardService {
         });
     }
     async getOrdersAllTime() {
-        return prisma.order.count({
+        return prisma_1.default.order.count({
             where: {
                 vendorId: this.vendorId,
                 status: client_1.OrderStatus.COMPLETED,
@@ -189,7 +193,7 @@ class VendorDashboardService {
         });
     }
     async getPendingOrdersCount() {
-        return prisma.order.count({
+        return prisma_1.default.order.count({
             where: {
                 vendorId: this.vendorId,
                 status: {
@@ -209,7 +213,7 @@ class VendorDashboardService {
     }
     // ==================== PRODUCT METHODS ====================
     async getOnlineProductsCount() {
-        return prisma.product.count({
+        return prisma_1.default.product.count({
             where: {
                 vendorId: this.vendorId,
                 isLive: true,
@@ -218,7 +222,7 @@ class VendorDashboardService {
         });
     }
     async getTotalProductsCount() {
-        return prisma.product.count({
+        return prisma_1.default.product.count({
             where: {
                 vendorId: this.vendorId,
                 archived: false,
@@ -227,11 +231,11 @@ class VendorDashboardService {
     }
     // ==================== RATING METHODS ====================
     async getAverageVendorRating() {
-        const vendorReviews = await prisma.vendorReview.aggregate({
+        const vendorReviews = await prisma_1.default.vendorReview.aggregate({
             where: { vendorId: this.vendorId },
             _avg: { rating: true },
         });
-        const productReviews = await prisma.productReview.aggregate({
+        const productReviews = await prisma_1.default.productReview.aggregate({
             where: { product: { vendorId: this.vendorId } },
             _avg: { rating: true },
         });
@@ -247,34 +251,23 @@ class VendorDashboardService {
     }
     async getReviewCount() {
         const [vendorReviews, productReviews] = await Promise.all([
-            prisma.vendorReview.count({ where: { vendorId: this.vendorId } }),
-            prisma.productReview.count({ where: { product: { vendorId: this.vendorId } } }),
+            prisma_1.default.vendorReview.count({ where: { vendorId: this.vendorId } }),
+            prisma_1.default.productReview.count({ where: { product: { vendorId: this.vendorId } } }),
         ]);
         return vendorReviews + productReviews;
     }
     // ==================== REVENUE OVERVIEW (Chart) (✅ Payment-based + fixed) ====================
-    async getRevenueOverview() {
-        const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-        const now = new Date();
-        // start of week Monday
-        const today = new Date();
-        const dayOfWeek = today.getDay();
-        const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-        const startOfWeekDate = new Date(today);
-        startOfWeekDate.setDate(today.getDate() - diffToMonday);
-        startOfWeekDate.setHours(0, 0, 0, 0);
-        const revenueData = await Promise.all(days.map(async (day, index) => {
-            const dayStart = new Date(startOfWeekDate);
+    async getRevenueOverview(period = "thisWeek") {
+        const { startDate, endDate } = this.getRangeForPeriod(period);
+        const today = (0, date_fns_1.endOfDay)(new Date());
+        const visibleEnd = endDate > today ? today : endDate;
+        const totalDays = Math.max(Math.floor(((0, date_fns_1.endOfDay)(visibleEnd).getTime() - (0, date_fns_1.startOfDay)(startDate).getTime()) / 86_400_000) + 1, 1);
+        const revenueData = await Promise.all(Array.from({ length: totalDays }, async (_, index) => {
+            const dayStart = (0, date_fns_1.startOfDay)(new Date(startDate));
             dayStart.setDate(dayStart.getDate() + index);
-            // skip future days
-            if (dayStart > now) {
-                return { day, revenue: 0, chartPercentage: 0 };
-            }
-            const dayEnd = new Date(dayStart);
-            dayEnd.setHours(23, 59, 59, 999);
-            const revenueValue = await this.sumSuccessfulPaymentsInRange(dayStart, dayEnd);
+            const revenueValue = await this.sumSuccessfulPaymentsInRange(dayStart, (0, date_fns_1.endOfDay)(dayStart));
             return {
-                day,
+                day: period === "lastMonth" ? (0, date_fns_1.format)(dayStart, "d MMM") : (0, date_fns_1.format)(dayStart, "EEE"),
                 revenue: revenueValue,
                 chartPercentage: 0,
             };
@@ -290,7 +283,7 @@ class VendorDashboardService {
         const thirtyDaysAgo = (0, date_fns_1.subDays)(new Date(), 30);
         const fourteenDaysAgo = (0, date_fns_1.subDays)(new Date(), 14);
         const sevenDaysAgo = (0, date_fns_1.subDays)(new Date(), 7);
-        const products = await prisma.product.findMany({
+        const products = await prisma_1.default.product.findMany({
             where: { vendorId: this.vendorId, archived: false },
             include: {
                 orderItems: {
@@ -370,8 +363,8 @@ class VendorDashboardService {
             productsData = parsed.products;
         }
         else {
-            totalCount = await prisma.product.count({ where: vendorWhere });
-            const products = await prisma.product.findMany({
+            totalCount = await prisma_1.default.product.count({ where: vendorWhere });
+            const products = await prisma_1.default.product.findMany({
                 where: vendorWhere,
                 skip,
                 take: limit,
@@ -432,13 +425,13 @@ class VendorDashboardService {
     async getRecentActivity() {
         const thirtyDaysAgo = (0, date_fns_1.subDays)(new Date(), 30);
         const [recentOrders, recentVendorReviews] = await Promise.all([
-            prisma.order.findMany({
+            prisma_1.default.order.findMany({
                 where: { vendorId: this.vendorId, createdAt: { gte: thirtyDaysAgo } },
                 orderBy: { createdAt: "desc" },
                 take: 10,
                 include: { customer: { select: { name: true } } },
             }),
-            prisma.vendorReview.findMany({
+            prisma_1.default.vendorReview.findMany({
                 where: { vendorId: this.vendorId, createdAt: { gte: thirtyDaysAgo } },
                 orderBy: { createdAt: "desc" },
                 take: 5,
@@ -501,7 +494,7 @@ class VendorDashboardService {
         const skip = (page - 1) * limit;
         const take = limit * 2; // fetch extra to merge orders + reviews
         const [orders, vendorReviews] = await Promise.all([
-            prisma.order.findMany({
+            prisma_1.default.order.findMany({
                 where: { vendorId: this.vendorId },
                 orderBy: { createdAt: "desc" },
                 skip,
@@ -528,7 +521,7 @@ class VendorDashboardService {
                     },
                 },
             }),
-            prisma.vendorReview.findMany({
+            prisma_1.default.vendorReview.findMany({
                 where: { vendorId: this.vendorId },
                 orderBy: { createdAt: "desc" },
                 skip,
@@ -589,8 +582,8 @@ class VendorDashboardService {
             .slice(0, limit);
         // -------------------- TOTAL COUNT (for pagination UI) --------------------
         const [totalOrders, totalReviews] = await Promise.all([
-            prisma.order.count({ where: { vendorId: this.vendorId } }),
-            prisma.vendorReview.count({ where: { vendorId: this.vendorId } }),
+            prisma_1.default.order.count({ where: { vendorId: this.vendorId } }),
+            prisma_1.default.vendorReview.count({ where: { vendorId: this.vendorId } }),
         ]);
         const total = totalOrders + totalReviews;
         return {
@@ -607,7 +600,7 @@ class VendorDashboardService {
     }
     // ==================== PRODUCT LIVE CONTROL (✅ insights revenue now Payment-based) ====================
     async getProductLiveControl() {
-        const products = await prisma.product.findMany({
+        const products = await prisma_1.default.product.findMany({
             where: { vendorId: this.vendorId, archived: false },
             include: {
                 productSchedule: true,
@@ -649,7 +642,7 @@ class VendorDashboardService {
     }
     async getPeakHours() {
         const thirtyDaysAgo = (0, date_fns_1.subDays)(new Date(), 30);
-        const orders = await prisma.order.findMany({
+        const orders = await prisma_1.default.order.findMany({
             where: {
                 vendorId: this.vendorId,
                 status: client_1.OrderStatus.COMPLETED,
@@ -670,7 +663,7 @@ class VendorDashboardService {
         return { peakHours, maxCount };
     }
     async getCustomerReturnRate() {
-        const orders = await prisma.order.findMany({
+        const orders = await prisma_1.default.order.findMany({
             where: { vendorId: this.vendorId, status: client_1.OrderStatus.COMPLETED },
             select: { customerId: true },
         });
@@ -684,7 +677,7 @@ class VendorDashboardService {
     }
     async getOrderValueStats() {
         const thirtyDaysAgo = (0, date_fns_1.subDays)(new Date(), 30);
-        const orders = await prisma.order.findMany({
+        const orders = await prisma_1.default.order.findMany({
             where: {
                 vendorId: this.vendorId,
                 status: client_1.OrderStatus.COMPLETED,
@@ -704,7 +697,7 @@ class VendorDashboardService {
         };
     }
     async getProductAnalytics() {
-        const products = await prisma.product.findMany({
+        const products = await prisma_1.default.product.findMany({
             where: { vendorId: this.vendorId, archived: false },
             include: {
                 reviews: { select: { rating: true } },
@@ -761,5 +754,60 @@ class VendorDashboardService {
     async invalidateProductCache(productId) {
         await (0, clearCaches_1.clearProductCache)(productId, this.vendorId);
     }
+    // ==================== PAYOUTS ====================
+    // Previously there was no way to compute what a vendor is owed at all —
+    // no bank fields, no VendorPayout model, nothing.
+    async getPayoutSummary() {
+        const vendor = await prisma_1.default.user.findUnique({
+            where: { id: this.vendorId },
+            select: { commissionRate: true, bankName: true, bankAccountNumber: true, bankAccountName: true },
+        });
+        if (!vendor)
+            throw new Error("Vendor not found");
+        // Eligible = completed, successfully paid, and not already included
+        // in a previous payout. paymentStatus is checked directly (rather
+        // than joining through Payment) since Order.paymentStatus is kept in
+        // sync by the payment finalizer and already reflects refunds once
+        // refund processing sets it to REFUNDED.
+        const eligibleOrders = await prisma_1.default.order.findMany({
+            where: { vendorId: this.vendorId, status: client_1.OrderStatus.COMPLETED, paymentStatus: "SUCCESS", payoutId: null },
+            select: { id: true, totalPrice: true, deliveryFee: true },
+        });
+        const { grossRevenue, commission, netAvailable } = calculatePayoutAmounts(eligibleOrders, vendor.commissionRate);
+        const [payoutHistory, lifetimePaidAgg] = await Promise.all([
+            prisma_1.default.vendorPayout.findMany({ where: { vendorId: this.vendorId }, orderBy: { createdAt: "desc" }, take: 20 }),
+            prisma_1.default.vendorPayout.aggregate({ where: { vendorId: this.vendorId, status: "PAID" }, _sum: { amount: true } }),
+        ]);
+        return {
+            commissionRatePercent: Math.round(vendor.commissionRate * 1000) / 10,
+            bankOnFile: !!(vendor.bankName && vendor.bankAccountNumber),
+            bankAccountName: vendor.bankAccountName,
+            available: { grossRevenue, commission, netAvailable, orderCount: eligibleOrders.length },
+            lifetimePaid: lifetimePaidAgg._sum.amount || 0,
+            payoutHistory: payoutHistory.map((p) => ({
+                id: p.id,
+                amount: p.amount,
+                status: p.status,
+                periodStart: p.periodStart,
+                periodEnd: p.periodEnd,
+                paidAt: p.paidAt,
+                orderCount: p.orderCount,
+                failureReason: p.failureReason,
+            })),
+        };
+    }
 }
 exports.VendorDashboardService = VendorDashboardService;
+/**
+ * Pure payout math, extracted for independent testing — see
+ * tests/unit/payoutCalculation.test.ts. Delivery fee is excluded from
+ * gross revenue since it isn't the vendor's money to begin with (it
+ * belongs to whoever delivers the order), only commission is deducted
+ * from what's left.
+ */
+function calculatePayoutAmounts(orders, commissionRate) {
+    const grossRevenue = orders.reduce((sum, o) => sum + (o.totalPrice - o.deliveryFee), 0);
+    const commission = Number((grossRevenue * commissionRate).toFixed(2));
+    const netAvailable = Number((grossRevenue - commission).toFixed(2));
+    return { grossRevenue: Number(grossRevenue.toFixed(2)), commission, netAvailable };
+}

@@ -3,115 +3,111 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getFollowedVendors = exports.getVendorFollowers = exports.isFollowingVendor = exports.unfollowVendor = exports.followVendor = void 0;
-const prismaClient_1 = __importDefault(require("../config/prismaClient"));
+exports.getFollowedVendors = exports.getVendorFollowerCount = exports.getVendorFollowers = exports.isFollowingVendor = exports.unfollowVendor = exports.followVendor = void 0;
+const prisma_1 = __importDefault(require("../lib/prisma"));
 const paramUtils_1 = require("../utils/paramUtils");
 const vendorFollowSchema_1 = require("../validations/vendorFollowSchema");
-const vendorFollowNotifications_1 = require("../utils/activityUtils/vendorFollowNotifications");
-const codeMessage_1 = require("../validators/codeMessage");
-// 🟢 Follow a vendor
+const vendorFollowWorker_1 = require("../jobs/workers jobs/vendorFollowWorker");
+const apiResponse_1 = require("../utils/apiResponse");
+const AppError_1 = require("../errors/AppError");
+function getPagination(req) {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+    return { page, limit, skip: (page - 1) * limit };
+}
+// POST /vendor-follow/follow
 const followVendor = async (req, res) => {
-    try {
-        const parsed = vendorFollowSchema_1.followVendorSchema.safeParse(req.body);
-        if (!parsed.success)
-            return res.status(422).json((0, codeMessage_1.errorResponse)("INVALID_INPUT", parsed.error.message));
-        const { vendorId } = parsed.data;
-        const customerId = req.user.id;
-        if (vendorId === customerId)
-            return res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_ACTION", "You cannot follow yourself."));
-        // Prevent duplicate follows
-        const existing = await prismaClient_1.default.vendorFollower.findUnique({
-            where: { vendorId_customerId: { vendorId, customerId } },
-        });
-        if (existing)
-            return res.status(400).json((0, codeMessage_1.errorResponse)("ALREADY_FOLLOWING", "You already follow this vendor."));
-        // Create follow relationship
-        const follow = await prismaClient_1.default.vendorFollower.create({
-            data: { vendorId, customerId },
-        });
-        // Enqueue async notification
-        await vendorFollowNotifications_1.vendorFollowQueue.add("notifyVendorFollow", { vendorId, customerId });
-        res.json((0, codeMessage_1.successResponse)("FOLLOWED_VENDOR", "Vendor followed successfully.", follow));
-    }
-    catch (err) {
-        console.error("Follow vendor error:", err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to follow vendor."));
-    }
+    const parsed = vendorFollowSchema_1.followVendorSchema.safeParse(req.body);
+    if (!parsed.success)
+        throw new AppError_1.ValidationError("Invalid request", parsed.error.flatten().fieldErrors);
+    const { vendorId } = parsed.data;
+    const customerId = req.user.id;
+    if (vendorId === customerId)
+        throw new AppError_1.ValidationError("You cannot follow yourself.");
+    // Previously accepted any userId with no check it was actually a vendor
+    // — a customer could "follow" another customer, or an id that doesn't
+    // exist at all, producing junk follow records with no vendor to ever
+    // show up against.
+    const targetVendor = await prisma_1.default.user.findUnique({ where: { id: vendorId }, select: { id: true, role: true } });
+    if (!targetVendor || targetVendor.role !== "VENDOR")
+        throw new AppError_1.NotFoundError("Vendor");
+    const existing = await prisma_1.default.vendorFollower.findUnique({ where: { vendorId_customerId: { vendorId, customerId } } });
+    if (existing)
+        throw new AppError_1.ConflictError("You already follow this vendor.");
+    const follow = await prisma_1.default.vendorFollower.create({ data: { vendorId, customerId } });
+    // Previously enqueued to a queue whose only live worker had a local
+    // stub that always threw "Function not implemented" — every one of
+    // these jobs failed silently, no vendor ever actually got notified.
+    // See vendorFollowWorker.ts for the full story (there were actually
+    // three separate, competing definitions of this queue).
+    await vendorFollowWorker_1.vendorFollowQueue.add("notifyVendorFollow", { vendorId, customerId });
+    return (0, apiResponse_1.sendCreated)(res, { follow }, "Vendor followed successfully.");
 };
 exports.followVendor = followVendor;
-// 🔴 Unfollow a vendor
+// POST /vendor-follow/unfollow
 const unfollowVendor = async (req, res) => {
-    try {
-        const parsed = vendorFollowSchema_1.unfollowVendorSchema.safeParse(req.body);
-        if (!parsed.success)
-            return res.status(422).json((0, codeMessage_1.errorResponse)("INVALID_INPUT", parsed.error.message));
-        const { vendorId } = parsed.data;
-        const customerId = req.user.id;
-        const existing = await prismaClient_1.default.vendorFollower.findUnique({
-            where: { vendorId_customerId: { vendorId, customerId } },
-        });
-        if (!existing)
-            return res.status(404).json((0, codeMessage_1.errorResponse)("NOT_FOLLOWING", "You are not following this vendor."));
-        await prismaClient_1.default.vendorFollower.delete({
-            where: { id: existing.id },
-        });
-        res.json((0, codeMessage_1.successResponse)("UNFOLLOWED_VENDOR", "Vendor unfollowed successfully."));
-    }
-    catch (err) {
-        console.error("Unfollow vendor error:", err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to unfollow vendor."));
-    }
+    const parsed = vendorFollowSchema_1.unfollowVendorSchema.safeParse(req.body);
+    if (!parsed.success)
+        throw new AppError_1.ValidationError("Invalid request", parsed.error.flatten().fieldErrors);
+    const { vendorId } = parsed.data;
+    const customerId = req.user.id;
+    const existing = await prisma_1.default.vendorFollower.findUnique({ where: { vendorId_customerId: { vendorId, customerId } } });
+    if (!existing)
+        throw new AppError_1.NotFoundError("Follow relationship");
+    await prisma_1.default.vendorFollower.delete({ where: { id: existing.id } });
+    return (0, apiResponse_1.sendSuccess)(res, {}, "Vendor unfollowed successfully.");
 };
 exports.unfollowVendor = unfollowVendor;
-// 👁️ Check if user follows a vendor
+// GET /vendor-follow/:vendorId/is-following
 const isFollowingVendor = async (req, res) => {
-    try {
-        const vendorId = (0, paramUtils_1.ensureString)(req.params.vendorId);
-        const customerId = req.user.id;
-        const follow = await prismaClient_1.default.vendorFollower.findUnique({
-            where: { vendorId_customerId: { vendorId, customerId } },
-        });
-        res.json((0, codeMessage_1.successResponse)("FOLLOW_STATUS", "Follow status fetched.", { following: !!follow }));
-    }
-    catch (err) {
-        console.error("Follow check error:", err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to check follow status."));
-    }
+    const vendorId = (0, paramUtils_1.ensureString)(req.params.vendorId);
+    const customerId = req.user.id;
+    const follow = await prisma_1.default.vendorFollower.findUnique({ where: { vendorId_customerId: { vendorId, customerId } } });
+    return (0, apiResponse_1.sendSuccess)(res, { following: !!follow }, "Follow status fetched.");
 };
 exports.isFollowingVendor = isFollowingVendor;
-// 📋 Get all followers of a vendor
+// GET /vendor-follow/:vendorId/followers
 const getVendorFollowers = async (req, res) => {
-    try {
-        const vendorId = (0, paramUtils_1.ensureString)(req.params.vendorId);
-        const followers = await prismaClient_1.default.vendorFollower.findMany({
+    const vendorId = (0, paramUtils_1.ensureString)(req.params.vendorId);
+    const { page, limit, skip } = getPagination(req);
+    // A popular vendor could have thousands of followers — this used to
+    // return every single one in one unbounded response.
+    const [followers, total] = await Promise.all([
+        prisma_1.default.vendorFollower.findMany({
             where: { vendorId },
-            include: {
-                customer: { select: { id: true, name: true, avatarUrl: true } },
-            },
-        });
-        res.json((0, codeMessage_1.successResponse)("VENDOR_FOLLOWERS", "Followers retrieved.", followers));
-    }
-    catch (err) {
-        console.error("Get vendor followers error:", err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to fetch vendor followers."));
-    }
+            include: { customer: { select: { id: true, name: true, avatarUrl: true } } },
+            orderBy: { createdAt: "desc" },
+            skip,
+            take: limit,
+        }),
+        prisma_1.default.vendorFollower.count({ where: { vendorId } }),
+    ]);
+    return (0, apiResponse_1.sendSuccess)(res, { followers }, "Followers retrieved.", 200, { page, limit, total, totalPages: Math.ceil(total / limit) });
 };
 exports.getVendorFollowers = getVendorFollowers;
-// 📋 Get all vendors a customer follows
+// GET /vendor-follow/:vendorId/follower-count
+// Lightweight — for a vendor profile header ("1,234 followers") that
+// shouldn't have to fetch every follower row just to display a count.
+const getVendorFollowerCount = async (req, res) => {
+    const vendorId = (0, paramUtils_1.ensureString)(req.params.vendorId);
+    const count = await prisma_1.default.vendorFollower.count({ where: { vendorId } });
+    return (0, apiResponse_1.sendSuccess)(res, { count }, "Follower count retrieved.");
+};
+exports.getVendorFollowerCount = getVendorFollowerCount;
+// GET /vendor-follow/following
 const getFollowedVendors = async (req, res) => {
-    try {
-        const customerId = req.user.id;
-        const follows = await prismaClient_1.default.vendorFollower.findMany({
+    const customerId = req.user.id;
+    const { page, limit, skip } = getPagination(req);
+    const [follows, total] = await Promise.all([
+        prisma_1.default.vendorFollower.findMany({
             where: { customerId },
-            include: {
-                vendor: { select: { id: true, name: true, brandName: true, brandLogo: true } },
-            },
-        });
-        res.json((0, codeMessage_1.successResponse)("FOLLOWED_VENDORS", "Followed vendors retrieved.", follows));
-    }
-    catch (err) {
-        console.error("Get followed vendors error:", err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to fetch followed vendors."));
-    }
+            include: { vendor: { select: { id: true, name: true, brandName: true, brandLogo: true } } },
+            orderBy: { createdAt: "desc" },
+            skip,
+            take: limit,
+        }),
+        prisma_1.default.vendorFollower.count({ where: { customerId } }),
+    ]);
+    return (0, apiResponse_1.sendSuccess)(res, { follows }, "Followed vendors retrieved.", 200, { page, limit, total, totalPages: Math.ceil(total / limit) });
 };
 exports.getFollowedVendors = getFollowedVendors;

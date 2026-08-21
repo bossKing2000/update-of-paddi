@@ -2,6 +2,7 @@ import { Payment, Order, OrderItem } from "@prisma/client";
 import { nowUtc, addMinutesUtc, isAfterUtc } from "../../utils/time";
 import { OrderStatus } from "@prisma/client";
 import prisma from "../../config/prismaClient";
+import { logger } from "../../lib/logger";
 
 /**
  * 🧹 Automatically cancels expired or offline orders in batches
@@ -12,7 +13,7 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
   let offlineUpdated = 0;
 
   try {
-    console.log("🧹 Running order cleanup job (UTC)...", now.toISOString());
+    logger.info({ now: now.toISOString() }, "Running order cleanup job");
 
     let loopCounter = 0;
 
@@ -110,8 +111,8 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
 
-    console.log(`✅ Cleanup done (UTC) → Offline cancelled: ${offlineUpdated}`);
+    logger.info({ offlineUpdated }, "Order cleanup job complete");
   } catch (err: any) {
-    console.error("❌ Error in order cleanup job:", err instanceof Error ? err.message : err);
+    logger.error({ err }, "Error in order cleanup job");
   }
 };

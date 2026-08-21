@@ -6,21 +6,23 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.processWebhooks = processWebhooks;
 const prisma_1 = __importDefault(require("../../../lib/prisma"));
 const paymentService_1 = require("../../../services/paymentService");
+const paymentFinalizer_service_1 = require("../../../services/paymentFinalizer.service");
+const client_1 = require("@prisma/client");
 async function processWebhooks() {
     const pendingEvents = await prisma_1.default.webhookEvent.findMany({
-        where: { status: 'pending' },
+        where: { status: "pending" },
     });
     for (const evt of pendingEvents) {
         try {
             // Mark as processing
             await prisma_1.default.webhookEvent.update({
                 where: { id: evt.id },
-                data: { status: 'processing' },
+                data: { status: "processing" },
             });
             if (!evt.payload) {
                 await prisma_1.default.webhookEvent.update({
                     where: { id: evt.id },
-                    data: { status: 'failed' },
+                    data: { status: "failed" },
                 });
                 continue;
             }
@@ -29,10 +31,10 @@ async function processWebhooks() {
             const payment = await prisma_1.default.payment.findUnique({
                 where: { reference: payload.data.reference },
             });
-            if (payment?.status === 'success') {
+            if (payment?.status === client_1.PaymentStatus.SUCCESS) {
                 await prisma_1.default.webhookEvent.update({
                     where: { id: evt.id },
-                    data: { status: 'done', processedAt: new Date() },
+                    data: { status: "done", processedAt: new Date() },
                 });
                 continue;
             }
@@ -44,23 +46,43 @@ async function processWebhooks() {
                 console.error(`[WEBHOOK] Order not found for ID ${payload.data.metadata.orderId}`);
                 await prisma_1.default.webhookEvent.update({
                     where: { id: evt.id },
-                    data: { status: 'failed' },
+                    data: { status: "failed" },
                 });
                 continue;
             }
-            // Call the payment handler with the full Order object
-            await (0, paymentService_1.handleSuccessfulPayment)(order, payload.data.reference);
+            // Confirm with Paystack and finalize the payment if successful
+            try {
+                const data = await (0, paymentService_1.verifyPayment)(payload.data.reference);
+                if (data.status === "success") {
+                    await (0, paymentFinalizer_service_1.finalizePaymentSuccess)({
+                        reference: data.reference,
+                        amountInNaira: data.amount / 100,
+                        customerIdFromGateway: data.metadata?.userId,
+                        channel: data.channel,
+                        paystackData: data,
+                        authorization: data.authorization,
+                    });
+                }
+            }
+            catch (err) {
+                console.error("[WEBHOOK] Paystack verify failed:", err);
+                await prisma_1.default.webhookEvent.update({
+                    where: { id: evt.id },
+                    data: { status: "failed" },
+                });
+                continue;
+            }
             // Mark webhook as done
             await prisma_1.default.webhookEvent.update({
                 where: { id: evt.id },
-                data: { status: 'done', processedAt: new Date() },
+                data: { status: "done", processedAt: new Date() },
             });
         }
         catch (err) {
-            console.error('[WEBHOOK] Processing error:', err.message || err);
+            console.error("[WEBHOOK] Processing error:", err.message || err);
             await prisma_1.default.webhookEvent.update({
                 where: { id: evt.id },
-                data: { status: 'failed' },
+                data: { status: "failed" },
             });
         }
     }

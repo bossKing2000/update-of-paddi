@@ -38,3 +38,14 @@ export const orderIdParamsSchema = z.object({
 export const notificationIdParamsSchema = z.object({
   notificationId: z.string()
 });
+
+export const createSpecialRequestSchema = z.object({
+  productId: z.string().uuid(),
+  quantity: z.number().int().min(1),
+  details: z.string().min(1).max(1000),
+});
+
+export const createSpecialOfferSchema = z.object({
+  price: z.coerce.number().positive(),
+  message: z.string().max(1000).optional(),
+});

@@ -1,6 +1,7 @@
 // src/jobs/getSearchAnalytics.ts
 import "dotenv/config";
 import { redisSearch } from "../../lib/redis";
+import { scanKeys } from "../../lib/redisScan";
 import fs from "fs";
 
 /**
@@ -8,7 +9,7 @@ import fs from "fs";
  */
 async function getAllSearchKeywords(): Promise<string[]> {
   // Fetch all keys with pattern search:*:hits
-  const keys = await redisSearch.keys("search:*:hits");
+  const keys = await scanKeys(redisSearch, "search:*:hits");
   // Extract the keyword part from each key
   return keys.map((key) => key.replace(/^search:(.*):hits$/, "$1"));
 }

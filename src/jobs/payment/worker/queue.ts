@@ -1,5 +1,7 @@
 import prisma from "../../../lib/prisma";
-import { handleSuccessfulPayment } from "../../../services/paymentService";
+import { verifyPayment } from "../../../services/paymentService";
+import { finalizePaymentSuccess } from "../../../services/paymentFinalizer.service";
+import { PaymentStatus } from "@prisma/client";
 
 type PaystackWebhookPayload = {
   event: string;
@@ -11,7 +13,7 @@ type PaystackWebhookPayload = {
 
 export async function processWebhooks() {
   const pendingEvents = await prisma.webhookEvent.findMany({
-    where: { status: 'pending' },
+    where: { status: "pending" },
   });
 
   for (const evt of pendingEvents) {
@@ -19,13 +21,13 @@ export async function processWebhooks() {
       // Mark as processing
       await prisma.webhookEvent.update({
         where: { id: evt.id },
-        data: { status: 'processing' },
+        data: { status: "processing" },
       });
 
       if (!evt.payload) {
         await prisma.webhookEvent.update({
           where: { id: evt.id },
-          data: { status: 'failed' },
+          data: { status: "failed" },
         });
         continue;
       }
@@ -37,10 +39,10 @@ export async function processWebhooks() {
         where: { reference: payload.data.reference },
       });
 
-      if (payment?.status === 'success') {
+      if (payment?.status === PaymentStatus.SUCCESS) {
         await prisma.webhookEvent.update({
           where: { id: evt.id },
-          data: { status: 'done', processedAt: new Date() },
+          data: { status: "done", processedAt: new Date() },
         });
         continue;
       }
@@ -51,28 +53,48 @@ export async function processWebhooks() {
       });
 
       if (!order) {
-        console.error(`[WEBHOOK] Order not found for ID ${payload.data.metadata.orderId}`);
+        console.error(
+          `[WEBHOOK] Order not found for ID ${payload.data.metadata.orderId}`,
+        );
         await prisma.webhookEvent.update({
           where: { id: evt.id },
-          data: { status: 'failed' },
+          data: { status: "failed" },
         });
         continue;
       }
 
-      // Call the payment handler with the full Order object
-      await handleSuccessfulPayment(order, payload.data.reference);
+      // Confirm with Paystack and finalize the payment if successful
+      try {
+        const data = await verifyPayment(payload.data.reference);
+        if (data.status === "success") {
+          await finalizePaymentSuccess({
+            reference: data.reference,
+            amountInNaira: data.amount / 100,
+            customerIdFromGateway: data.metadata?.userId,
+            channel: data.channel,
+            paystackData: data,
+            authorization: data.authorization,
+          });
+        }
+      } catch (err) {
+        console.error("[WEBHOOK] Paystack verify failed:", err);
+        await prisma.webhookEvent.update({
+          where: { id: evt.id },
+          data: { status: "failed" },
+        });
+        continue;
+      }
 
       // Mark webhook as done
       await prisma.webhookEvent.update({
         where: { id: evt.id },
-        data: { status: 'done', processedAt: new Date() },
+        data: { status: "done", processedAt: new Date() },
       });
-
     } catch (err: any) {
-      console.error('[WEBHOOK] Processing error:', err.message || err);
+      console.error("[WEBHOOK] Processing error:", err.message || err);
       await prisma.webhookEvent.update({
         where: { id: evt.id },
-        data: { status: 'failed' },
+        data: { status: "failed" },
       });
     }
   }

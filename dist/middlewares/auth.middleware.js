@@ -3,69 +3,64 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.authorizeDeliveryPerson = exports.authorizeCustomer = exports.authorizeVendor = exports.authenticate = void 0;
+exports.authorizeAdmin = exports.authorizeDeliveryPerson = exports.authorizeCustomer = exports.authorizeVendor = exports.requireRole = exports.authenticate = void 0;
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const config_1 = __importDefault(require("../config/config"));
 const session_1 = require("../lib/session");
-// ✅ Middleware: Authenticate JWT + verify active session in Redis
-const authenticate = async (req, res, next) => {
+const AppError_1 = require("../errors/AppError");
+// Middleware: Authenticate JWT + verify the specific per-device session is
+// still active in Redis (also enables server-side logout/revocation of
+// one device without affecting others).
+// Throws instead of manually writing res.json — Express 5 forwards the
+// rejection to the central error middleware automatically.
+const authenticate = async (req, _res, next) => {
     const authReq = req;
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        res.status(401).json({ message: 'No token provided' });
-        return;
+        throw new AppError_1.UnauthorizedError('No token provided');
     }
     const token = authHeader.split(' ')[1];
+    let decoded;
     try {
-        // Decode and verify token
-        const decoded = jsonwebtoken_1.default.verify(token, config_1.default.jwtSecret);
-        // Check if user session exists in Redis (optional but good for logout tracking)
-        const session = await (0, session_1.getUserSession)(decoded.id);
-        if (!session) {
-            res.status(401).json({ message: 'Session expired or not found. Please log in again.' });
-            return;
-        }
-        // Attach user to request
-        authReq.user = {
-            id: decoded.id,
-            role: decoded.role,
-            name: decoded.name,
-            email: decoded.email,
-        };
-        next();
+        decoded = jsonwebtoken_1.default.verify(token, config_1.default.jwtSecret);
     }
-    catch (err) {
-        console.error('Auth error:', err);
-        res.status(401).json({ message: 'Invalid or expired token' });
+    catch {
+        throw new AppError_1.UnauthorizedError('Invalid or expired token');
     }
+    if (!decoded.sessionId) {
+        // A token signed before this session redesign (or malformed) —
+        // reject cleanly rather than crashing on a missing session lookup key.
+        throw new AppError_1.UnauthorizedError('Session expired or not found. Please log in again.');
+    }
+    const session = await (0, session_1.getUserSession)(decoded.id, decoded.sessionId);
+    if (!session) {
+        throw new AppError_1.UnauthorizedError('Session expired or not found. Please log in again.');
+    }
+    authReq.user = {
+        id: decoded.id,
+        role: decoded.role,
+        sessionId: decoded.sessionId,
+    };
+    next();
 };
 exports.authenticate = authenticate;
-// ✅ Middleware: Only allow vendors
-const authorizeVendor = (req, res, next) => {
-    const authReq = req;
-    if (authReq.user?.role !== 'VENDOR') {
-        res.status(403).json({ message: 'Access denied: vendors only' });
-        return;
-    }
-    next();
+// Generic role-gate middleware factory. All the role-specific middlewares
+// below are thin wrappers around this — one implementation, consistent
+// behavior, easy to extend (e.g. requireRole('VENDOR', 'ADMIN')).
+const requireRole = (...roles) => {
+    return (req, _res, next) => {
+        const authReq = req;
+        if (!authReq.user) {
+            throw new AppError_1.UnauthorizedError('Authentication required');
+        }
+        if (!roles.includes(authReq.user.role)) {
+            throw new AppError_1.ForbiddenError(`Access denied: requires one of [${roles.join(', ')}]`);
+        }
+        next();
+    };
 };
-exports.authorizeVendor = authorizeVendor;
-const authorizeCustomer = (req, res, next) => {
-    const authReq = req;
-    if (authReq.user?.role !== 'CUSTOMER') {
-        res.status(403).json({ message: 'Access denied: Customers only' });
-        return;
-    }
-    next();
-};
-exports.authorizeCustomer = authorizeCustomer;
-const authorizeDeliveryPerson = (req, res, next) => {
-    const authReq = req;
-    console.log("Delivery auth check -> req.user:", authReq.user);
-    if (authReq.user?.role !== 'DELIVERY') {
-        res.status(403).json({ message: 'Access denied: Delivery persons only' });
-        return;
-    }
-    next();
-};
-exports.authorizeDeliveryPerson = authorizeDeliveryPerson;
+exports.requireRole = requireRole;
+exports.authorizeVendor = (0, exports.requireRole)('VENDOR');
+exports.authorizeCustomer = (0, exports.requireRole)('CUSTOMER');
+exports.authorizeDeliveryPerson = (0, exports.requireRole)('DELIVERY');
+exports.authorizeAdmin = (0, exports.requireRole)('ADMIN');

@@ -60,9 +60,13 @@ export class DashboardController {
   async getRevenueOverview(req: AuthRequest, res: Response<ApiResponse<any>>) {
     try {
       if (!req.user) return res.status(401).json({ status: false, message: "Unauthorized", data: null });
+      const period = req.query.period;
+      if (period && period !== "thisWeek" && period !== "lastWeek" && period !== "lastMonth") {
+        return res.status(400).json({ status: false, message: "period must be thisWeek, lastWeek, or lastMonth", data: null });
+      }
 
       const service = new VendorDashboardService(req.user.id);
-      const data = await service.getRevenueOverview();
+      const data = await service.getRevenueOverview(period as "thisWeek" | "lastWeek" | "lastMonth" | undefined);
 
       return res.status(200).json({ 
         status: true, 

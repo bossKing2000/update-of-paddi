@@ -1,120 +1,73 @@
-// src/controllers/webhook.ts (FIXED VERSION)
-import { Request, Response } from 'express';
-import crypto from 'crypto';
-import retry from 'async-retry';
-import { PrismaClient, OrderStatus } from '@prisma/client';
-import { validatePaystackSignature } from '../utils/paystack';
-import { nowUtc, toUtc, isBeforeUtc } from '../utils/time';
-
-const prisma = new PrismaClient();
+import { Request, Response } from "express";
+import crypto from "crypto";
+import { validatePaystackSignature } from "../utils/paystack";
+import prisma from "../lib/prisma";
+import { redisPayments } from "../lib/redis";
+import { logger } from "../lib/logger";
+import { createAuditLog } from "../utils/auditLog.service";
+import { finalizePaymentSuccess } from "../services/paymentFinalizer.service";
 
 // ==================== CONSTANTS ====================
-const WEBHOOK_TTL = 24 * 60 * 60 * 1000; // 24 hours
-const MAX_RETRIES = 3;
-const RETRY_MIN_TIMEOUT = 1000;
-const RETRY_MAX_TIMEOUT = 10000;
-const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
+const REPLAY_TTL_SECONDS = 24 * 60 * 60; // 24 hours
+const RATE_LIMIT_WINDOW_SECONDS = 15 * 60;
 const MAX_REQUESTS_PER_WINDOW = 100;
 
-// Status constants for consistency
-const PAYMENT_SUCCESS = 'SUCCESS';
-const PAYMENT_FAILED = 'FAILED';
-const PAYMENT_EXPIRED = 'EXPIRED';
-const PAYMENT_AMOUNT_MISMATCH = 'AMOUNT_MISMATCH';
-
-const PAYABLE_ORDER_STATUSES: OrderStatus[] = [
-  OrderStatus.AWAITING_PAYMENT,
-  OrderStatus.PENDING,
-];
-
-const CANCELLABLE_ORDER_STATUSES: OrderStatus[] = [
-  OrderStatus.AWAITING_PAYMENT,
-  OrderStatus.PENDING,
-];
-
-// ==================== IN-MEMORY STORES ====================
-const processedWebhooks = new Map<string, number>();
-const requestCounts = new Map<string, { count: number; resetTime: number }>();
-
-// Clean up old webhook IDs periodically
-setInterval(() => {
-  const now = Date.now();
-  
-  for (const [webhookId, timestamp] of processedWebhooks.entries()) {
-    if (now - timestamp > WEBHOOK_TTL) {
-      processedWebhooks.delete(webhookId);
-    }
+// ==================== RATE LIMITING (Redis-backed) ====================
+// Previously an in-memory Map keyed by IP. That only works within a
+// single process — on any multi-instance deployment (the normal case in
+// production) each instance had its own independent counter, so the
+// limit was never actually enforced against the real aggregate request
+// rate. Redis makes the counter shared and correct regardless of how
+// many instances are running.
+async function checkRateLimit(
+  ip: string,
+): Promise<{ allowed: boolean; retryAfter?: number }> {
+  const key = `webhook:ratelimit:${ip}`;
+  const count = await redisPayments.incr(key);
+  if (count === 1) {
+    await redisPayments.expire(key, RATE_LIMIT_WINDOW_SECONDS);
   }
-  
-  for (const [ip, data] of requestCounts.entries()) {
-    if (now > data.resetTime) {
-      requestCounts.delete(ip);
-    }
+  if (count > MAX_REQUESTS_PER_WINDOW) {
+    const ttl = await redisPayments.ttl(key);
+    return {
+      allowed: false,
+      retryAfter: ttl > 0 ? ttl : RATE_LIMIT_WINDOW_SECONDS,
+    };
   }
-}, 60 * 60 * 1000);
-
-// ==================== UTILITY FUNCTIONS ====================
-
-function rateLimit(req: Request): { allowed: boolean; resetTime?: number } {
-  const ip = req.ip || 'unknown';
-  const now = Date.now();
-  
-  const data = requestCounts.get(ip);
-  
-  if (!data || now > data.resetTime) {
-    requestCounts.set(ip, {
-      count: 1,
-      resetTime: now + RATE_LIMIT_WINDOW
-    });
-    return { allowed: true };
-  }
-  
-  if (data.count >= MAX_REQUESTS_PER_WINDOW) {
-    return { allowed: false, resetTime: data.resetTime };
-  }
-  
-  data.count++;
   return { allowed: true };
 }
 
-function generateWebhookId(eventPayload: any, timestamp: number): string {
-  const payloadString = JSON.stringify(eventPayload);
+// ==================== REPLAY PROTECTION (Redis-backed) ====================
+// Same fix as rate limiting: an in-memory Map means a webhook retried
+// against a different instance (or after a restart/deploy) was never
+// recognized as a replay. Also fixed: the old dedup key included
+// `process.pid` and a fresh timestamp, which meant a genuine Paystack
+// retry of the exact same event looked like a brand-new, never-seen
+// webhook every time — replay protection that could never actually fire.
+// The key here is derived only from the event's own stable fields.
+function computeWebhookId(eventPayload: any): string {
+  const stable = {
+    event: eventPayload?.event,
+    reference: eventPayload?.data?.reference,
+    amount: eventPayload?.data?.amount,
+  };
   return crypto
-    .createHash('sha256')
-    .update(`${payloadString}-${timestamp}-${process.pid}`)
-    .digest('hex');
+    .createHash("sha256")
+    .update(JSON.stringify(stable))
+    .digest("hex");
 }
 
-function isWebhookProcessed(webhookId: string): boolean {
-  return processedWebhooks.has(webhookId);
+async function claimWebhookOnce(webhookId: string): Promise<boolean> {
+  // SET ... NX EX is an atomic "claim if not already claimed" — no
+  // separate check-then-set race window.
+  const result = await redisPayments.set(`webhook:seen:${webhookId}`, "1", {
+    NX: true,
+    EX: REPLAY_TTL_SECONDS,
+  });
+  return result !== null;
 }
 
-function markWebhookProcessed(webhookId: string): void {
-  processedWebhooks.set(webhookId, Date.now());
-}
-
-async function sendAlert(level: 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL', title: string, details: any) {
-  console.log(`[ALERT:${level}] ${title}`, details);
-}
-
-async function createAuditLog(action: string, userId: string | null, metadata: any) {
-  try {
-    await prisma.auditLog.create({
-      data: {
-        action,
-        userId,
-        metadata,
-        ipAddress: metadata.ip || 'unknown',
-        userAgent: metadata.userAgent || 'unknown',
-        path: metadata.path || 'webhook',
-        createdAt: nowUtc(),
-      },
-    });
-  } catch (error) {
-    console.error('[AUDIT] Failed to create log:', error);
-  }
-}
-
+// ==================== VALIDATION ====================
 function validatePaystackWebhook(payload: any): {
   valid: boolean;
   data?: {
@@ -122,10 +75,8 @@ function validatePaystackWebhook(payload: any): {
     data: {
       reference: string;
       amount: number;
-      metadata?: {
-        orderId: string;
-        userId: string;
-      };
+      channel?: string;
+      metadata?: { orderId?: string; userId?: string };
       authorization?: {
         authorization_code: string;
         last4: string;
@@ -137,547 +88,284 @@ function validatePaystackWebhook(payload: any): {
   };
   error?: string;
 } {
-  try {
-    if (!payload || typeof payload !== 'object') {
-      return { valid: false, error: 'Invalid payload format' };
-    }
-    
-    if (payload.event !== 'charge.success') {
-      return { valid: false, error: 'Unsupported event type' };
-    }
-    
-    if (!payload.data?.reference) {
-      return { valid: false, error: 'Missing reference' };
-    }
-    
-    if (!payload.data?.amount) {
-      return { valid: false, error: 'Missing amount' };
-    }
-    
-    if (!payload.data?.metadata?.userId || !payload.data?.metadata?.orderId) {
-      return { valid: false, error: 'Missing required metadata' };
-    }
-    
-    return { valid: true, data: payload };
-  } catch (error) {
-    return { valid: false, error: 'Validation failed' };
-  }
-}
-
-async function processWithRetry<T>(
-  fn: () => Promise<T>,
-  context: { reference: string; webhookId: string }
-): Promise<T> {
-  return retry(
-    async (bail: (error: Error) => void, attempt: number) => {
-      try {
-        const result = await fn();
-        console.log(`[WEBHOOK] ✅ ${context.reference} processed on attempt ${attempt}`);
-        return result;
-      } catch (error: any) {
-        console.error(`[WEBHOOK] ❌ Attempt ${attempt} failed for ${context.reference}:`, error.message);
-        
-        if (attempt === MAX_RETRIES) {
-          await sendAlert('ERROR', 'Webhook Processing Failed', {
-            reference: context.reference,
-            webhookId: context.webhookId,
-            error: error.message,
-            attempts: attempt,
-          });
-        }
-        
-        if (error.code === 'P2025') {
-          bail(new Error(`Record not found: ${context.reference}`));
-          throw error;
-        }
-        
-        if (error.code === 'P2002') {
-          bail(new Error(`Duplicate processing: ${context.reference}`));
-          throw error;
-        }
-        
-        throw error;
-      }
-    },
-    {
-      retries: MAX_RETRIES,
-      factor: 2,
-      minTimeout: RETRY_MIN_TIMEOUT,
-      maxTimeout: RETRY_MAX_TIMEOUT,
-    }
-  );
+  if (!payload || typeof payload !== "object")
+    return { valid: false, error: "Invalid payload format" };
+  if (
+    !["charge.success", "transfer.success", "transfer.failed"].includes(
+      payload.event,
+    )
+  )
+    return { valid: false, error: "Unsupported event type" };
+  if (!payload.data?.reference)
+    return { valid: false, error: "Missing reference" };
+  if (!payload.data?.amount) return { valid: false, error: "Missing amount" };
+  return { valid: true, data: payload };
 }
 
 // ==================== MAIN WEBHOOK HANDLER ====================
 
 export const paystackWebhookHandler = async (req: Request, res: Response) => {
   const startTime = Date.now();
-  const requestId = crypto.randomBytes(16).toString('hex');
-  
+  const requestId = crypto.randomBytes(16).toString("hex");
+  const log = logger.child({ requestId, scope: "webhook" });
+  let claimedWebhookId: string | null = null;
+
   try {
-    // 1️⃣ RATE LIMITING
-    const rateLimitResult = rateLimit(req);
+    // 1) RATE LIMITING
+    const rateLimitResult = await checkRateLimit(req.ip || "unknown");
     if (!rateLimitResult.allowed) {
-      await createAuditLog('WEBHOOK_RATE_LIMITED', null, {
-        requestId,
-        ip: req.ip,
-        userAgent: req.get('user-agent'),
-        path: req.path,
-        resetTime: rateLimitResult.resetTime,
+      log.warn({ ip: req.ip }, "Webhook rate limited");
+      await createAuditLog({
+        userId: null,
+        action: "WEBHOOK_RATE_LIMITED",
+        metadata: { requestId, ip: req.ip },
       });
-      
-      await sendAlert('WARNING', 'Webhook Rate Limited', {
-        requestId,
-        ip: req.ip,
-        resetTime: rateLimitResult.resetTime,
-      });
-      
       return res.status(429).json({
-        error: 'Rate limit exceeded',
-        retryAfter: rateLimitResult.resetTime 
-          ? Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000)
-          : RATE_LIMIT_WINDOW / 1000,
+        error: "Rate limit exceeded",
+        retryAfter: rateLimitResult.retryAfter,
       });
     }
-    
-    // 2️⃣ VALIDATE RAW BODY & SIGNATURE
+
+    // 2) VALIDATE RAW BODY & SIGNATURE
     const rawBody = req.body;
     if (!Buffer.isBuffer(rawBody)) {
-      console.error(`[WEBHOOK:${requestId}] ❌ Raw body must be a Buffer`);
-      return res.status(400).send('Invalid body format');
+      log.error(
+        "Raw body must be a Buffer — check express.raw() is mounted before this route",
+      );
+      return res.status(400).send("Invalid body format");
     }
-    
-    const signature = req.headers['x-paystack-signature'] as string | undefined;
-    
-    // ✅ FIXED: Add null check for signature
+
+    const signature = req.headers["x-paystack-signature"] as string | undefined;
     if (!signature || !validatePaystackSignature(rawBody, signature)) {
-      console.warn(`[WEBHOOK:${requestId}] ❌ Invalid signature`);
-      
-      await createAuditLog('WEBHOOK_SIGNATURE_INVALID', null, {
-        requestId,
-        ip: req.ip,
-        signatureProvided: signature,
+      log.warn({ ip: req.ip }, "Invalid webhook signature");
+      await createAuditLog({
+        userId: null,
+        action: "WEBHOOK_SIGNATURE_INVALID",
+        metadata: { requestId, ip: req.ip },
       });
-      
-      await sendAlert('WARNING', 'Invalid Webhook Signature', {
-        requestId,
-        ip: req.ip,
-        signatureProvided: signature,
-      });
-      
-      return res.status(401).send('Unauthorized: Invalid signature');
+      return res.status(401).send("Unauthorized: Invalid signature");
     }
-    
-    // 3️⃣ PARSE AND VALIDATE PAYLOAD
-    let eventPayload;
+
+    // 3) PARSE PAYLOAD
+    let eventPayload: any;
     try {
       eventPayload = JSON.parse(rawBody.toString());
-    } catch (error) {
-      console.error(`[WEBHOOK:${requestId}] ❌ Failed to parse JSON`);
-      return res.status(400).send('Invalid JSON');
+    } catch {
+      log.error("Failed to parse webhook JSON");
+      return res.status(400).send("Invalid JSON");
     }
-    
+
     const validation = validatePaystackWebhook(eventPayload);
     if (!validation.valid || !validation.data) {
-      console.error(`[WEBHOOK:${requestId}] ❌ Validation failed: ${validation.error}`);
+      log.error(
+        { error: validation.error },
+        "Webhook payload validation failed",
+      );
       return res.status(400).send(`Invalid payload: ${validation.error}`);
     }
-    
-    const { event, data } = validation.data;
-    
-    // Generate webhook ID for replay protection
-    const webhookId = generateWebhookId(eventPayload, startTime);
-    
-    // 4️⃣ REPLAY PROTECTION
-    if (isWebhookProcessed(webhookId)) {
-      console.log(`[WEBHOOK:${requestId}] ⚠️ Replay detected`);
-      
-      await createAuditLog('WEBHOOK_REPLAY', data.metadata?.userId || null, {
-        requestId,
-        webhookId,
-        reference: data.reference,
-        ip: req.ip,
-      });
-      
-      return res.status(200).send('Webhook already processed');
+
+    const { data, event } = validation.data;
+
+    // 4) REPLAY PROTECTION
+    const webhookId = computeWebhookId(eventPayload);
+    claimedWebhookId = webhookId;
+    const claimed = await claimWebhookOnce(webhookId);
+    if (!claimed) {
+      log.info(
+        { reference: data.reference },
+        "Replay detected, already processed",
+      );
+      return res.status(200).send("Webhook already processed");
     }
-    
-    const { reference, amount, metadata, authorization } = data;
-    const now = nowUtc();
-    
-    // ✅ FIXED: Add null check for metadata
-    if (!metadata) {
-      console.error(`[WEBHOOK:${requestId}] ❌ Missing metadata`);
-      return res.status(400).send('Missing required metadata');
-    }
-    
-    // 5️⃣ LOG WEBHOOK RECEIPT
-    await createAuditLog('WEBHOOK_RECEIVED', metadata.userId, {
-      requestId,
-      webhookId,
-      event,
-      reference,
-      amount,
-      ip: req.ip,
-      userAgent: req.get('user-agent'),
-      path: req.path,
+
+    const { reference, amount, metadata, authorization, channel } = data;
+
+    await createAuditLog({
+      userId: metadata?.userId || null,
+      action: "WEBHOOK_RECEIVED",
+      metadata: { requestId, webhookId, reference, amount, ip: req.ip },
     });
-    
-    // Mark as processed early
-    markWebhookProcessed(webhookId);
-    
-    // 6️⃣ PROCESS WITH RETRY LOGIC
-    await processWithRetry(async () => {
-      await prisma.$transaction(async (tx) => {
-        // 7️⃣ FETCH PAYMENT WITH ORDER
-        const payment = await tx.payment.findUnique({
-          where: { reference },
-          include: {
-            order: {
-              select: {
-                id: true,
-                customerId: true,
-                vendorId: true,
-                totalPrice: true,
-                status: true,
-                paymentStatus: true,
-                paymentInitiatedAt: true,
-                paidAt: true,
-                protectedUntil: true,
-                paymentGraceMinutes: true,
-              },
+
+    // 5) SETTLE RIDER TRANSFERS. Wallets are debited only once a signed
+    // transfer-success webhook arrives; a transfer failure releases the
+    // reservation by marking the withdrawal FAILED without a wallet debit.
+    if (event === "transfer.success" || event === "transfer.failed") {
+      const vendorPayout = await prisma.vendorPayout.findFirst({
+        where: { OR: [{ reference: data.reference }, { id: data.reference }] },
+      });
+      if (vendorPayout) {
+        const expectedAmount = Math.round(vendorPayout.amount * 100);
+        if (Number(data.amount) !== expectedAmount) {
+          log.warn(
+            {
+              payoutId: vendorPayout.id,
+              reference: data.reference,
+              expectedAmount,
+              receivedAmount: data.amount,
             },
+            "Vendor payout webhook amount mismatch",
+          );
+          return res.status(200).send("Vendor payout webhook ignored");
+        }
+
+        if (vendorPayout.status !== "PROCESSING")
+          return res.status(200).send("Vendor payout already settled");
+        const settled = await prisma.vendorPayout.updateMany({
+          where: { id: vendorPayout.id, status: "PROCESSING" },
+          data:
+            event === "transfer.success"
+              ? { status: "PAID", paidAt: new Date(), failureReason: null }
+              : {
+                  status: "FAILED",
+                  failureReason: String(
+                    eventPayload.data?.gateway_response ||
+                      eventPayload.data?.message ||
+                      "Transfer failed",
+                  ).slice(0, 500),
+                },
+        });
+        if (settled.count === 1) {
+          await createAuditLog({
+            userId: null,
+            action:
+              event === "transfer.success"
+                ? "VENDOR_PAYOUT_TRANSFER_SUCCEEDED"
+                : "VENDOR_PAYOUT_TRANSFER_FAILED",
+            metadata: {
+              payoutId: vendorPayout.id,
+              vendorId: vendorPayout.vendorId,
+              reference: data.reference,
+              amount: vendorPayout.amount,
+            },
+          });
+        }
+        return res.status(200).send("Vendor payout webhook processed");
+      }
+
+      const withdrawal = await prisma.riderWithdrawal.findUnique({
+        where: { reference: data.reference },
+      });
+      if (!withdrawal) return res.status(200).send("Transfer webhook ignored");
+      if (withdrawal.status !== "PROCESSING")
+        return res.status(200).send("Transfer already settled");
+      if (event === "transfer.success") {
+        await prisma.$transaction([
+          prisma.riderWithdrawal.update({
+            where: { id: withdrawal.id },
+            data: { status: "PAID", processedAt: new Date() },
+          }),
+          prisma.deliveryPerson.update({
+            where: { id: withdrawal.deliveryPersonId },
+            data: { walletBalance: { decrement: withdrawal.amount } },
+          }),
+        ]);
+        await createAuditLog({
+          userId: null,
+          action: "RIDER_WITHDRAWAL_TRANSFER_SUCCEEDED",
+          metadata: {
+            withdrawalId: withdrawal.id,
+            reference: data.reference,
+            amount: withdrawal.amount,
           },
         });
-        
-        if (!payment || !payment.order) {
-          console.error(`[WEBHOOK:${requestId}] ❌ Payment not found: ${reference}`);
-          throw new Error(`Payment not found: ${reference}`);
-        }
-        
-        const order = payment.order;
-        const amountInNaira = amount / 100;
-        
-        // 8️⃣ IDEMPOTENCY CHECK
-        if (payment.status === PAYMENT_SUCCESS) {
-          console.log(`[WEBHOOK:${requestId}] ℹ️ Payment already successful: ${reference}`);
-          
-          if (order.paymentStatus !== PAYMENT_SUCCESS) {
-            await tx.order.update({
-              where: { id: order.id },
-              data: { paymentStatus: PAYMENT_SUCCESS },
-            });
-          }
-          
-          return;
-        }
-        
-        // 9️⃣ VALIDATE CUSTOMER CONSISTENCY
-        if (order.customerId !== metadata.userId) {
-          console.warn(`[WEBHOOK:${requestId}] ⚠️ Customer mismatch for ${reference}`);
-          
-          await createAuditLog('WEBHOOK_CUSTOMER_MISMATCH', order.customerId, {
-            requestId,
-            webhookId,
-            reference,
-            orderCustomerId: order.customerId,
-            metadataCustomerId: metadata.userId,
-            ip: req.ip,
-          });
-          
-          throw new Error(`Customer ID mismatch for ${reference}`);
-        }
-        
-        // 🔟 VALIDATE AMOUNT
-        if (Math.abs(amountInNaira - order.totalPrice) > 1) {
-          console.warn(`[WEBHOOK:${requestId}] ⚠️ Amount mismatch for ${reference}`);
-          
-          await tx.payment.update({
-            where: { reference },
-            data: { 
-              status: PAYMENT_AMOUNT_MISMATCH,
-              updatedAt: now,
-              paystackData: eventPayload.data,
-            },
-          });
-          
-          await createAuditLog('WEBHOOK_AMOUNT_MISMATCH', order.customerId, {
-            requestId,
-            webhookId,
-            reference,
-            orderAmount: order.totalPrice,
-            paymentAmount: amountInNaira,
-            difference: Math.abs(amountInNaira - order.totalPrice),
-            ip: req.ip,
-          });
-          
-          await sendAlert('WARNING', 'Payment Amount Mismatch', {
-            requestId,
-            reference,
-            orderId: order.id,
-            expected: order.totalPrice,
-            received: amountInNaira,
-            customerId: order.customerId,
-          });
-          
-          throw new Error(`Amount mismatch for ${reference}`);
-        }
-        
-        // 1️⃣1️⃣ CHECK TIMING SAFETY
-        const protectedUntilUtc = order.protectedUntil ? toUtc(order.protectedUntil) : null;
-        const expiresAtUtc = payment.expiresAt ? toUtc(payment.expiresAt) : null;
-        
-        const isWithinProtection = protectedUntilUtc ? isBeforeUtc(now, protectedUntilUtc) : false;
-        const isBeforeExpiry = expiresAtUtc ? isBeforeUtc(now, expiresAtUtc) : false;
-        
-        if (!isWithinProtection && !isBeforeExpiry) {
-          console.warn(`[WEBHOOK:${requestId}] ⚠️ Late payment: ${reference}`);
-          
-          await tx.payment.update({
-            where: { reference },
-            data: { 
-              status: PAYMENT_EXPIRED,
-              updatedAt: now,
-              paystackData: eventPayload.data,
-            },
-          });
-          
-          // Cancel order if in cancellable state
-          if (CANCELLABLE_ORDER_STATUSES.includes(order.status)) {
-            await tx.order.update({
-              where: { id: order.id },
-              data: {
-                status: OrderStatus.CANCELLED_UNPAID,
-                cancellationReason: 'LATE_PAYMENT',
-                cancelledAt: now,
-                paymentStatus: PAYMENT_FAILED,
-              },
-            });
-          }
-          
-          await createAuditLog('WEBHOOK_LATE_PAYMENT', order.customerId, {
-            requestId,
-            webhookId,
-            reference,
-            orderId: order.id,
-            orderStatus: order.status,
-            isWithinProtection,
-            isBeforeExpiry,
-            ip: req.ip,
-          });
-          
-          await sendAlert('WARNING', 'Late Payment Received', {
-            requestId,
-            reference,
-            orderId: order.id,
-            customerId: order.customerId,
-            orderStatus: order.status,
-            isWithinProtection,
-            isBeforeExpiry,
-          });
-          
-          throw new Error(`Late payment for ${reference}`);
-        }
-        
-        // 1️⃣2️⃣ SAVE REUSABLE CARD (if applicable)
-        if (authorization?.reusable && metadata.userId) {
-          try {
-            await tx.userPaymentMethod.upsert({
-              where: { cardToken: authorization.authorization_code },
-              create: {
-                userId: metadata.userId,
-                cardToken: authorization.authorization_code,
-                last4: authorization.last4,
-                brand: authorization.brand.toLowerCase(),
-                isDefault: false,
-              },
-              update: { updatedAt: now },
-            });
-            console.log(`[WEBHOOK:${requestId}] 💳 Saved reusable card for user ${metadata.userId}`);
-          } catch (err: any) {
-            console.error(`[WEBHOOK:${requestId}] ⚠️ Failed to save card:`, err);
-          }
-        }
-        
-        // 1️⃣3️⃣ UPDATE PAYMENT AS SUCCESSFUL
-        await tx.payment.update({
-          where: { reference },
+      } else {
+        await prisma.riderWithdrawal.update({
+          where: { id: withdrawal.id },
           data: {
-            status: PAYMENT_SUCCESS,
-            completedAt: now,
-            paystackData: eventPayload.data,
-            updatedAt: now,
+            status: "FAILED",
+            failureReason: (
+              eventPayload.data?.gateway_response ||
+              eventPayload.data?.message ||
+              "Transfer failed"
+            ).slice(0, 500),
+            processedAt: new Date(),
           },
         });
-        
-        // 1️⃣4️⃣ UPDATE ORDER STATUS (FIXED CRITICAL BUG)
-        if (PAYABLE_ORDER_STATUSES.includes(order.status)) {
-          await tx.order.update({
-            where: { id: order.id },
-            data: {
-              status: OrderStatus.PAYMENT_CONFIRMED,
-              paymentStatus: PAYMENT_SUCCESS,
-              paidAt: order.paidAt || now,
-            },
-          });
-          
-          console.log(`[WEBHOOK:${requestId}] ✅ Order ${order.id} confirmed (first payment)`);
-          
-        } else if (order.status === OrderStatus.PAYMENT_CONFIRMED) {
-          if (order.paymentStatus !== PAYMENT_SUCCESS) {
-            await tx.order.update({
-              where: { id: order.id },
-              data: {
-                paymentStatus: PAYMENT_SUCCESS,
-              },
-            });
-            console.log(`[WEBHOOK:${requestId}] ℹ️ Updated paymentStatus for already-confirmed order ${order.id}`);
-          }
-          
-        } else {
-          console.warn(`[WEBHOOK:${requestId}] ⚠️ Order ${order.id} in state ${order.status}`);
-          
-          if (order.paymentStatus !== PAYMENT_SUCCESS) {
-            await tx.order.update({
-              where: { id: order.id },
-              data: {
-                paymentStatus: PAYMENT_SUCCESS,
-              },
-            });
-          }
-        }
-        
-        // 1️⃣5️⃣ CREATE SUCCESS AUDIT LOG
-        await createAuditLog('PAYMENT_SUCCESS', order.customerId, {
-          requestId,
-          webhookId,
-          reference,
-          orderId: order.id,
-          amount: amountInNaira,
-          previousOrderStatus: order.status,
-          newOrderStatus: OrderStatus.PAYMENT_CONFIRMED,
-          previousPaymentStatus: order.paymentStatus,
-          newPaymentStatus: PAYMENT_SUCCESS,
-          vendorId: order.vendorId,
-          isWithinProtection,
-          isBeforeExpiry,
-          processingTimeMs: Date.now() - startTime,
-          ip: req.ip,
+        await createAuditLog({
+          userId: null,
+          action: "RIDER_WITHDRAWAL_TRANSFER_FAILED",
+          metadata: { withdrawalId: withdrawal.id, reference: data.reference },
         });
-        
-        // 1️⃣6️⃣ SEND SUCCESS ALERT
-        await sendAlert('INFO', 'Payment Successfully Processed', {
-          requestId,
-          webhookId,
-          reference,
-          orderId: order.id,
-          amount: amountInNaira,
-          customerId: order.customerId,
-          vendorId: order.vendorId,
-          processingTimeMs: Date.now() - startTime,
-        });
-      });
-      
-    }, { reference, webhookId });
-    
-    // 1️⃣7️⃣ SUCCESS RESPONSE
-    console.log(`[WEBHOOK:${requestId}] ✅ ${reference} processed successfully`);
-    return res.status(200).send('Webhook processed successfully');
-    
-  } catch (error: any) {
-    const processingTime = Date.now() - startTime;
-    const errorMessage = error?.message || 'Unknown error';
-    
-    console.error(`[WEBHOOK:${requestId}] ❌ Processing failed after ${processingTime}ms:`, errorMessage);
-    
-    await sendAlert('ERROR', 'Webhook Processing Failed', {
-      requestId,
-      processingTimeMs: processingTime,
-      error: errorMessage,
-      stack: error?.stack,
-      path: req.path,
-      ip: req.ip,
+      }
+      return res.status(200).send("Transfer webhook processed");
+    }
+
+    // 6) FINALIZE — the one canonical implementation, shared with
+    // confirmPayment, chargeSavedCard, and the verifyPendingPayments job.
+    const result = await finalizePaymentSuccess({
+      reference,
+      amountInNaira: amount / 100,
+      customerIdFromGateway: metadata?.userId,
+      channel,
+      paystackData: eventPayload.data,
+      authorization,
     });
-    
-    return res.status(200).send('Webhook received (check logs for details)');
+
+    log.info(
+      {
+        reference,
+        outcome: result.outcome,
+        processingTimeMs: Date.now() - startTime,
+      },
+      "Webhook processed",
+    );
+
+    // Paystack only cares that we acknowledged receipt — always 200
+    // unless the request itself was malformed/unauthorized (handled
+    // above). The actual outcome is in the logs/audit trail.
+    return res.status(200).send("Webhook processed");
+  } catch (error: any) {
+    if (claimedWebhookId) {
+      await redisPayments
+        .del(`webhook:seen:${claimedWebhookId}`)
+        .catch((cleanupError) =>
+          log.warn(
+            { err: cleanupError, webhookId: claimedWebhookId },
+            "Failed to release webhook replay claim",
+          ),
+        );
+    }
+    log.error(
+      { err: error, processingTimeMs: Date.now() - startTime },
+      "Webhook processing failed",
+    );
+    // Still 200 — Paystack will retry on non-2xx, and retries of a
+    // genuinely broken payload won't succeed differently. Errors are
+    // fully visible in logs/audit; a human investigates from there.
+    return res.status(200).send("Webhook received (see logs for details)");
   }
 };
 
-// ==================== ADDITIONAL UTILITY ENDPOINTS ====================
+// ==================== UTILITY ENDPOINTS ====================
 
-export const webhookHealthCheck = async (req: Request, res: Response) => {
+export const webhookHealthCheck = async (_req: Request, res: Response) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    
-    const health = {
-      status: 'healthy',
-      timestamp: nowUtc(),
-      uptime: process.uptime(),
-      memory: process.memoryUsage(),
-      processedWebhooks: processedWebhooks.size,
-      rateLimitData: Array.from(requestCounts.entries()).map(([ip, data]) => ({
-        ip,
-        count: data.count,
-        resetTime: new Date(data.resetTime).toISOString(),
-      })),
-    };
-    
-    res.json(health);
-  } catch (error: any) {
-    console.error('[WEBHOOK-HEALTH] ❌ Health check failed:', error);
-    
-    await sendAlert('CRITICAL', 'Webhook Service Unhealthy', {
-      error: error.message,
-      timestamp: nowUtc(),
-    });
-    
-    res.status(500).json({
-      status: 'unhealthy',
-      error: error.message,
-      timestamp: nowUtc(),
-    });
+    await redisPayments.ping();
+    return res.status(200).json({ status: "ok" });
+  } catch (err) {
+    logger.error({ err }, "Webhook health check failed");
+    return res.status(503).json({ status: "degraded" });
   }
 };
 
-export const webhookStats = async (req: Request, res: Response) => {
-  try {
-    const stats = {
-      processedWebhooksCount: processedWebhooks.size,
-      rateLimitedIPs: requestCounts.size,
-      oldestProcessedWebhook: processedWebhooks.size > 0 
-        ? new Date(Math.min(...Array.from(processedWebhooks.values()))).toISOString()
-        : null,
-      memoryUsage: process.memoryUsage(),
-      uptime: process.uptime(),
-    };
-    
-    res.json(stats);
-  } catch (error: any) {
-    console.error('[WEBHOOK-STATS] ❌ Failed to get stats:', error);
-    res.status(500).json({ error: error.message });
-  }
+export const webhookStats = async (_req: Request, res: Response) => {
+  const [pending, success, failed] = await Promise.all([
+    prisma.payment.count({ where: { status: "PENDING" } }),
+    prisma.payment.count({ where: { status: "SUCCESS" } }),
+    prisma.payment.count({
+      where: { status: { in: ["FAILED", "AMOUNT_MISMATCH", "LATE_PAYMENT"] } },
+    }),
+  ]);
+  return res.status(200).json({ pending, success, failed });
 };
 
-export const cleanupWebhooks = async (req: Request, res: Response) => {
-  try {
-    const now = Date.now();
-    let cleaned = 0;
-    
-    for (const [webhookId, timestamp] of processedWebhooks.entries()) {
-      if (now - timestamp > WEBHOOK_TTL) {
-        processedWebhooks.delete(webhookId);
-        cleaned++;
-      }
-    }
-    
-    res.json({
-      success: true,
-      cleaned,
-      remaining: processedWebhooks.size,
-      message: `Cleaned ${cleaned} old webhook IDs`,
-    });
-  } catch (error: any) {
-    console.error('[WEBHOOK-CLEANUP] ❌ Cleanup failed:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
+export const cleanupWebhooks = async (_req: Request, res: Response) => {
+  // Redis TTLs (REPLAY_TTL_SECONDS) already handle cleanup automatically
+  // — nothing to do manually here anymore. Kept as a route for backward
+  // compatibility with anything that calls it.
+  return res.status(200).json({
+    message:
+      "Replay-protection entries expire automatically via Redis TTL — no manual cleanup needed",
+  });
 };

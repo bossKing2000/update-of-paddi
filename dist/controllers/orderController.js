@@ -3,407 +3,61 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.markAllNotificationsAsRead = exports.markNotificationAsRead = exports.getMyNotifications = exports.getVendorReport = exports.getCustomerOrderStats = exports.getVendorOrderStats = exports.updateOrderStatus = exports.rejectSpecialRequest = exports.acceptSpecialOffer = exports.createSpecialOffer = exports.createSpecialRequest = exports.createNormalOrder = exports.getSingleOrder = exports.getMyOrders = void 0;
+exports.rejectSpecialRequest = exports.rejectSpecialOffer = exports.acceptSpecialOffer = exports.createSpecialOffer = exports.getMySpecialRequests = exports.createSpecialRequest = exports.getVendorReport = exports.getCustomerOrderStats = exports.getVendorOrderStats = exports.updateOrderStatus = exports.getSingleOrder = exports.getMyOrders = void 0;
+exports.bucketByDay = bucketByDay;
+const uuid_1 = require("uuid");
 const prisma_1 = __importDefault(require("../lib/prisma"));
-const paramUtils_1 = require("../utils/paramUtils");
 const client_1 = require("@prisma/client");
 const dayjs_1 = __importDefault(require("dayjs"));
 const recordActivityBundle_1 = require("../utils/activityUtils/recordActivityBundle");
-const redis_1 = require("../lib/redis");
-const socket_1 = require("../socket");
-const codeMessage_1 = require("../validators/codeMessage");
-const time_1 = require("../utils/time");
-const zod_1 = require("zod");
+const notify_1 = require("../utils/activityUtils/notify");
+const paramUtils_1 = require("../utils/paramUtils");
 const clearCaches_1 = require("../services/clearCaches");
+const apiResponse_1 = require("../utils/apiResponse");
+const AppError_1 = require("../errors/AppError");
+const orderSchema_1 = require("../validations/orderSchema");
+const deliveryFee_service_1 = require("../services/deliveryFee.service");
+const referralController_1 = require("./referralController");
+const logger_1 = require("../lib/logger");
+const round = (v) => Number(v.toFixed(2));
+// Groups a flat list of {createdAt, totalPrice} rows into day buckets.
+// Used instead of Prisma's `groupBy({ by: ["createdAt"] })`, which groups
+// by the exact millisecond timestamp and therefore never actually
+// aggregates anything by day — every row lands in its own group. This was
+// silently broken in the customer order-stats trend chart before.
+function bucketByDay(rows, days) {
+    const buckets = new Map();
+    for (const d of days)
+        buckets.set(d, { count: 0, revenue: 0 });
+    for (const row of rows) {
+        const key = row.createdAt.toISOString().slice(0, 10);
+        const bucket = buckets.get(key);
+        if (bucket) {
+            bucket.count += 1;
+            bucket.revenue += row.totalPrice ?? 0;
+        }
+    }
+    return days.map((date) => ({ date, ...buckets.get(date) }));
+}
+// GET /orders - list the current user's orders (as customer or vendor)
 const getMyOrders = async (req, res) => {
-    try {
-        const userId = req.user?.id;
-        if (!userId) {
-            res.status(401).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Unauthorized"));
-            return;
-        }
-        // ---------------------------
-        // Pagination params
-        // ---------------------------
-        const page = Math.max(Number(req.query.page) || 1, 1);
-        const limit = Math.min(Number(req.query.limit) || 10, 50); // hard cap
-        const skip = (page - 1) * limit;
-        // ---------------------------
-        // Optional filters (future-proof)
-        // ---------------------------
-        const status = req.query.status;
-        const paymentStatus = req.query.paymentStatus;
-        const where = {
-            OR: [{ customerId: userId }, { vendorId: userId }],
-            ...(status && { status }),
-            ...(paymentStatus && { paymentStatus }),
-        };
-        // ---------------------------
-        // Run queries in parallel
-        // ---------------------------
-        const [orders, total] = await Promise.all([
-            prisma_1.default.order.findMany({
-                where,
-                skip,
-                take: limit,
-                orderBy: {
-                    createdAt: "desc", // 🔥 newest first
-                },
-                include: {
-                    items: {
-                        include: {
-                            product: {
-                                select: {
-                                    id: true,
-                                    name: true,
-                                    images: true,
-                                    price: true,
-                                    isLive: true,
-                                },
-                            },
-                            options: {
-                                include: {
-                                    productOption: {
-                                        select: {
-                                            id: true,
-                                            name: true,
-                                            price: true,
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                    },
-                    customer: {
-                        select: {
-                            id: true,
-                            name: true,
-                            avatarUrl: true,
-                        },
-                    },
-                    vendor: {
-                        select: {
-                            id: true,
-                            name: true,
-                            brandName: true,
-                            brandLogo: true,
-                        },
-                    },
-                    address: {
-                        select: {
-                            label: true,
-                            street: true,
-                            city: true,
-                        },
-                    },
-                    assignments: {
-                        include: {
-                            deliveryPerson: {
-                                include: {
-                                    user: {
-                                        select: {
-                                            id: true,
-                                            name: true,
-                                            phoneNumber: true,
-                                            avatarUrl: true,
-                                            brandName: true,
-                                            brandLogo: true,
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                    },
-                },
-            }),
-            prisma_1.default.order.count({ where }),
-        ]);
-        // ---------------------------
-        // Pagination meta
-        // ---------------------------
-        const totalPages = Math.ceil(total / limit);
-        res.status(200).json((0, codeMessage_1.successResponse)("ORDERS_RETRIEVED", "Orders retrieved successfully", {
-            meta: {
-                total,
-                page,
-                limit,
-                totalPages,
-                hasNext: page < totalPages,
-                hasPrev: page > 1,
-            },
-            orders,
-        }));
-    }
-    catch (error) {
-        console.error("❌ getMyOrders Error:", error);
-        res
-            .status(500)
-            .json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to retrieve orders"));
-    }
-};
-exports.getMyOrders = getMyOrders;
-// export const vendorRespondToSpecialRequest = async (
-//   req: AuthRequest,
-//   res: Response
-// ): Promise<void> => {
-//   try {
-//     const { orderId } = req.params;
-//     const { vendorNote, extraCharge } = req.body;
-//     // 1️⃣ Fetch order
-//     const order = await prisma.order.findUnique({
-//       where: { id: orderId },
-//       include: { items: true },
-//     });
-//     if (!order || order.vendorId !== req.user?.id) {
-//       res.status(403).json({ message: "Unauthorized or order not found" });
-//       return;
-//     }
-//     // 2️⃣ Compute total price
-//     const basePrice = order.items.reduce((acc, item) => acc + item.subtotal, 0);
-//     const hasExtraCharge = extraCharge && extraCharge > 0;
-//     // 3️⃣ Determine next status
-//     const nextStatus = hasExtraCharge
-//       ? "WAITING_CUSTOMER_APPROVAL"
-//       : "AWAITING_PAYMENT";
-//     // 4️⃣ Update order
-//     const updatedOrder = await prisma.order.update({
-//       where: { id: orderId },
-//       data: {
-//         vendorNote,
-//         extraCharge,
-//         totalPrice: basePrice + (extraCharge || 0),
-//         status: nextStatus,
-//       },
-//     });
-//     // 5️⃣ Record vendor activity + notify customer
-//     const message = hasExtraCharge
-//       ? `The vendor responded to your special request with an extra charge of ₦${extraCharge}.`
-//       : "The vendor has accepted your special request. You can now proceed to payment.";
-//     await recordActivityBundle({
-//       actorId: req.user.id,
-//       orderId,
-//       actions: [
-//         {
-//           type: ActivityType.GENERAL,
-//           title: "Vendor Response to Special Request",
-//           message,
-//           targetId: order.customerId,
-//           socketEvent: "ORDER",
-//           metadata: {
-//             orderId: updatedOrder.id,
-//             vendorNote,
-//             extraCharge,
-//             newStatus: nextStatus,
-//           },
-//           relation: "customer",
-//         },
-//       ],
-//       audit: {
-//         action: "VENDOR_RESPONDED_SPECIAL_REQUEST",
-//         metadata: {
-//           orderId,
-//           vendorId: req.user.id,
-//           customerId: order.customerId,
-//           vendorNote,
-//           extraCharge,
-//           nextStatus,
-//         },
-//       },
-//       notifyRealtime: true,
-//       notifyPush: true,
-//     });
-//     // 6️⃣ Send success response
-//     res.status(200).json(
-//       successResponse("ORDER_UPDATED", "Vendor response saved successfully", updatedOrder)
-//     );
-//   } catch (err) {
-//     console.error("Vendor response error:", err);
-//     res
-//       .status(500)
-//       .json(errorResponse("SERVER_ERROR", "Something went wrong on the server"));
-//   }
-// };
-// export const customerApproveOrderForSpecialRequest = async (
-//   req: AuthRequest,
-//   res: Response
-// ): Promise<void> => {
-//   try {
-//     const { orderId } = req.params;
-//     // 1️⃣ Fetch order
-//     const order = await prisma.order.findUnique({
-//       where: { id: orderId },
-//       include: { payments: true },
-//     });
-//     if (!order || order.customerId !== req.user?.id) {
-//       res.status(403).json(errorResponse("FORBIDDEN", "Unauthorized or order not found"));
-//       return;
-//     }
-//     // 2️⃣ Check if vendor added an extra charge
-//     const hasExtraCharge = !!order.extraCharge && order.extraCharge > 0;
-//     // 3️⃣ Determine next status
-//     const nextStatus = hasExtraCharge
-//       ? OrderStatus.AWAITING_PAYMENT
-//       : OrderStatus.AWAITING_PAYMENT;
-//     // 4️⃣ Compute payment window (30 minutes)
-//     const now = new Date();
-//     const paymentExpiresAt = new Date(now.getTime() + 30 * 60 * 1000);
-//     // 5️⃣ Update order status first
-//     const updatedOrder = await prisma.order.update({
-//       where: { id: orderId },
-//       data: { customerApproval: true, status: nextStatus },
-//     });
-// // 6️⃣ Create or update Payment record manually
-// const existingPayment = await prisma.payment.findFirst({
-//   where: {
-//     orderId,
-//     status: { in: ["INITIATED", "PENDING"] },
-//   },
-// });
-// if (existingPayment) {
-//   await prisma.payment.update({
-//     where: { id: existingPayment.id },
-//     data: {
-//       expiresAt: paymentExpiresAt,
-//       status: "PENDING",
-//       updatedAt: new Date(),
-//     },
-//   });
-// } else {
-//   await prisma.payment.create({
-//     data: {
-//       userId: order.customerId,
-//       orderId: order.id,
-//       amount: order.totalPrice,
-//       status: "PENDING",
-//       expiresAt: paymentExpiresAt,
-//       reference: `pay_${Date.now()}`,
-//     },
-//   });
-// }
-//     // 7️⃣ Record activity + notify vendor
-//     await recordActivityBundle({
-//       actorId: req.user.id,
-//       orderId,
-//       actions: [
-//         {
-//           type: ActivityType.GENERAL,
-//           title: "Customer Approved Order Update",
-//           message: `Customer approved your update for order #${orderId}. Awaiting payment confirmation.`,
-//           targetId: order.vendorId,
-//           socketEvent: "ORDER",
-//           metadata: {
-//             orderId,
-//             frontendEvent: "ORDER_APPROVED",
-//             extraCharge: order.extraCharge,
-//           },
-//           relation: "vendor",
-//         },
-//       ],
-//       audit: {
-//         action: "CUSTOMER_APPROVED_ORDER",
-//         metadata: {
-//           orderId,
-//           customerId: req.user.id,
-//           vendorId: order.vendorId,
-//           extraCharge: order.extraCharge,
-//         },
-//       },
-//       notifyRealtime: true,
-//       notifyPush: true,
-//     });
-//     // 8️⃣ Respond
-//     res.status(200).json(
-//       successResponse("ORDER_APPROVED", "Order approved successfully. Proceed to payment.", {
-//         updatedOrder,
-//         paymentExpiresAt,
-//       })
-//     );
-//   } catch (err) {
-//     console.error("❌ Customer approval error:", err);
-//     res.status(500).json(errorResponse("SERVER_ERROR", "Failed to approve order"));
-//   }
-// };
-// export const getMyOrders = async (req: AuthRequest, res: Response): Promise<void> => {
-//   try {
-//     const userId = req.user?.id;
-//     if (!userId) {
-//       res.status(401).json(errorResponse("UNAUTHORIZED", "Unauthorized"));
-//       return;
-//     }
-//     const orders = await prisma.order.findMany({
-//       where: {
-//         OR: [{ customerId: userId }, { vendorId: userId }],
-//       },
-//       include: {
-//         items: {
-//           include: {
-//             product: {
-//               select: {
-//                 id: true,
-//                 name: true,
-//                 images: true,
-//                 price: true,
-//                 isLive: true,
-//               },
-//             },
-//             options: {
-//               include: {
-//                 productOption: {
-//                   select: {
-//                     id: true,
-//                     name: true,
-//                     price: true,
-//                   },
-//                 },
-//               },
-//             },
-//           },
-//         },
-//         customer: { select: { id: true, name: true, avatarUrl: true } },
-//         vendor: { select: { id: true, name: true, brandName: true, brandLogo: true } },
-//         address: { select: { label: true, street: true, city: true } },
-//         assignments: {
-//           include: {
-//             deliveryPerson: {
-//               include: {
-//                 user: {
-//                   select: {
-//                     id: true,
-//                     name: true,
-//                     phoneNumber: true,
-//                     avatarUrl: true,
-//                     brandName: true,
-//                     brandLogo: true,
-//                   },
-//                 },
-//               },
-//             },
-//           },
-//         },
-//       },
-//       orderBy: { createdAt: "desc" },
-//     });
-//     res.status(200).json(
-//       successResponse("ORDERS_RETRIEVED", "Orders retrieved successfully", {
-//         total: orders.length,
-//         orders,
-//       })
-//     );
-//   } catch (error) {
-//     console.error("❌ getMyOrders Error:", error);
-//     res.status(500).json(errorResponse("SERVER_ERROR", "Failed to retrieve orders"));
-//   }
-// };
-const getSingleOrder = async (req, res) => {
-    try {
-        const orderId = (0, paramUtils_1.ensureString)(req.params.orderId);
-        const userId = req.user?.id;
-        if (!userId) {
-            res.status(401).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Unauthorized"));
-            return;
-        }
-        const order = await prisma_1.default.order.findUnique({
-            where: { id: orderId },
+    const userId = req.user.id;
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Number(req.query.limit) || 10, 50);
+    const skip = (page - 1) * limit;
+    const status = req.query.status;
+    const paymentStatus = req.query.paymentStatus;
+    const where = {
+        OR: [{ customerId: userId }, { vendorId: userId }],
+        ...(status && { status: status }),
+        ...(paymentStatus && { paymentStatus: paymentStatus }),
+    };
+    const [orders, total] = await Promise.all([
+        prisma_1.default.order.findMany({
+            where,
+            skip,
+            take: limit,
+            orderBy: { createdAt: "desc" },
             include: {
                 items: {
                     include: {
@@ -411,44 +65,25 @@ const getSingleOrder = async (req, res) => {
                             select: {
                                 id: true,
                                 name: true,
-                                description: true,
                                 images: true,
                                 price: true,
+                                isLive: true,
                             },
                         },
                         options: {
                             include: {
                                 productOption: {
-                                    select: {
-                                        id: true,
-                                        name: true,
-                                        price: true,
-                                    },
+                                    select: { id: true, name: true, price: true },
                                 },
                             },
                         },
                     },
                 },
-                customer: { select: { id: true, name: true, email: true, avatarUrl: true } },
+                customer: { select: { id: true, name: true, avatarUrl: true } },
                 vendor: {
-                    select: {
-                        id: true,
-                        name: true,
-                        brandName: true,
-                        brandLogo: true,
-                        phoneNumber: true,
-                    },
+                    select: { id: true, name: true, brandName: true, brandLogo: true },
                 },
-                address: {
-                    select: {
-                        id: true,
-                        label: true,
-                        street: true,
-                        city: true,
-                        latitude: true,
-                        longitude: true,
-                    },
-                },
+                address: { select: { label: true, street: true, city: true } },
                 assignments: {
                     include: {
                         deliveryPerson: {
@@ -468,235 +103,606 @@ const getSingleOrder = async (req, res) => {
                     },
                 },
             },
-        });
-        if (!order || (order.customerId !== userId && order.vendorId !== userId)) {
-            res.status(403).json((0, codeMessage_1.errorResponse)("FORBIDDEN", "Unauthorized or order not found"));
-            return;
-        }
-        res.status(200).json((0, codeMessage_1.successResponse)("ORDER_RETRIEVED", "Order retrieved successfully", { order }));
+        }),
+        prisma_1.default.order.count({ where }),
+    ]);
+    const totalPages = Math.ceil(total / limit);
+    return (0, apiResponse_1.sendSuccess)(res, { orders }, "Orders retrieved successfully", 200, {
+        total,
+        page,
+        limit,
+        totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+    });
+};
+exports.getMyOrders = getMyOrders;
+// GET /orders/:orderId - single order detail
+const getSingleOrder = async (req, res) => {
+    const orderId = (0, paramUtils_1.ensureString)(req.params.orderId);
+    const userId = req.user.id;
+    const order = await prisma_1.default.order.findUnique({
+        where: { id: orderId },
+        include: {
+            items: {
+                include: {
+                    product: {
+                        select: {
+                            id: true,
+                            name: true,
+                            description: true,
+                            images: true,
+                            price: true,
+                        },
+                    },
+                    options: {
+                        include: {
+                            productOption: { select: { id: true, name: true, price: true } },
+                        },
+                    },
+                },
+            },
+            customer: {
+                select: { id: true, name: true, email: true, avatarUrl: true },
+            },
+            vendor: {
+                select: {
+                    id: true,
+                    name: true,
+                    brandName: true,
+                    brandLogo: true,
+                    phoneNumber: true,
+                },
+            },
+            address: {
+                select: {
+                    id: true,
+                    label: true,
+                    street: true,
+                    city: true,
+                    latitude: true,
+                    longitude: true,
+                },
+            },
+            assignments: {
+                include: {
+                    deliveryPerson: {
+                        include: {
+                            user: {
+                                select: {
+                                    id: true,
+                                    name: true,
+                                    phoneNumber: true,
+                                    avatarUrl: true,
+                                    brandName: true,
+                                    brandLogo: true,
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    });
+    if (!order)
+        throw new AppError_1.NotFoundError("Order");
+    if (order.customerId !== userId && order.vendorId !== userId) {
+        throw new AppError_1.ForbiddenError("You don't have access to this order");
     }
-    catch (err) {
-        console.error("❌ getSingleOrder Error:", err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to retrieve the order"));
-    }
+    return (0, apiResponse_1.sendSuccess)(res, { order }, "Order retrieved successfully");
 };
 exports.getSingleOrder = getSingleOrder;
-const createNormalOrder = async (req, res) => {
-    try {
-        const userId = req.user?.id;
-        if (!userId) {
-            return res.status(401).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Unauthorized"));
-        }
-        const { vendorId, items } = req.body;
-        if (!vendorId || !items || items.length === 0) {
-            return res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_DATA", "Vendor and items are required"));
-        }
-        // 🔍 Fetch product details
-        const productIds = items.map((i) => i.productId);
-        const products = await prisma_1.default.product.findMany({
-            where: { id: { in: productIds }, isLive: true },
-            include: { productSchedule: true },
-        });
-        if (products.length !== items.length) {
-            return res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_PRODUCTS", "Some products are not available or offline"));
-        }
-        const now = (0, time_1.nowUtc)();
-        // ✅ Validate product schedules
-        for (const item of items) {
-            const product = products.find((p) => p.id === item.productId);
-            if (!product)
-                continue;
-            const sched = product.productSchedule;
-            if (sched?.goLiveAt && sched?.takeDownAt) {
-                const goUtc = (0, time_1.toUtc)(sched.goLiveAt);
-                const takeUtc = (0, time_1.toUtc)(sched.takeDownAt);
-                if (now < goUtc || now > takeUtc) {
-                    return res.status(400).json((0, codeMessage_1.errorResponse)("PRODUCT_OFFLINE", `Product "${product.name}" is offline now`));
-                }
-            }
-        }
-        // 💰 Calculate total price
-        // 💰 Calculate base price and total price
-        let basePrice = 0;
-        const totalPrice = items.reduce((sum, item) => {
-            const product = products.find((p) => p.id === item.productId);
-            basePrice += product.price * item.quantity;
-            return sum + product.price * item.quantity; // or add modifiers if you have
-        }, 0);
-        // 🔄 Create order with required basePrice
-        const order = await prisma_1.default.order.create({
-            data: {
-                customer: { connect: { id: userId } },
-                vendor: { connect: { id: vendorId } },
-                status: "AWAITING_PAYMENT",
-                basePrice, // ✅ required
-                totalPrice,
-                items: {
-                    create: items.map((item) => {
-                        const product = products.find((p) => p.id === item.productId);
-                        const unitPrice = product.price;
-                        const subtotal = unitPrice * item.quantity;
-                        return {
-                            product: { connect: { id: product.id } },
-                            quantity: item.quantity,
-                            unitPrice,
-                            subtotal,
-                        };
-                    }),
-                },
-            },
-            include: { items: { include: { product: true } } },
-        });
-        // 💳 Create payment record with required `reference`
-        const paymentReference = `ORD-${(0, zod_1.uuidv4)()}`;
-        const paymentExpiresAt = (0, time_1.addMinutesUtc)(now, 15);
-        const payment = await prisma_1.default.payment.create({
-            data: {
-                reference: paymentReference,
-                amount: totalPrice,
-                status: "pending",
-                startedAt: now,
-                expiresAt: paymentExpiresAt,
-                order: { connect: { id: order.id } },
-                user: { connect: { id: userId } },
-                channel: "web",
-                ipAddress: req.ip,
-                userAgent: req.headers["user-agent"] || "unknown",
-            },
-        });
-        // 🔔 Record activity for vendor notification
-        await (0, recordActivityBundle_1.recordActivityBundle)({
-            actorId: userId,
-            orderId: order.id,
-            actions: [
-                {
-                    type: client_1.ActivityType.GENERAL,
-                    title: "Order Created",
-                    message: `Order ${order.id} created and awaiting payment`,
-                    targetId: vendorId,
-                    socketEvent: "ORDER",
-                    metadata: { orderId: order.id, createdBy: userId },
-                },
+// PATCH /orders/vendor/order/:orderId/update-status
+const updateOrderStatus = async (req, res) => {
+    const orderId = (0, paramUtils_1.ensureString)(req.params.orderId);
+    const userId = req.user.id;
+    const userRole = req.user.role;
+    const parsed = orderSchema_1.updateOrderStatusSchema.safeParse(req.body);
+    if (!parsed.success)
+        throw new AppError_1.ValidationError("Invalid or missing order status", parsed.error.flatten().fieldErrors);
+    const { status } = parsed.data;
+    const order = await prisma_1.default.order.findUnique({ where: { id: orderId } });
+    if (!order)
+        throw new AppError_1.NotFoundError("Order");
+    const isVendor = userId === order.vendorId;
+    const isCustomer = userId === order.customerId;
+    if (!isVendor && !isCustomer)
+        throw new AppError_1.ForbiddenError("Unauthorized user");
+    const currentStatus = order.status;
+    // Expired orders are dead ends — nothing can change their status through
+    // this endpoint. Give a clear, specific message rather than falling
+    // through to a generic "invalid transition" error.
+    if (currentStatus === client_1.OrderStatus.PAYMENT_EXPIRED ||
+        currentStatus === client_1.OrderStatus.CANCELLED_UNPAID) {
+        throw new AppError_1.ConflictError("This order has expired and can no longer be modified. Please place a new order.");
+    }
+    // These statuses are exclusively system/webhook-controlled — no human
+    // should ever be able to set them directly through this endpoint.
+    const SYSTEM_CONTROLLED = [
+        client_1.OrderStatus.PENDING,
+        client_1.OrderStatus.WAITING_VENDOR_CONFIRMATION,
+        client_1.OrderStatus.WAITING_CUSTOMER_APPROVAL,
+        client_1.OrderStatus.AWAITING_PAYMENT,
+        client_1.OrderStatus.PAYMENT_CONFIRMED,
+        client_1.OrderStatus.PAYMENT_EXPIRED,
+        client_1.OrderStatus.CANCELLED_UNPAID,
+    ];
+    if (SYSTEM_CONTROLLED.includes(status)) {
+        throw new AppError_1.ForbiddenError("This status is controlled automatically by the system, not set manually");
+    }
+    // Vendor drives the cooking/pickup/delivery lifecycle. Completion is
+    // confirmed by the CUSTOMER (not the vendor) — this protects the
+    // customer from an order being marked "delivered" when it wasn't.
+    //
+    // Note: once the Delivery domain is built, driver-driven status changes
+    // will go through their own dedicated endpoint (matching how
+    // DeliveryAssignment already works) rather than this generic one, to
+    // avoid two independent paths writing Order.status with no cross-sync.
+    const transitions = {
+        COOKING: { from: [client_1.OrderStatus.PAYMENT_CONFIRMED], roles: [client_1.Role.VENDOR] },
+        READY_FOR_PICKUP: { from: [client_1.OrderStatus.COOKING], roles: [client_1.Role.VENDOR] },
+        OUT_FOR_DELIVERY: {
+            from: [client_1.OrderStatus.READY_FOR_PICKUP],
+            roles: [client_1.Role.VENDOR],
+        },
+        COMPLETED: { from: [client_1.OrderStatus.OUT_FOR_DELIVERY], roles: [client_1.Role.CUSTOMER] },
+        CANCELLED: {
+            from: [
+                client_1.OrderStatus.AWAITING_PAYMENT,
+                client_1.OrderStatus.PAYMENT_CONFIRMED,
+                client_1.OrderStatus.COOKING,
+                client_1.OrderStatus.READY_FOR_PICKUP,
+                client_1.OrderStatus.OUT_FOR_DELIVERY,
             ],
-            audit: {
-                action: "ORDER_CREATED",
-                metadata: { orderId: order.id, userId, totalPrice },
+            roles: [client_1.Role.CUSTOMER, client_1.Role.VENDOR],
+        },
+        FAILED_DELIVERY: {
+            from: [client_1.OrderStatus.OUT_FOR_DELIVERY],
+            roles: [client_1.Role.VENDOR],
+        },
+    };
+    const rule = transitions[status];
+    if (!rule)
+        throw new AppError_1.ValidationError("This status change is not allowed");
+    if (!rule.from.includes(currentStatus))
+        throw new AppError_1.ConflictError(`Cannot transition from ${currentStatus} to ${status}`);
+    if (!rule.roles.includes(userRole))
+        throw new AppError_1.ForbiddenError("You cannot perform this action");
+    // Payment gate — checked against the dedicated paymentStatus field, not
+    // the workflow `status` field. (A previous version of this check
+    // compared against `status === PAYMENT_CONFIRMED`, which breaks once the
+    // order legitimately moves on to COOKING/READY_FOR_PICKUP/etc. — by then
+    // status is no longer PAYMENT_CONFIRMED even though the order is still
+    // paid. paymentStatus stays SUCCESS throughout, which is what this
+    // actually needs to check.)
+    const requiresPayment = [
+        client_1.OrderStatus.COOKING,
+        client_1.OrderStatus.READY_FOR_PICKUP,
+        client_1.OrderStatus.OUT_FOR_DELIVERY,
+        client_1.OrderStatus.COMPLETED,
+    ];
+    if (requiresPayment.includes(status) && order.paymentStatus !== "SUCCESS") {
+        throw new AppError_1.ConflictError("Order must be paid before proceeding");
+    }
+    const updateData = { status };
+    if (status === client_1.OrderStatus.CANCELLED) {
+        updateData.cancelledAt = new Date();
+        updateData.cancellationReason = isVendor
+            ? "VENDOR_REJECTED"
+            : "USER_CANCELLED";
+    }
+    const updatedOrder = await prisma_1.default.order.update({
+        where: { id: orderId },
+        data: updateData,
+    });
+    await (0, clearCaches_1.clearProductCache)(undefined, order.vendorId);
+    // Referrals: check (and credit, if eligible) once an order actually
+    // completes — the referred customer's *first* completed order is what
+    // triggers a reward for whoever referred them.
+    if (status === client_1.OrderStatus.COMPLETED) {
+        (0, referralController_1.creditReferralRewardIfEligible)(order.customerId, orderId).catch((err) => logger_1.logger.warn({ err, orderId, customerId: order.customerId }, "Failed to check/credit referral reward"));
+    }
+    const recipientId = isVendor ? order.customerId : order.vendorId;
+    await (0, recordActivityBundle_1.recordActivityBundle)({
+        actorId: userId,
+        orderId,
+        actions: [
+            {
+                type: client_1.ActivityType.GENERAL,
+                title: `Order ${status}`,
+                message: `Order ${orderId} status has been updated to ${status}`,
+                targetId: recipientId,
+                socketEvent: "ORDER",
+                metadata: { orderId, updatedBy: userRole },
             },
-            notifyRealtime: true,
-            notifyPush: true,
-        });
-        return res.status(201).json((0, codeMessage_1.successResponse)("ORDER_CREATED", "Order created and awaiting payment", {
-            order,
-            payment,
-        }));
-    }
-    catch (err) {
-        console.error("❌ createNormalOrder Error:", err);
-        return res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to create order"));
-    }
+        ],
+        audit: {
+            action: "ORDER_STATUS_UPDATED",
+            metadata: {
+                orderId,
+                updatedBy: userId,
+                previousStatus: currentStatus,
+                newStatus: status,
+            },
+        },
+        notifyRealtime: true,
+        notifyPush: true,
+    });
+    return (0, apiResponse_1.sendSuccess)(res, { order: updatedOrder }, `Order status updated to ${status}`);
 };
-exports.createNormalOrder = createNormalOrder;
-// 🌟 Customer creates a new special request
-const createSpecialRequest = async (req, res) => {
-    try {
-        const { productId, quantity, details } = req.body; // details from frontend
-        const userId = req.user?.id;
-        // Validate authentication
-        if (!userId) {
-            return res.status(401).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Unauthorized"));
-        }
-        // Validate required fields
-        if (!productId || !quantity || !details) {
-            return res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_DATA", "Missing required fields"));
-        }
-        // Create special request
-        const request = await prisma_1.default.specialOrderRequest.create({
-            data: {
-                customerId: userId,
-                productId,
-                quantity,
-                message: details, // map "details" to the existing "message" field
+exports.updateOrderStatus = updateOrderStatus;
+// GET /orders/vendor/stats
+const getVendorOrderStats = async (req, res) => {
+    const vendorId = req.user.id;
+    const [totalOrders, completedOrders, pendingOrders, inProgressOrders, awaitingApprovalOrders, totalRevenueObj,] = await Promise.all([
+        prisma_1.default.order.count({ where: { vendorId } }),
+        prisma_1.default.order.count({ where: { vendorId, status: client_1.OrderStatus.COMPLETED } }),
+        prisma_1.default.order.count({ where: { vendorId, status: client_1.OrderStatus.PENDING } }),
+        prisma_1.default.order.count({
+            where: {
+                vendorId,
+                status: {
+                    in: [
+                        client_1.OrderStatus.COOKING,
+                        client_1.OrderStatus.READY_FOR_PICKUP,
+                        client_1.OrderStatus.OUT_FOR_DELIVERY,
+                    ],
+                },
             },
-        });
-        // Respond with the created request
-        return res.status(201).json((0, codeMessage_1.successResponse)("REQUEST_CREATED", "Special request created", { request }));
-    }
-    catch (err) {
-        console.error("Error creating special request:", err);
-        return res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to create special request"));
-    }
+        }),
+        prisma_1.default.order.count({
+            where: { vendorId, status: client_1.OrderStatus.WAITING_CUSTOMER_APPROVAL },
+        }),
+        prisma_1.default.order.aggregate({
+            _sum: { totalPrice: true },
+            where: { vendorId, status: client_1.OrderStatus.COMPLETED },
+        }),
+    ]);
+    return (0, apiResponse_1.sendSuccess)(res, {
+        summary: {
+            totalOrders,
+            completedOrders,
+            pendingOrders,
+            inProgressOrders,
+            awaitingApprovalOrders,
+            totalRevenue: totalRevenueObj._sum.totalPrice ?? 0,
+        },
+        metadata: { vendorId, lastUpdated: new Date().toISOString() },
+    }, "Vendor order stats retrieved successfully");
+};
+exports.getVendorOrderStats = getVendorOrderStats;
+// GET /orders/customer/stats
+const getCustomerOrderStats = async (req, res) => {
+    const customerId = req.user.id;
+    const today = new Date();
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(today.getDate() - 6);
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+    const last7Days = Array.from({ length: 7 }, (_, i) => {
+        const d = new Date(sevenDaysAgo);
+        d.setDate(sevenDaysAgo.getDate() + i);
+        return d.toISOString().slice(0, 10);
+    });
+    const [totalOrders, completedOrders, pendingOrders, inProgressOrders, awaitingPaymentOrders, totalSpentObj, recentOrders,] = await Promise.all([
+        prisma_1.default.order.count({ where: { customerId } }),
+        prisma_1.default.order.count({
+            where: { customerId, status: client_1.OrderStatus.COMPLETED },
+        }),
+        prisma_1.default.order.count({ where: { customerId, status: client_1.OrderStatus.PENDING } }),
+        prisma_1.default.order.count({
+            where: {
+                customerId,
+                status: {
+                    in: [
+                        client_1.OrderStatus.COOKING,
+                        client_1.OrderStatus.READY_FOR_PICKUP,
+                        client_1.OrderStatus.OUT_FOR_DELIVERY,
+                    ],
+                },
+            },
+        }),
+        prisma_1.default.order.count({
+            where: { customerId, status: client_1.OrderStatus.AWAITING_PAYMENT },
+        }),
+        prisma_1.default.order.aggregate({
+            _sum: { totalPrice: true },
+            where: { customerId, status: client_1.OrderStatus.COMPLETED },
+        }),
+        // Single range query, bucketed by day in JS below — replaces a
+        // groupBy(createdAt) that never actually grouped anything (see
+        // bucketByDay's comment for why).
+        prisma_1.default.order.findMany({
+            where: { customerId, createdAt: { gte: sevenDaysAgo, lte: today } },
+            select: { createdAt: true, totalPrice: true },
+        }),
+    ]);
+    return (0, apiResponse_1.sendSuccess)(res, {
+        totalOrders,
+        completedOrders,
+        pendingOrders,
+        inProgressOrders,
+        awaitingPaymentOrders,
+        totalSpent: totalSpentObj._sum.totalPrice ?? 0,
+        last7DaysOrders: bucketByDay(recentOrders, last7Days).map(({ date, count }) => ({ date, orders: count })),
+    }, "Customer order stats retrieved successfully");
+};
+exports.getCustomerOrderStats = getCustomerOrderStats;
+// GET /orders/vendor/report
+const getVendorReport = async (req, res) => {
+    const vendorId = req.user.id;
+    const now = (0, dayjs_1.default)();
+    const startOfToday = now.startOf("day").toDate();
+    const startOfWeek = now.startOf("week").toDate();
+    const startOfMonth = now.startOf("month").toDate();
+    const startOfYear = now.startOf("year").toDate();
+    const sevenDaysAgo = now.subtract(6, "day").startOf("day").toDate();
+    // SQL-side sum/count via aggregate() instead of pulling every matching
+    // order's row into JS just to reduce() it — the previous version did a
+    // findMany() (fetching every row) for each of these 4 windows, which
+    // gets expensive fast once a vendor has any real order volume in a
+    // year-long window.
+    const getStatsFromDate = (from) => prisma_1.default.order.aggregate({
+        where: {
+            vendorId,
+            createdAt: { gte: from },
+            status: client_1.OrderStatus.COMPLETED,
+        },
+        _count: { id: true },
+        _sum: { totalPrice: true },
+    });
+    const [revenueAgg, totalOrders, completedOrders, itemsSoldAgg, todayAgg, weekAgg, monthAgg, yearAgg, last7DaysRows, topProductsAgg,] = await Promise.all([
+        prisma_1.default.order.aggregate({
+            _sum: { totalPrice: true },
+            where: { vendorId, status: client_1.OrderStatus.COMPLETED },
+        }),
+        prisma_1.default.order.count({ where: { vendorId } }),
+        prisma_1.default.order.count({ where: { vendorId, status: client_1.OrderStatus.COMPLETED } }),
+        prisma_1.default.orderItem.aggregate({
+            _sum: { quantity: true },
+            where: { order: { vendorId, status: client_1.OrderStatus.COMPLETED } },
+        }),
+        getStatsFromDate(startOfToday),
+        getStatsFromDate(startOfWeek),
+        getStatsFromDate(startOfMonth),
+        getStatsFromDate(startOfYear),
+        // One range query instead of 7 separate day-by-day queries.
+        prisma_1.default.order.findMany({
+            where: {
+                vendorId,
+                status: client_1.OrderStatus.COMPLETED,
+                createdAt: { gte: sevenDaysAgo },
+            },
+            select: { createdAt: true, totalPrice: true },
+        }),
+        prisma_1.default.orderItem.groupBy({
+            by: ["productId"],
+            where: { order: { vendorId, status: client_1.OrderStatus.COMPLETED } },
+            _sum: { quantity: true, subtotal: true },
+            orderBy: { _sum: { quantity: "desc" } },
+            take: 5,
+        }),
+    ]);
+    const totalRevenue = revenueAgg._sum.totalPrice ?? 0;
+    const totalItemsSold = itemsSoldAgg._sum.quantity ?? 0;
+    const averageOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+    const toStats = (agg) => ({
+        orders: agg._count.id,
+        revenue: agg._sum.totalPrice ?? 0,
+    });
+    const last7Days = Array.from({ length: 7 }, (_, i) => now.subtract(6 - i, "day").format("YYYY-MM-DD"));
+    const daily = bucketByDay(last7DaysRows, last7Days);
+    const productDetails = await prisma_1.default.product.findMany({
+        where: { id: { in: topProductsAgg.map((p) => p.productId) } },
+        select: { id: true, name: true },
+    });
+    const topProducts = topProductsAgg.map((p) => {
+        const product = productDetails.find((d) => d.id === p.productId);
+        return {
+            productId: p.productId,
+            name: product?.name ?? "Unknown Product",
+            sold: p._sum.quantity ?? 0,
+            revenue: p._sum.subtotal ?? 0,
+        };
+    });
+    return (0, apiResponse_1.sendSuccess)(res, {
+        summary: {
+            totalRevenue,
+            totalOrders,
+            completedOrders,
+            totalItemsSold,
+            averageOrderValue: round(averageOrderValue),
+        },
+        timeline: {
+            today: toStats(todayAgg),
+            week: toStats(weekAgg),
+            month: toStats(monthAgg),
+            year: toStats(yearAgg),
+        },
+        daily,
+        topProducts,
+    }, "Vendor report retrieved successfully");
+};
+exports.getVendorReport = getVendorReport;
+// ─────────────────────────────────────────────────────────────────────────
+// SPECIAL ORDERS — a customer requests a custom quantity/version of a
+// product, vendors bid with an offer (price + note), customer accepts one.
+//
+// NOTE: this logic already existed in the codebase but was never actually
+// wired into any route — completely unreachable. It's wired up for real
+// as part of this pass (see orderRouter.ts).
+// ─────────────────────────────────────────────────────────────────────────
+// POST /orders/special-requests — customer creates a request
+const createSpecialRequest = async (req, res) => {
+    const userId = req.user.id;
+    const parsed = orderSchema_1.createSpecialRequestSchema.safeParse(req.body);
+    if (!parsed.success)
+        throw new AppError_1.ValidationError("Invalid special request", parsed.error.flatten().fieldErrors);
+    const { productId, quantity, details } = parsed.data;
+    const product = await prisma_1.default.product.findUnique({ where: { id: productId } });
+    if (!product)
+        throw new AppError_1.NotFoundError("Product");
+    const request = await prisma_1.default.specialOrderRequest.create({
+        data: { customerId: userId, productId, quantity, message: details },
+    });
+    return (0, apiResponse_1.sendCreated)(res, { request }, "Special request created");
 };
 exports.createSpecialRequest = createSpecialRequest;
-// 🌟 Vendor creates an offer
+// GET /orders/special-requests — current customer's request history and vendor offers
+const getMySpecialRequests = async (req, res) => {
+    const userId = req.user.id;
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
+    const skip = (page - 1) * limit;
+    const status = req.query.status;
+    const where = {
+        customerId: userId,
+        ...(status ? { status: status } : {}),
+    };
+    const [requests, total] = await Promise.all([
+        prisma_1.default.specialOrderRequest.findMany({
+            where,
+            skip,
+            take: limit,
+            orderBy: { updatedAt: "desc" },
+            include: {
+                product: {
+                    select: {
+                        id: true,
+                        name: true,
+                        images: true,
+                        price: true,
+                        category: true,
+                    },
+                },
+                offers: {
+                    orderBy: { createdAt: "desc" },
+                    include: {
+                        vendor: {
+                            select: {
+                                id: true,
+                                name: true,
+                                brandName: true,
+                                avatarUrl: true,
+                                phoneNumber: true,
+                            },
+                        },
+                        order: {
+                            select: {
+                                id: true,
+                                status: true,
+                                totalPrice: true,
+                                paymentStatus: true,
+                            },
+                        },
+                    },
+                },
+            },
+        }),
+        prisma_1.default.specialOrderRequest.count({ where }),
+    ]);
+    const totalPages = Math.ceil(total / limit);
+    return (0, apiResponse_1.sendSuccess)(res, { requests }, "Special requests retrieved", 200, {
+        total,
+        page,
+        limit,
+        totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+    });
+};
+exports.getMySpecialRequests = getMySpecialRequests;
+// POST /orders/special-requests/:requestId/offers — vendor bids on a request
 const createSpecialOffer = async (req, res) => {
-    try {
-        const { requestId, price, message } = req.body;
-        const vendorId = req.user?.id;
-        if (!vendorId)
-            return res.status(401).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Unauthorized"));
-        if (!requestId || !price) {
-            return res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_DATA", "Missing required fields"));
-        }
-        const request = await prisma_1.default.specialOrderRequest.findUnique({ where: { id: requestId }, include: { offers: true } });
-        if (!request)
-            return res.status(404).json((0, codeMessage_1.errorResponse)("NOT_FOUND", "Special request not found"));
-        if (request.status === "ACCEPTED" || request.status === "CANCELLED") {
-            return res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_STATE", "Cannot offer on this request"));
-        }
-        const offer = await prisma_1.default.specialOrderOffer.create({
-            data: { requestId, vendorId, price, message }
-        });
-        // Update request status to OFFER_MADE
-        await prisma_1.default.specialOrderRequest.update({ where: { id: requestId }, data: { status: "OFFER_MADE" } });
-        res.status(201).json((0, codeMessage_1.successResponse)("OFFER_CREATED", "Offer created", { offer }));
+    const vendorId = req.user.id;
+    const requestId = (0, paramUtils_1.ensureString)(req.params.requestId);
+    const parsed = orderSchema_1.createSpecialOfferSchema.safeParse(req.body);
+    if (!parsed.success)
+        throw new AppError_1.ValidationError("Invalid offer", parsed.error.flatten().fieldErrors);
+    const { price, message } = parsed.data;
+    const request = await prisma_1.default.specialOrderRequest.findUnique({
+        where: { id: requestId },
+    });
+    if (!request)
+        throw new AppError_1.NotFoundError("Special request");
+    if (request.status === "ACCEPTED" ||
+        request.status === "CANCELLED" ||
+        request.status === "REJECTED") {
+        throw new AppError_1.ConflictError("This request is no longer open for offers");
     }
-    catch (err) {
-        console.error(err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to create offer"));
-    }
+    const offer = await prisma_1.default.specialOrderOffer.create({
+        data: { requestId, vendorId, price, message },
+    });
+    await prisma_1.default.specialOrderRequest.update({
+        where: { id: requestId },
+        data: { status: "OFFER_MADE" },
+    });
+    // Previously the customer was never told a vendor had responded to
+    // their request at all — they'd have had to keep polling manually.
+    await (0, notify_1.sendNotification)({
+        userId: request.customerId,
+        title: "New offer on your special request",
+        message: `A vendor offered ₦${price} for your special request.`,
+        type: "GENERAL",
+        metadata: {
+            requestId,
+            offerId: offer.id,
+            route: `/special-requests/${requestId}`,
+        },
+    });
+    return (0, apiResponse_1.sendCreated)(res, { offer }, "Offer created");
 };
 exports.createSpecialOffer = createSpecialOffer;
-// 🌟 Customer accepts an offer
+// PATCH /orders/special-offers/:offerId/accept — customer accepts one offer
 const acceptSpecialOffer = async (req, res) => {
-    try {
-        const offerId = (0, paramUtils_1.ensureString)(req.params.offerId);
-        const userId = req.user?.id;
-        const { vendorNote, extraCharge } = req.body;
-        if (!userId)
-            return res.status(401).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Unauthorized"));
-        const offer = await prisma_1.default.specialOrderOffer.findUnique({
-            where: { id: offerId },
-            include: { request: true },
-        });
-        if (!offer)
-            return res.status(404).json((0, codeMessage_1.errorResponse)("NOT_FOUND", "Offer not found"));
-        if (offer.request.customerId !== userId)
-            return res.status(403).json((0, codeMessage_1.errorResponse)("FORBIDDEN", "Not your request"));
-        if (offer.request.status !== "OFFER_MADE")
-            return res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_STATE", "Cannot accept this offer"));
-        // 1️⃣ Update all other offers to REJECTED
-        await prisma_1.default.specialOrderOffer.updateMany({
+    const offerId = (0, paramUtils_1.ensureString)(req.params.offerId);
+    const userId = req.user.id;
+    const { addressId } = req.body;
+    if (!addressId)
+        throw new AppError_1.ValidationError("addressId is required");
+    const offer = await prisma_1.default.specialOrderOffer.findUnique({
+        where: { id: offerId },
+        include: { request: true },
+    });
+    if (!offer)
+        throw new AppError_1.NotFoundError("Offer");
+    if (offer.request.customerId !== userId)
+        throw new AppError_1.ForbiddenError("This isn't your request");
+    if (offer.request.status !== "OFFER_MADE")
+        throw new AppError_1.ConflictError("This offer can no longer be accepted");
+    const address = await prisma_1.default.address.findFirst({
+        where: { id: addressId, userId },
+    });
+    if (!address)
+        throw new AppError_1.NotFoundError("Address");
+    const deliveryFeeResult = await (0, deliveryFee_service_1.calculateDeliveryFee)(offer.vendorId, addressId, offer.price);
+    if (!deliveryFeeResult.withinRange) {
+        throw new AppError_1.ValidationError(`This vendor is outside the delivery range for your address (${deliveryFeeResult.distanceKm}km away).`);
+    }
+    const [, , acceptedOffer, order] = await prisma_1.default.$transaction([
+        prisma_1.default.specialOrderOffer.updateMany({
             where: { requestId: offer.requestId, id: { not: offerId } },
             data: { status: "REJECTED" },
-        });
-        // 2️⃣ Update accepted offer
-        const acceptedOffer = await prisma_1.default.specialOrderOffer.update({
-            where: { id: offerId },
-            data: { status: "ACCEPTED" },
-        });
-        // 3️⃣ Update request
-        await prisma_1.default.specialOrderRequest.update({
+        }),
+        prisma_1.default.specialOrderRequest.update({
             where: { id: offer.requestId },
             data: { status: "ACCEPTED" },
-        });
-        // 4️⃣ Create real Order + OrderItem
-        const order = await prisma_1.default.order.create({
+        }),
+        prisma_1.default.specialOrderOffer.update({
+            where: { id: offerId },
+            data: { status: "ACCEPTED" },
+        }),
+        prisma_1.default.order.create({
             data: {
                 customerId: userId,
                 vendorId: offer.vendorId,
+                addressId,
                 basePrice: offer.price,
-                totalPrice: offer.price,
-                status: "AWAITING_PAYMENT",
+                deliveryFee: deliveryFeeResult.fee,
+                totalPrice: round(offer.price + deliveryFeeResult.fee),
+                status: client_1.OrderStatus.AWAITING_PAYMENT,
+                specialOrderOfferId: offer.id,
+                idempotencyKey: (0, uuid_1.v4)(),
+                protectedUntil: new Date(Date.now() + 15 * 60 * 1000),
                 items: {
                     create: [
                         {
@@ -709,782 +715,125 @@ const acceptSpecialOffer = async (req, res) => {
                 },
             },
             include: { items: true },
-        });
-        res.status(201).json((0, codeMessage_1.successResponse)("OFFER_ACCEPTED", "Offer accepted and order created", { order }));
-    }
-    catch (err) {
-        console.error(err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to accept offer"));
-    }
+        }),
+    ]);
+    // Previously the vendor was never notified their offer was accepted —
+    // they'd only find out by happening to check their orders list.
+    await (0, recordActivityBundle_1.recordActivityBundle)({
+        actorId: userId,
+        orderId: order.id,
+        actions: [
+            {
+                type: client_1.ActivityType.GENERAL,
+                title: "Your offer was accepted!",
+                message: `Your special-order offer was accepted. Order ${order.id} is awaiting payment.`,
+                targetId: offer.vendorId,
+                socketEvent: "ORDER",
+                metadata: {
+                    orderId: order.id,
+                    offerId: offer.id,
+                    route: `/orders/${order.id}`,
+                },
+            },
+        ],
+        audit: {
+            action: "SPECIAL_OFFER_ACCEPTED",
+            metadata: {
+                offerId: offer.id,
+                requestId: offer.requestId,
+                orderId: order.id,
+            },
+        },
+        notifyRealtime: true,
+        notifyPush: true,
+    });
+    return (0, apiResponse_1.sendCreated)(res, { order, offer: acceptedOffer }, "Offer accepted and order created");
 };
 exports.acceptSpecialOffer = acceptSpecialOffer;
-// 🌟 Customer rejects all offers
+// PATCH /orders/special-offers/:offerId/reject — customer declines one vendor offer
+const rejectSpecialOffer = async (req, res) => {
+    const offerId = (0, paramUtils_1.ensureString)(req.params.offerId);
+    const userId = req.user.id;
+    const offer = await prisma_1.default.specialOrderOffer.findUnique({
+        where: { id: offerId },
+        include: { request: true },
+    });
+    if (!offer)
+        throw new AppError_1.NotFoundError("Offer");
+    if (offer.request.customerId !== userId)
+        throw new AppError_1.ForbiddenError("This isn't your request");
+    if (offer.request.status === "ACCEPTED" ||
+        offer.request.status === "REJECTED" ||
+        offer.request.status === "CANCELLED") {
+        throw new AppError_1.ConflictError("This request is no longer open for offer decisions");
+    }
+    if (offer.status !== "PENDING")
+        throw new AppError_1.ConflictError("This offer has already been decided");
+    const [, pendingCount] = await prisma_1.default.$transaction([
+        prisma_1.default.specialOrderOffer.update({
+            where: { id: offerId },
+            data: { status: "REJECTED" },
+        }),
+        prisma_1.default.specialOrderOffer.count({
+            where: {
+                requestId: offer.requestId,
+                status: "PENDING",
+                id: { not: offerId },
+            },
+        }),
+    ]);
+    if (pendingCount === 0) {
+        await prisma_1.default.specialOrderRequest.update({
+            where: { id: offer.requestId },
+            data: { status: "REJECTED" },
+        });
+    }
+    await (0, notify_1.sendNotification)({
+        userId: offer.vendorId,
+        title: "Special offer declined",
+        message: "A customer declined your special-order offer.",
+        type: "GENERAL",
+        metadata: { offerId, requestId: offer.requestId },
+    });
+    return (0, apiResponse_1.sendSuccess)(res, { offerId, requestId: offer.requestId, requestClosed: pendingCount === 0 }, "Offer declined");
+};
+exports.rejectSpecialOffer = rejectSpecialOffer;
+// PATCH /orders/special-requests/:requestId/reject — customer rejects all offers
 const rejectSpecialRequest = async (req, res) => {
-    try {
-        const requestId = (0, paramUtils_1.ensureString)(req.params.requestId);
-        const userId = req.user?.id;
-        const request = await prisma_1.default.specialOrderRequest.findUnique({ where: { id: requestId } });
-        if (!request)
-            return res.status(404).json((0, codeMessage_1.errorResponse)("NOT_FOUND", "Request not found"));
-        if (request.customerId !== userId)
-            return res.status(403).json((0, codeMessage_1.errorResponse)("FORBIDDEN", "Not your request"));
-        await prisma_1.default.specialOrderRequest.update({ where: { id: requestId }, data: { status: "REJECTED" } });
-        await prisma_1.default.specialOrderOffer.updateMany({ where: { requestId }, data: { status: "REJECTED" } });
-        res.status(200).json((0, codeMessage_1.successResponse)("REQUEST_REJECTED", "Special request rejected"));
+    const requestId = (0, paramUtils_1.ensureString)(req.params.requestId);
+    const userId = req.user.id;
+    const request = await prisma_1.default.specialOrderRequest.findUnique({
+        where: { id: requestId },
+        include: { offers: true },
+    });
+    if (!request)
+        throw new AppError_1.NotFoundError("Special request");
+    if (request.customerId !== userId)
+        throw new AppError_1.ForbiddenError("This isn't your request");
+    await prisma_1.default.$transaction([
+        prisma_1.default.specialOrderRequest.update({
+            where: { id: requestId },
+            data: { status: "REJECTED" },
+        }),
+        prisma_1.default.specialOrderOffer.updateMany({
+            where: { requestId },
+            data: { status: "REJECTED" },
+        }),
+    ]);
+    // Previously vendors who'd made an offer were never told it was
+    // rejected — silently left hanging with no resolution.
+    const pendingOfferVendorIds = request.offers
+        .filter((o) => o.status === "PENDING")
+        .map((o) => o.vendorId);
+    if (pendingOfferVendorIds.length > 0) {
+        await Promise.all(pendingOfferVendorIds.map((vendorId) => (0, notify_1.sendNotification)({
+            userId: vendorId,
+            title: "Special request closed",
+            message: "The customer chose a different offer for their special request.",
+            type: "GENERAL",
+            metadata: { requestId },
+        })));
     }
-    catch (err) {
-        console.error(err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to reject request"));
-    }
+    return (0, apiResponse_1.sendSuccess)(res, {}, "Special request rejected");
 };
 exports.rejectSpecialRequest = rejectSpecialRequest;
-const updateOrderStatus = async (req, res) => {
-    try {
-        const orderId = (0, paramUtils_1.ensureString)(req.params.orderId);
-        const { status } = req.body;
-        const userId = req.user?.id;
-        const userRole = req.user?.role;
-        // 🔒 Authentication
-        if (!userId || !userRole) {
-            res.status(401).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Unauthorized"));
-            return;
-        }
-        // ⚙️ Validate status
-        if (!status || !Object.values(client_1.OrderStatus).includes(status)) {
-            res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_STATUS", "Invalid or missing order status"));
-            return;
-        }
-        // 🔍 Fetch order with latest payment
-        const order = await prisma_1.default.order.findUnique({
-            where: { id: orderId },
-            include: { payments: { orderBy: { createdAt: "desc" } } },
-        });
-        if (!order) {
-            res.status(404).json((0, codeMessage_1.errorResponse)("NOT_FOUND", "Order not found"));
-            return;
-        }
-        // 🎭 Verify ownership
-        const isVendor = userId === order.vendorId;
-        const isCustomer = userId === order.customerId;
-        if (!isVendor && !isCustomer) {
-            res.status(403).json((0, codeMessage_1.errorResponse)("FORBIDDEN", "Unauthorized user"));
-            return;
-        }
-        const currentStatus = order.status;
-        // 📜 Allowed transitions
-        const transitionRules = {
-            // Customer can retry payment if needed
-            AWAITING_PAYMENT: { from: [], allowedRoles: [client_1.Role.CUSTOMER] },
-            // Payment confirmed is system-only (webhook updates this)
-            PAYMENT_CONFIRMED: { from: [client_1.OrderStatus.AWAITING_PAYMENT], allowedRoles: [] },
-            // Vendor updates the cooking and delivery lifecycle
-            COOKING: { from: [client_1.OrderStatus.PAYMENT_CONFIRMED], allowedRoles: [client_1.Role.VENDOR] },
-            READY_FOR_PICKUP: { from: [client_1.OrderStatus.COOKING], allowedRoles: [client_1.Role.VENDOR] },
-            OUT_FOR_DELIVERY: { from: [client_1.OrderStatus.READY_FOR_PICKUP], allowedRoles: [client_1.Role.VENDOR] },
-            COMPLETED: { from: [client_1.OrderStatus.OUT_FOR_DELIVERY], allowedRoles: [client_1.Role.VENDOR] },
-            // Manual cancellations allowed by either party
-            CANCELLED: {
-                from: [
-                    client_1.OrderStatus.AWAITING_PAYMENT,
-                    client_1.OrderStatus.PAYMENT_CONFIRMED,
-                    client_1.OrderStatus.COOKING,
-                    client_1.OrderStatus.READY_FOR_PICKUP,
-                    client_1.OrderStatus.OUT_FOR_DELIVERY,
-                ],
-                allowedRoles: [client_1.Role.CUSTOMER, client_1.Role.VENDOR],
-            },
-            // Payment expired handled by webhook/system
-            PAYMENT_EXPIRED: { from: [client_1.OrderStatus.AWAITING_PAYMENT], allowedRoles: [] },
-            // Unpaid order cancellations handled by webhook/system
-            CANCELLED_UNPAID: { from: [client_1.OrderStatus.AWAITING_PAYMENT, client_1.OrderStatus.PAYMENT_EXPIRED], allowedRoles: [] },
-            // Optional or future statuses
-            PENDING: { from: [], allowedRoles: [] },
-            WAITING_VENDOR_CONFIRMATION: { from: [], allowedRoles: [] },
-            WAITING_CUSTOMER_APPROVAL: { from: [], allowedRoles: [] },
-            FAILED_DELIVERY: { from: [], allowedRoles: [] },
-        };
-        // 🧩 Validate transition
-        const rule = transitionRules[status];
-        if (!rule) {
-            res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_TRANSITION", "Invalid status transition"));
-            return;
-        }
-        if (!rule.from.includes(currentStatus)) {
-            res.status(400).json((0, codeMessage_1.errorResponse)("INVALID_TRANSITION", `Cannot transition from ${currentStatus} to ${status}`));
-            return;
-        }
-        if (!rule.allowedRoles.includes(userRole)) {
-            res.status(403).json((0, codeMessage_1.errorResponse)("FORBIDDEN", "You are not allowed to perform this transition"));
-            return;
-        }
-        // 🔄 Build update data
-        // let updateData: Prisma.OrderUpdateInput = { status };
-        // // 💡 Auto-cancel expired payments
-        // const latestPayment = order.payments?.[0];
-        // if (latestPayment?.expiresAt && new Date() > new Date(latestPayment.expiresAt) && status !== OrderStatus.CANCELLED) {
-        //   updateData.status = OrderStatus.CANCELLED;
-        //   updateData.cancelledAt = new Date();
-        //   updateData.cancellationReason = "PAYMENT_EXPIRED";
-        // }
-        // // 🟥 Manual cancellation
-        // if (status === OrderStatus.CANCELLED) {
-        //   updateData.cancelledAt = new Date();
-        //   updateData.cancellationReason = isVendor ? "VENDOR_CANCELLED" : "CUSTOMER_CANCELLED";
-        // }
-        // 🔄 Build update data
-        let updateData = { status };
-        // 💡 Auto-cancel expired payments (only if order not already paid)
-        const latestPayment = order.payments?.[0];
-        if (latestPayment &&
-            order.paymentStatus !== "SUCCESS" && // ✅ check order's paymentStatus instead
-            latestPayment.expiresAt &&
-            new Date() > new Date(latestPayment.expiresAt) &&
-            status !== client_1.OrderStatus.CANCELLED) {
-            updateData.status = client_1.OrderStatus.CANCELLED;
-            updateData.cancelledAt = new Date();
-            updateData.cancellationReason = "PAYMENT_EXPIRED";
-        }
-        // 🟥 Manual cancellation
-        if (status === client_1.OrderStatus.CANCELLED) {
-            updateData.cancelledAt = new Date();
-            updateData.cancellationReason = isVendor ? "VENDOR_CANCELLED" : "CUSTOMER_CANCELLED";
-        }
-        // 💾 Update DB
-        const updatedOrder = await prisma_1.default.order.update({
-            where: { id: orderId },
-            data: updateData,
-        });
-        // 🔥 Clear vendor dashboard & order caches
-        await (0, clearCaches_1.clearProductCache)(undefined, order.vendorId);
-        // 🔔 Notify the other party
-        const recipientId = isVendor ? order.customerId : order.vendorId;
-        await (0, recordActivityBundle_1.recordActivityBundle)({
-            actorId: userId,
-            orderId,
-            actions: [
-                {
-                    type: client_1.ActivityType.GENERAL,
-                    title: `Order ${status}`,
-                    message: `Order ${orderId} status has been updated to ${status}`,
-                    targetId: recipientId,
-                    socketEvent: "ORDER",
-                    metadata: { orderId, updatedBy: userRole },
-                },
-            ],
-            audit: {
-                action: "ORDER_STATUS_UPDATED",
-                metadata: {
-                    orderId,
-                    updatedBy: userId,
-                    previousStatus: currentStatus,
-                    newStatus: status,
-                },
-            },
-            notifyRealtime: true,
-            notifyPush: true,
-        });
-        res.status(200).json((0, codeMessage_1.successResponse)("ORDER_STATUS_UPDATED", `Order status updated to ${status}`, { order: updatedOrder }));
-        return;
-    }
-    catch (err) {
-        console.error("❌ updateOrderStatus Error:", err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to update order status"));
-        return;
-    }
-};
-exports.updateOrderStatus = updateOrderStatus;
-const getVendorOrderStats = async (req, res) => {
-    try {
-        // ✅ Access Control: Only vendors can view vendor statistics
-        if (req.user?.role !== client_1.Role.VENDOR) {
-            res.status(403).json({ message: "Unauthorized access: Vendors only" });
-            return;
-        }
-        const vendorId = req.user.id;
-        // ⚡ Fetch multiple statistics in parallel for efficiency
-        const [totalOrders, completedOrders, pendingOrders, inProgressOrders, awaitingApprovalOrders, totalRevenueObj,] = await Promise.all([
-            // 1️⃣ Total number of orders handled by this vendor
-            prisma_1.default.order.count({
-                where: { vendorId },
-            }),
-            // 2️⃣ Successfully completed orders
-            prisma_1.default.order.count({
-                where: { vendorId, status: client_1.OrderStatus.COMPLETED },
-            }),
-            // 3️⃣ Orders that are still pending (not yet processed)
-            prisma_1.default.order.count({
-                where: { vendorId, status: client_1.OrderStatus.PENDING },
-            }),
-            // 4️⃣ Active orders currently in progress (cooking, pickup, delivery)
-            prisma_1.default.order.count({
-                where: {
-                    vendorId,
-                    status: {
-                        in: [
-                            client_1.OrderStatus.COOKING,
-                            client_1.OrderStatus.READY_FOR_PICKUP,
-                            client_1.OrderStatus.OUT_FOR_DELIVERY,
-                        ],
-                    },
-                },
-            }),
-            // 5️⃣ Orders waiting for the customer to approve vendor updates
-            prisma_1.default.order.count({
-                where: {
-                    vendorId,
-                    status: client_1.OrderStatus.WAITING_CUSTOMER_APPROVAL,
-                },
-            }),
-            // 6️⃣ Total revenue earned from completed orders
-            prisma_1.default.order.aggregate({
-                _sum: { totalPrice: true },
-                where: { vendorId, status: client_1.OrderStatus.COMPLETED },
-            }),
-        ]);
-        // 🧮 Safely extract revenue (fallback to 0 if no data)
-        const totalRevenue = totalRevenueObj._sum.totalPrice ?? 0;
-        // ✅ Send structured and descriptive response
-        res.json({
-            summary: {
-                totalOrders,
-                completedOrders,
-                pendingOrders,
-                inProgressOrders,
-                awaitingApprovalOrders,
-                totalRevenue,
-            },
-            metadata: {
-                vendorId,
-                lastUpdated: new Date().toISOString(),
-            },
-        });
-    }
-    catch (err) {
-        console.error("❌ Vendor order stats error:", err);
-        res.status(500).json({ error: "Server error" });
-    }
-};
-exports.getVendorOrderStats = getVendorOrderStats;
-/**📊 Get Customer Order Statistics (with 7-day order trend)
- * Provides customers with their key order insights:
- * - Total, completed, pending, in-progress, and awaiting-payment orders
- * - Total amount spent on completed orders
- * - 7-day trend chart data (orders per day)
- */
-const getCustomerOrderStats = async (req, res) => {
-    try {
-        if (req.user?.role !== client_1.Role.CUSTOMER) {
-            res.status(403).json((0, codeMessage_1.errorResponse)("FORBIDDEN", "Unauthorized access: Customers only"));
-            return;
-        }
-        const customerId = req.user.id;
-        const today = new Date();
-        const sevenDaysAgo = new Date();
-        sevenDaysAgo.setDate(today.getDate() - 6);
-        const last7Days = Array.from({ length: 7 }, (_, i) => {
-            const d = new Date(sevenDaysAgo);
-            d.setDate(sevenDaysAgo.getDate() + i);
-            return d.toISOString().slice(0, 10);
-        });
-        const [totalOrders, completedOrders, pendingOrders, inProgressOrders, awaitingPaymentOrders, totalSpentObj, last7DaysOrders,] = await Promise.all([
-            prisma_1.default.order.count({ where: { customerId } }),
-            prisma_1.default.order.count({ where: { customerId, status: client_1.OrderStatus.COMPLETED } }),
-            prisma_1.default.order.count({ where: { customerId, status: client_1.OrderStatus.PENDING } }),
-            prisma_1.default.order.count({
-                where: {
-                    customerId,
-                    status: { in: [client_1.OrderStatus.COOKING, client_1.OrderStatus.READY_FOR_PICKUP, client_1.OrderStatus.OUT_FOR_DELIVERY] },
-                },
-            }),
-            prisma_1.default.order.count({ where: { customerId, status: client_1.OrderStatus.AWAITING_PAYMENT } }),
-            prisma_1.default.order.aggregate({ _sum: { totalPrice: true }, where: { customerId, status: client_1.OrderStatus.COMPLETED } }),
-            prisma_1.default.order.groupBy({
-                by: ["createdAt"],
-                where: { customerId, createdAt: { gte: sevenDaysAgo, lte: today } },
-                _count: { id: true },
-            }),
-        ]);
-        const ordersPerDay = last7Days.map((date) => {
-            const dayRecord = last7DaysOrders.find((o) => o.createdAt.toISOString().slice(0, 10) === date);
-            return { date, orders: dayRecord?._count.id ?? 0 };
-        });
-        const totalSpent = totalSpentObj._sum.totalPrice ?? 0;
-        res.status(200).json((0, codeMessage_1.successResponse)("CUSTOMER_ORDER_STATS_RETRIEVED", "Customer order stats retrieved successfully", {
-            totalOrders,
-            completedOrders,
-            pendingOrders,
-            inProgressOrders,
-            awaitingPaymentOrders,
-            totalSpent,
-            last7DaysOrders: ordersPerDay,
-        }));
-    }
-    catch (err) {
-        console.error("❌ Customer order stats error:", err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to retrieve customer order stats"));
-    }
-};
-exports.getCustomerOrderStats = getCustomerOrderStats;
-const getVendorReport = async (req, res) => {
-    try {
-        if (!req.user || req.user.role !== client_1.Role.VENDOR) {
-            res.status(403).json((0, codeMessage_1.errorResponse)("FORBIDDEN", "Unauthorized access"));
-            return;
-        }
-        const vendorId = req.user.id;
-        const now = (0, dayjs_1.default)();
-        const startOfToday = now.startOf("day").toDate();
-        const startOfWeek = now.startOf("week").toDate();
-        const startOfMonth = now.startOf("month").toDate();
-        const startOfYear = now.startOf("year").toDate();
-        const [revenueAgg, totalOrders, completedOrders, itemsSoldAgg] = await Promise.all([
-            prisma_1.default.order.aggregate({ _sum: { totalPrice: true }, where: { vendorId, status: client_1.OrderStatus.COMPLETED } }),
-            prisma_1.default.order.count({ where: { vendorId } }),
-            prisma_1.default.order.count({ where: { vendorId, status: client_1.OrderStatus.COMPLETED } }),
-            prisma_1.default.orderItem.aggregate({ _sum: { quantity: true }, where: { order: { vendorId, status: client_1.OrderStatus.COMPLETED } } }),
-        ]);
-        const totalRevenue = revenueAgg._sum.totalPrice ?? 0;
-        const totalItemsSold = itemsSoldAgg._sum.quantity ?? 0;
-        const averageOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
-        const getStatsFromDate = async (from) => {
-            const orders = await prisma_1.default.order.findMany({
-                where: { vendorId, createdAt: { gte: from }, status: client_1.OrderStatus.COMPLETED },
-                select: { totalPrice: true },
-            });
-            return { orders: orders.length, revenue: orders.reduce((sum, o) => sum + o.totalPrice, 0) };
-        };
-        const [todayStats, weekStats, monthStats, yearStats] = await Promise.all([
-            getStatsFromDate(startOfToday),
-            getStatsFromDate(startOfWeek),
-            getStatsFromDate(startOfMonth),
-            getStatsFromDate(startOfYear),
-        ]);
-        const past7Days = await Promise.all([...Array(7)].map(async (_, i) => {
-            const day = now.subtract(i, "day");
-            const start = day.startOf("day").toDate();
-            const end = day.endOf("day").toDate();
-            const orders = await prisma_1.default.order.findMany({
-                where: { vendorId, status: client_1.OrderStatus.COMPLETED, createdAt: { gte: start, lte: end } },
-                select: { totalPrice: true },
-            });
-            return { date: day.format("YYYY-MM-DD"), count: orders.length, revenue: orders.reduce((sum, o) => sum + o.totalPrice, 0) };
-        }));
-        const topProductsAgg = await prisma_1.default.orderItem.groupBy({
-            by: ["productId"],
-            where: { order: { vendorId, status: client_1.OrderStatus.COMPLETED } },
-            _sum: { quantity: true, subtotal: true },
-            orderBy: { _sum: { quantity: "desc" } },
-            take: 5,
-        });
-        const productDetails = await prisma_1.default.product.findMany({
-            where: { id: { in: topProductsAgg.map((p) => p.productId) } },
-            select: { id: true, name: true },
-        });
-        const topProducts = topProductsAgg.map((p) => {
-            const product = productDetails.find((d) => d.id === p.productId);
-            return { productId: p.productId, name: product?.name ?? "Unknown Product", sold: p._sum.quantity ?? 0, revenue: p._sum.subtotal ?? 0 };
-        });
-        res.status(200).json((0, codeMessage_1.successResponse)("VENDOR_REPORT_SUCCESS", "Vendor report retrieved successfully", {
-            summary: {
-                totalRevenue,
-                totalOrders,
-                completedOrders,
-                totalItemsSold,
-                averageOrderValue: Number(averageOrderValue.toFixed(2)),
-            },
-            timeline: { today: todayStats, week: weekStats, month: monthStats, year: yearStats },
-            daily: past7Days.reverse(),
-            topProducts,
-        }));
-    }
-    catch (error) {
-        console.error("❌ Vendor report error:", error);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to fetch vendor report"));
-    }
-};
-exports.getVendorReport = getVendorReport;
-// ✅ Fetch My Notifications (with cache)
-const getMyNotifications = async (req, res) => {
-    try {
-        const userId = req.user?.id;
-        if (!userId) {
-            res.status(401).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Unauthorized"));
-            return;
-        }
-        const page = Math.max(1, parseInt(req.query.page) || 1);
-        const limit = Math.min(50, parseInt(req.query.limit) || 20);
-        const skip = (page - 1) * limit;
-        const cacheKey = `notifications:${userId}:page:${page}:limit:${limit}`;
-        // ✅ Try cache first
-        const cached = await redis_1.redisNotifications.get(cacheKey);
-        if (cached) {
-            const parsed = JSON.parse(cached);
-            res.status(200).json((0, codeMessage_1.successResponse)("NOTIFICATIONS_RETRIEVED_CACHE", "Notifications retrieved from cache", parsed));
-            return;
-        }
-        // ✅ Otherwise, query DB
-        const [notifications, total, unreadCount] = await Promise.all([
-            prisma_1.default.notification.findMany({
-                where: { userId },
-                orderBy: { createdAt: "desc" },
-                take: limit,
-                skip,
-            }),
-            prisma_1.default.notification.count({ where: { userId } }),
-            prisma_1.default.notification.count({ where: { userId, read: false } }),
-        ]);
-        const payload = {
-            unreadCount,
-            pagination: {
-                total,
-                page,
-                limit,
-                totalPages: Math.ceil(total / limit),
-            },
-            notifications,
-        };
-        // ✅ Store in cache (expires in 60s)
-        await redis_1.redisNotifications.set(cacheKey, JSON.stringify(payload), { EX: 60 });
-        // ✅ Store unread count separately for quick updates
-        await redis_1.redisNotifications.set(`notif:unread:${userId}`, unreadCount);
-        res.status(200).json((0, codeMessage_1.successResponse)("NOTIFICATIONS_RETRIEVED", "Notifications retrieved successfully", payload));
-    }
-    catch (err) {
-        console.error("❌ getMyNotifications Error:", err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to retrieve notifications"));
-    }
-};
-exports.getMyNotifications = getMyNotifications;
-// ✅ Mark Single Notification as Read
-const markNotificationAsRead = async (req, res) => {
-    try {
-        const notificationId = (0, paramUtils_1.ensureString)(req.params.notificationId);
-        const userId = req.user?.id;
-        if (!userId) {
-            res.status(401).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Unauthorized"));
-            return;
-        }
-        const notification = await prisma_1.default.notification.findUnique({
-            where: { id: notificationId },
-        });
-        if (!notification || notification.userId !== userId) {
-            res.status(403).json((0, codeMessage_1.errorResponse)("FORBIDDEN", "Unauthorized or notification not found"));
-            return;
-        }
-        if (notification.read) {
-            res.status(200).json((0, codeMessage_1.successResponse)("ALREADY_READ", "Notification already marked as read"));
-            return;
-        }
-        // ✅ Update DB
-        const updatedNotification = await prisma_1.default.notification.update({
-            where: { id: notificationId },
-            data: { read: true },
-        });
-        // ✅ Update Redis unread count
-        const redisKey = `notif:unread:${userId}`;
-        const currentCount = parseInt((await redis_1.redisNotifications.get(redisKey)) || "0");
-        const newCount = Math.max(currentCount - 1, 0);
-        await redis_1.redisNotifications.set(redisKey, newCount);
-        // ✅ Invalidate notifications cache for this user (so getMyNotifications refetches)
-        const keys = await redis_1.redisNotifications.keys(`notifications:${userId}:*`);
-        if (keys.length > 0)
-            await redis_1.redisNotifications.del(keys);
-        // ✅ Emit socket badge update
-        const io = (0, socket_1.getIO)();
-        io.to(userId).emit("unreadCountUpdate", { unreadCount: newCount });
-        // ✅ Record activity for audit/logs
-        await (0, recordActivityBundle_1.recordActivityBundle)({
-            actorId: userId,
-            actions: [
-                {
-                    type: client_1.ActivityType.GENERAL,
-                    title: "Notification Read",
-                    message: `Notification ${notificationId} marked as read.`,
-                    targetId: userId,
-                    socketEvent: "GENERAL",
-                    metadata: {
-                        type: "NOTIFICATION_STATUS",
-                        route: `/notifications/${notificationId}`, // 🌐 Web route (optional but consistent)
-                        target: {
-                            screen: "notification_detail", // 📱 Flutter route name
-                            id: notificationId
-                        },
-                        notificationId,
-                        userId,
-                        read: true,
-                        frontendEvent: "NOTIFICATION_MARKED_READ"
-                    }
-                }
-            ],
-            audit: {
-                action: "NOTIFICATION_MARKED_READ",
-                metadata: {
-                    notificationId,
-                    userId
-                }
-            },
-            notifyRealtime: true, // can still broadcast socket updates
-            notifyPush: false // no push for read status
-        });
-        res.status(200).json((0, codeMessage_1.successResponse)("NOTIFICATION_MARKED_READ", "Notification marked as read successfully", {
-            notification: updatedNotification,
-            unreadCount: newCount,
-        }));
-    }
-    catch (err) {
-        console.error("❌ markNotificationAsRead Error:", err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to mark notification as read"));
-    }
-};
-exports.markNotificationAsRead = markNotificationAsRead;
-// ✅ Mark All Notifications as Read
-const markAllNotificationsAsRead = async (req, res) => {
-    try {
-        const userId = req.user?.id;
-        if (!userId) {
-            res.status(401).json((0, codeMessage_1.errorResponse)("UNAUTHORIZED", "Unauthorized"));
-            return;
-        }
-        const updated = await prisma_1.default.notification.updateMany({
-            where: { userId, read: false },
-            data: { read: true },
-        });
-        // ✅ Reset unread count in Redis
-        const redisKey = `notif:unread:${userId}`;
-        await redis_1.redisNotifications.set(redisKey, 0);
-        // ✅ Invalidate notifications cache
-        const keys = await redis_1.redisNotifications.keys(`notifications:${userId}:*`);
-        if (keys.length > 0)
-            await redis_1.redisNotifications.del(keys);
-        // ✅ Emit socket badge update
-        const io = (0, socket_1.getIO)();
-        io.to(userId).emit("unreadCountUpdate", { unreadCount: 0 });
-        if (updated.count > 0) {
-            await (0, recordActivityBundle_1.recordActivityBundle)({
-                actorId: userId,
-                actions: [
-                    {
-                        type: client_1.ActivityType.GENERAL,
-                        title: "All Notifications Read",
-                        message: `${updated.count} notifications marked as read.`,
-                        targetId: userId,
-                        socketEvent: "GENERAL",
-                        metadata: { count: updated.count },
-                    },
-                ],
-                audit: { action: "ALL_NOTIFICATIONS_MARKED_READ", metadata: { userId, count: updated.count } },
-                notifyRealtime: true,
-                notifyPush: false,
-            });
-        }
-        res.status(200).json((0, codeMessage_1.successResponse)("ALL_NOTIFICATIONS_MARKED_READ", `${updated.count} notifications marked as read successfully`, { count: updated.count, unreadCount: 0 }));
-    }
-    catch (err) {
-        console.error("❌ markAllNotificationsAsRead Error:", err);
-        res.status(500).json((0, codeMessage_1.errorResponse)("SERVER_ERROR", "Failed to mark notifications as read"));
-    }
-};
-exports.markAllNotificationsAsRead = markAllNotificationsAsRead;
-// export const updateOrderStatus = async (req: AuthRequest, res: Response): Promise<void> => {
-//   try {
-//     const { orderId } = req.params;
-//     const { status } = req.body;
-//     const userId = req.user?.id;
-//     const userRole = req.user?.role as Role | undefined;
-//     // 🔒 1. Authentication
-//     if (!userId || !userRole) {
-//       res.status(401).json(errorResponse("UNAUTHORIZED", "Unauthorized"));
-//       return;
-//     }
-//     // 🛑 2. Prevent system-managed transitions
-//     if (status === OrderStatus.PAYMENT_CONFIRMED) {
-//       res
-//         .status(403)
-//         .json(errorResponse("FORBIDDEN", "Payment confirmations are system-managed only"));
-//       return;
-//     }
-//     // ⚙️ 3. Validate input
-//     if (!status || !Object.values(OrderStatus).includes(status)) {
-//       res.status(400).json(errorResponse("INVALID_STATUS", "Invalid or missing order status"));
-//       return;
-//     }
-//     // 🔍 4. Fetch order (with products and payments)
-//     const order = await prisma.order.findUnique({
-//       where: { id: orderId },
-//       include: {
-//         items: {
-//           include: {
-//             product: {
-//               select: {
-//                 isLive: true,
-//                 productSchedule: { select: { goLiveAt: true, takeDownAt: true } },
-//               },
-//             },
-//           },
-//         },
-//         payments: {
-//           orderBy: { createdAt: "desc" }, // most recent payment first
-//         },
-//       },
-//     });
-//     if (!order) {
-//       res.status(404).json(errorResponse("NOT_FOUND", "Order not found"));
-//       return;
-//     }
-//     // 🎭 5. Verify ownership
-//     const isVendor = userId === order.vendorId;
-//     const isCustomer = userId === order.customerId;
-//     if (!isVendor && !isCustomer) {
-//       res.status(403).json(errorResponse("FORBIDDEN", "Unauthorized user"));
-//       return;
-//     }
-//     const currentStatus = order.status;
-//     // 📜 6. Allowed transitions
-//     const transitionRules: Record<OrderStatus, { from: OrderStatus[]; allowedRoles: Role[] }> = {
-//       PENDING: { from: [], allowedRoles: [] },
-//       WAITING_VENDOR_CONFIRMATION: { from: [], allowedRoles: [Role.CUSTOMER] },
-//       WAITING_CUSTOMER_APPROVAL: {
-//         from: [OrderStatus.WAITING_VENDOR_CONFIRMATION],
-//         allowedRoles: [Role.VENDOR],
-//       },
-//       AWAITING_PAYMENT: {
-//         from: [OrderStatus.WAITING_CUSTOMER_APPROVAL, OrderStatus.WAITING_VENDOR_CONFIRMATION],
-//         allowedRoles: [Role.CUSTOMER, Role.VENDOR],
-//       },
-//       PAYMENT_CONFIRMED: { from: [OrderStatus.AWAITING_PAYMENT], allowedRoles: [] },
-//       COOKING: { from: [OrderStatus.PAYMENT_CONFIRMED], allowedRoles: [Role.VENDOR] },
-//       READY_FOR_PICKUP: { from: [OrderStatus.COOKING], allowedRoles: [Role.VENDOR] },
-//       OUT_FOR_DELIVERY: { from: [OrderStatus.READY_FOR_PICKUP], allowedRoles: [Role.VENDOR] },
-//       COMPLETED: { from: [OrderStatus.OUT_FOR_DELIVERY], allowedRoles: [Role.VENDOR] },
-//       CANCELLED: {
-//         from: [
-//           OrderStatus.PENDING,
-//           OrderStatus.WAITING_VENDOR_CONFIRMATION,
-//           OrderStatus.WAITING_CUSTOMER_APPROVAL,
-//           OrderStatus.AWAITING_PAYMENT,
-//           OrderStatus.PAYMENT_CONFIRMED,
-//           OrderStatus.COOKING,
-//           OrderStatus.OUT_FOR_DELIVERY,
-//         ],
-//         allowedRoles: [Role.CUSTOMER, Role.VENDOR],
-//       },
-//       FAILED_DELIVERY: { from: [OrderStatus.OUT_FOR_DELIVERY], allowedRoles: [Role.VENDOR] },
-//       PAYMENT_EXPIRED: { from: [OrderStatus.AWAITING_PAYMENT], allowedRoles: [] },
-//       CANCELLED_UNPAID: {
-//         from: [OrderStatus.AWAITING_PAYMENT, OrderStatus.PAYMENT_EXPIRED],
-//         allowedRoles: [],
-//       },
-//     };
-//     // 🧩 7. Validate transition
-//     const rule = transitionRules[status as OrderStatus];
-//     if (!rule) {
-//       res.status(400).json(errorResponse("INVALID_TRANSITION", "Invalid status transition"));
-//       return;
-//     }
-//     if (!rule.from.includes(currentStatus)) {
-//       res
-//         .status(400)
-//         .json(
-//           errorResponse(
-//             "INVALID_TRANSITION",
-//             `Cannot transition from ${currentStatus} to ${status}`
-//           )
-//         );
-//       return;
-//     }
-//     if (!rule.allowedRoles.includes(userRole)) {
-//       res
-//         .status(403)
-//         .json(errorResponse("FORBIDDEN", "You are not allowed to perform this transition"));
-//       return;
-//     }
-//     // 🔄 8. Build update data
-//     let updateData: Prisma.OrderUpdateInput = { status };
-//     // ✅ If moving to AWAITING_PAYMENT, validate product live state
-//     if (status === OrderStatus.AWAITING_PAYMENT) {
-//       const firstItem = order.items?.[0];
-//       const product = firstItem?.product;
-//       if (!product) {
-//         res
-//           .status(400)
-//           .json(errorResponse("INVALID_ORDER", "Order has no product to validate live status"));
-//         return;
-//       }
-//       const now = new Date();
-//       const sched = product.productSchedule;
-//       let productIsLive = false;
-//       if (product.isLive) {
-//         productIsLive = true;
-//       } else if (sched?.goLiveAt && sched?.takeDownAt) {
-//         const go = new Date(sched.goLiveAt).getTime();
-//         const take = new Date(sched.takeDownAt).getTime();
-//         productIsLive = now.getTime() >= go && now.getTime() <= take;
-//       }
-//       if (!productIsLive) {
-//         res
-//           .status(400)
-//           .json(
-//             errorResponse("PRODUCT_OFFLINE", "Product is not live — cannot move to AWAITING_PAYMENT")
-//           );
-//         return;
-//       }
-//     }
-//     // 💡 9. Check payment expiration (from Payment, not Order)
-//     const latestPayment = order.payments?.[0]; // because we ordered DESC by createdAt
-//     if (
-//       latestPayment?.expiresAt &&
-//       new Date() > new Date(latestPayment.expiresAt) &&
-//       status !== OrderStatus.CANCELLED
-//     ) {
-//       updateData.status = OrderStatus.CANCELLED;
-//       updateData.cancelledAt = new Date();
-//       updateData.cancellationReason = "PAYMENT_EXPIRED";
-//     }
-//     // 🟥 Manual cancellation
-//     if (status === OrderStatus.CANCELLED) {
-//       updateData.cancelledAt = new Date();
-//       updateData.cancellationReason = isVendor ? "VENDOR_CANCELLED" : "CUSTOMER_CANCELLED";
-//     }
-//     // 💾 10. Update DB
-//     const updatedOrder = await prisma.order.update({
-//       where: { id: orderId },
-//       data: updateData,
-//     });
-//     // 🔔 11. Notify the other user
-//     const recipientId = isVendor ? order.customerId : order.vendorId;
-//     await recordActivityBundle({
-//       actorId: userId,
-//       orderId,
-//       actions: [
-//         {
-//           type: ActivityType.GENERAL,
-//           title: `Order ${status}`,
-//           message: `Order ${orderId} status has been updated to ${status}`,
-//           targetId: recipientId,
-//           socketEvent: "ORDER",
-//           metadata: { orderId, updatedBy: userRole },
-//         },
-//       ],
-//       audit: {
-//         action: "ORDER_STATUS_UPDATED",
-//         metadata: {
-//           orderId,
-//           updatedBy: userId,
-//           previousStatus: currentStatus,
-//           newStatus: status,
-//         },
-//       },
-//       notifyRealtime: true,
-//       notifyPush: true,
-//     });
-//     // ✅ 12. Response
-//     res.status(200).json(
-//       successResponse("ORDER_STATUS_UPDATED", `Order status updated to ${status}`, {
-//         order: updatedOrder,
-//       })
-//     );
-//   } catch (err) {
-//     console.error("❌ updateOrderStatus Error:", err);
-//     res.status(500).json(errorResponse("SERVER_ERROR", "Failed to update order status"));
-//   }
-// };

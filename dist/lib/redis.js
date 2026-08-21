@@ -1,7 +1,7 @@
 "use strict";
 // import { createClient, RedisClientType } from "redis";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ShopCartRedis = exports.redisUsersSessions = exports.redisTotalViews = exports.redisSearch = exports.redisProducts = exports.redisNotifications = void 0;
+exports.redisPayments = exports.ShopCartRedis = exports.redisUsersSessions = exports.redisTotalViews = exports.redisSearch = exports.redisProducts = exports.redisNotifications = void 0;
 exports.connectRedis = connectRedis;
 exports.ensureRedisReady = ensureRedisReady;
 // // Parse the REDIS_URL for TLS / host info
@@ -96,6 +96,7 @@ exports.redisSearch = createRedisClient(2);
 exports.redisTotalViews = createRedisClient(3);
 exports.redisUsersSessions = createRedisClient(4);
 exports.ShopCartRedis = createRedisClient(5);
+exports.redisPayments = createRedisClient(6);
 /**
  * Connect Redis client if not already connected
  */
@@ -116,6 +117,7 @@ async function ensureRedisReady() {
         await connectRedis(exports.redisTotalViews, "TotalViews");
         await connectRedis(exports.redisUsersSessions, "UserSessions");
         await connectRedis(exports.ShopCartRedis, "ShopCart");
+        await connectRedis(exports.redisPayments, "Payments");
         // Health check
         await exports.redisNotifications.ping();
         console.log("✅ All Redis DBs connected and ready");

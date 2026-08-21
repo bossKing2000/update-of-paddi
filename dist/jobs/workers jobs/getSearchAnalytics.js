@@ -6,13 +6,14 @@ Object.defineProperty(exports, "__esModule", { value: true });
 // src/jobs/getSearchAnalytics.ts
 require("dotenv/config");
 const redis_1 = require("../../lib/redis");
+const redisScan_1 = require("../../lib/redisScan");
 const fs_1 = __importDefault(require("fs"));
 /**
  * Fetch all search keywords stored in Redis.
  */
 async function getAllSearchKeywords() {
     // Fetch all keys with pattern search:*:hits
-    const keys = await redis_1.redisSearch.keys("search:*:hits");
+    const keys = await (0, redisScan_1.scanKeys)(redis_1.redisSearch, "search:*:hits");
     // Extract the keyword part from each key
     return keys.map((key) => key.replace(/^search:(.*):hits$/, "$1"));
 }

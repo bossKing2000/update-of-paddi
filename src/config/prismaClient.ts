@@ -1,5 +1,13 @@
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+// This used to instantiate its own `new PrismaClient()`, completely
+// separate from the singleton in `src/lib/prisma.ts`. That meant two
+// independent connection pools competing for the same DATABASE_URL
+// connection limit — a classic source of "too many connections" errors
+// under load, especially on connection-capped hosted Postgres.
+//
+// Re-exporting the real singleton here instead means every one of the
+// ~15 files that import from this path (activity/notification system,
+// background jobs, AI services, etc.) now transparently shares the same
+// pool, with zero changes required in those files.
+import prisma from "../lib/prisma";
 
 export default prisma;
