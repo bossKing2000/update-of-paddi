@@ -1019,7 +1019,7 @@ export const getMostPopularProducts = async (req: Request, res: Response) => {
     `
     SELECT p.id, p.name, p.price, p.images, p."averageRating", p."reviewCount",
            p."popularityScore", p."popularityPercent", p."totalViews", p.category,
-           p."isLive", p."archived", p."productScheduleId",
+           p."isLive", p."archived",
            s."goLiveAt", s."takeDownAt", s."graceMinutes"
     FROM "Product" p
     LEFT JOIN "ProductSchedule" s ON s."productId" = p.id

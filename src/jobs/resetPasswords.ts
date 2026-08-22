@@ -9,7 +9,9 @@ async function main() {
     data: { password: hashed },
   });
 
-  console.log(`🔑 Updated ${result.count} users to new test password "${newPassword}"`);
+  console.log(
+    `🔑 Updated ${result.count} users to new test password "${newPassword}"`,
+  );
 }
 
 main()
@@ -21,7 +23,4 @@ main()
     await prisma.$disconnect();
   });
 
- 
- 
 //   npx ts-node src/jobs/resetPasswords.ts
- 
