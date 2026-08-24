@@ -51,6 +51,7 @@ model User {
   vendorPromotions      Promotion[]      @relation("VendorPromotions")
   promotionUsages       PromotionUsage[] @relation("UserPromotionUsages")
   vendorSupportTickets  VendorSupportTicket[] @relation("VendorSupportTickets")
+  customerSupportTickets CustomerSupportTicket[] @relation("CustomerSupportTickets")
 
   // ── Referrals ──────────────────────────────────────────────────
   // Didn't exist at all before. Every user gets their own shareable
@@ -1199,4 +1200,24 @@ model VendorSupportTicket {
 
   @@index([vendorId, createdAt])
   @@index([vendorId, status])
+}
+
+// Mirrors VendorSupportTicket — customers previously had no support
+// channel at all (vendor and rider both did). Same shape, same status
+// enum, so admin tooling can treat all three ticket types uniformly.
+model CustomerSupportTicket {
+  id          String              @id @default(uuid())
+  customerId  String
+  category    String
+  subject     String
+  description String
+  status      SupportTicketStatus @default(OPEN)
+  orderId     String? // optional — lets a ticket reference the order it's about
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  customer User @relation("CustomerSupportTickets", fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, createdAt])
+  @@index([customerId, status])
 }
