@@ -10,6 +10,12 @@ import { sendSuccess, sendCreated } from "../utils/apiResponse";
 import { NotFoundError, ValidationError, ConflictError } from "../errors/AppError";
 import { cartSummaryService } from "../services/cartSummary.service";
 import { redeemPromo } from "../services/promoService";
+import {
+  isProductCurrentlyAvailable,
+  isVendorOperating,
+  loadVendorOperatingState,
+  assertVendorAvailableForOrdering,
+} from "../services/vendorAvailability.service";
 import { logger } from "../lib/logger";
 
 // Normalize Express params/query values to string
@@ -72,6 +78,14 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
   const product = await prisma.product.findUnique({ where: { id: productId }, include: { options: true } });
   if (!product) throw new NotFoundError("Product");
   if (product.archived) throw new ValidationError("Product is no longer available");
+
+  // Vendor Live gate — a product can only be ADDED to a cart while its
+  // vendor is currently operating and the product itself is orderable.
+  const vendorState = await loadVendorOperatingState(product.vendorId);
+  assertVendorAvailableForOrdering(vendorState);
+  if (!isProductCurrentlyAvailable(product)) {
+    throw new ValidationError("This product is not currently available for ordering.");
+  }
 
   const invalidOptions = selectedOptions.filter((id: string) => !product.options.some((o) => o.id === id));
   if (invalidOptions.length > 0) {
@@ -356,16 +370,29 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
   }
 
   const now = new Date();
+  // Authoritative marketplace-availability rule (Vendor Live migration):
+  // an item is checkoutable only while its vendor is currently operating
+  // AND the product itself passes its own schedule/archived checks. Items
+  // failing this stay in the cart (never silently deleted) so customers
+  // keep them for when the vendor comes back online.
   const liveItems = cart.items.filter((item) => {
-    const schedule = item.product.productSchedule;
-    const withinSchedule =
-      !schedule || ((!schedule.goLiveAt || schedule.goLiveAt <= now) && (!schedule.takeDownAt || schedule.takeDownAt >= now));
-    return item.product.isLive && withinSchedule;
+    const vendorOperating = isVendorOperating(item.product.vendor as {
+      isLive: boolean;
+      deliveryPreferences?: unknown;
+    });
+    return (
+      vendorOperating &&
+      isProductCurrentlyAvailable({
+        archived: item.product.archived,
+        isLive: item.product.isLive,
+        productSchedule: item.product.productSchedule,
+      }, now)
+    );
   });
   const offlineItems = cart.items.filter((item) => !liveItems.includes(item));
 
   if (liveItems.length === 0) {
-    throw new ValidationError("No products in your cart are currently live. They remain in your cart until the vendor goes live.");
+    throw new ValidationError("No products in your cart are currently orderable. They remain in your cart until their vendors are available again.");
   }
 
   // Lock the cart for the duration of checkout — a second concurrent
@@ -416,6 +443,13 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     const customerName = customer?.name || "Unknown Customer";
 
     for (const [vendorId, vendorItems] of Object.entries(groupedByVendor)) {
+      // Final server-side revalidation immediately before order creation —
+      // the cart snapshot and even the availability filter above can be
+      // seconds stale; a vendor flipping offline in that window must not
+      // yield a new purchasable order.
+      const freshVendorState = await loadVendorOperatingState(vendorId);
+      assertVendorAvailableForOrdering(freshVendorState);
+
       const pricing = vendorPricing.get(vendorId);
       const rawSubtotal = round(vendorItems.reduce((sum, i) => sum + i.subtotal, 0));
       const discount = pricing?.discount ?? 0;
@@ -525,7 +559,7 @@ async function getEnhancedCart(cartId: string) {
           product: {
             include: {
               options: true,
-              vendor: { select: { id: true, name: true } },
+              vendor: { select: { id: true, name: true, isLive: true, deliveryPreferences: true } },
               productSchedule: true, // needed to determine live/offline status
             },
           },
@@ -544,9 +578,15 @@ async function getEnhancedCart(cartId: string) {
     const product = item.product;
     const schedule = product.productSchedule;
 
-    const withinSchedule =
-      !schedule || ((!schedule.goLiveAt || schedule.goLiveAt <= now) && (!schedule.takeDownAt || schedule.takeDownAt >= now));
-    const productonline = product.isLive && withinSchedule;
+    // Marketplace-orderable right now = vendor operating AND product passes
+    // its own schedule/archived checks (Vendor Live migration).
+    const productonline =
+      isVendorOperating(product.vendor as { isLive: boolean; deliveryPreferences?: unknown }) &&
+      isProductCurrentlyAvailable({
+        archived: product.archived,
+        isLive: product.isLive,
+        productSchedule: schedule,
+      }, now);
 
     return {
       id: item.id,

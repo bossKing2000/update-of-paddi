@@ -22,6 +22,7 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
       if (loopCounter > 1000) break;
 
       const batch: (Order & {
+        vendor: { id: string; isLive: boolean; deliveryPreferences: unknown };
         items: (OrderItem & {
           product: {
             id: string;
@@ -34,18 +35,35 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
       })[] = await prisma.order.findMany({
         where: {
           status: OrderStatus.AWAITING_PAYMENT,
-          items: {
-            some: {
-              product: {
+          OR: [
+            // Product-level offline (existing rule)
+            {
+              items: {
+                some: {
+                  product: {
+                    OR: [
+                      { isLive: false },
+                      { productSchedule: { takeDownAt: { lt: now } } },
+                    ],
+                  },
+                },
+              },
+            },
+            // Vendor Live: vendor went offline or paused orders (same
+            // lifecycle treatment as product-offline — only affects
+            // AWAITING_PAYMENT orders; paid/completed orders are untouched)
+            {
+              vendor: {
                 OR: [
                   { isLive: false },
-                  { productSchedule: { takeDownAt: { lt: now } } },
+                  { deliveryPreferences: { path: ["acceptingOrders"], equals: false } },
                 ],
               },
             },
-          },
+          ],
         },
         include: {
+          vendor: { select: { id: true, isLive: true, deliveryPreferences: true } },
           items: {
             include: {
               product: {
@@ -88,11 +106,18 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
           );
         });
 
+        // Vendor Live: vendor offline / paused orders blocks the unpaid
+        // purchase flow exactly like product-offline does.
+        const vendorOffline =
+          !order.vendor.isLive ||
+          ((order.vendor.deliveryPreferences as Record<string, unknown> | null)?.acceptingOrders === false);
+
         const paymentExpired = latestPayment?.expiresAt
           ? isAfterUtc(now, latestPayment.expiresAt)
           : true;
 
-        if (!latestPayment || (productOffline && paymentExpired)) {
+        const offline = productOffline || vendorOffline;
+        if (!latestPayment || (offline && paymentExpired)) {
           await prisma.order.update({
             where: { id: order.id },
             data: {
@@ -100,7 +125,9 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
               cancelledAt: now,
               cancellationReason: productOffline
                 ? "PRODUCT_WENT_OFFLINE_BEFORE_PAYMENT"
-                : "PAYMENT_EXPIRED",
+                : vendorOffline
+                  ? "VENDOR_WENT_OFFLINE_BEFORE_PAYMENT"
+                  : "PAYMENT_EXPIRED",
               paymentStatus: "FAILED",
             },
           });

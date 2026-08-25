@@ -3,6 +3,8 @@
 // import { redisProducts } from "../../lib/redis";
 // import { clearProductCache } from "../../services/clearCaches";
 // import { Prisma } from "@prisma/client";
+import { evaluateProductSchedule } from "../../services/scheduleRules.service";
+import { resolveVendorTimezone } from "../../services/vendorAvailability.service";
 
 // // Use Prisma’s generated type for Product with schedule
 // type ProductWithSchedule = Prisma.ProductGetPayload<{ include: { productSchedule: true } }>;
@@ -39,7 +41,10 @@
 //       while (true) {
 //         const batch: ProductWithSchedule[] = await prisma.product.findMany({
 //           where: { productSchedule: { isNot: null } },
-//           include: { productSchedule: true },
+//           include: {
+//             productSchedule: { include: { windows: true } },
+//             vendor: { select: { timezone: true, operatingHours: true } },
+//           },
 //           skip,
 //           take: batchSize,
 //           orderBy: { id: "asc" },
@@ -51,7 +56,12 @@
 
 //         for (const product of batch) {
 //           const sched = product.productSchedule!;
-//           const shouldBeLive = computeShouldBeLive(sched);
+//           const vendorTz = (product as any).vendor;
+//           const shouldBeLive = computeShouldBeLive({
+//             ...(sched as any),
+//             windows: (sched as any).windows ?? [],
+//             vendorTimezone: resolveVendorTimezone(vendorTz?.timezone, vendorTz?.operatingHours),
+//           });
 
 //           const productNeedsUpdate =
 //             product.isLive !== shouldBeLive ||
@@ -117,14 +127,22 @@
 //             },
 //           },
 //         },
-//         include: { productSchedule: true },
+//         include: {
+//             productSchedule: { include: { windows: true } },
+//             vendor: { select: { timezone: true, operatingHours: true } },
+//           },
 //       });
 
 //       if (!silent) console.log(`🔍 Found ${products.length} products with relevant schedules`);
 
 //       for (const product of products) {
 //         const sched = product.productSchedule!;
-//         const shouldBeLive = computeShouldBeLive(sched);
+//         const vendorTz = (product as any).vendor;
+//         const shouldBeLive = computeShouldBeLive({
+//           ...(sched as any),
+//           windows: (sched as any).windows ?? [],
+//           vendorTimezone: resolveVendorTimezone(vendorTz?.timezone, vendorTz?.operatingHours),
+//         });
 
 //         const productNeedsUpdate =
 //           product.isLive !== shouldBeLive ||
@@ -190,8 +208,25 @@ export const fixLiveStatusJob = async (isServerStartup: boolean = false, silent:
   try {
     let updatedCount = 0;
 
-    // Helper to compute if product should be live
-    const computeShouldBeLive = (sched: NonNullable<ProductWithSchedule["productSchedule"]>) => {
+    // Helper to compute if product should be live.
+    // WEEKLY schedules: evaluated from their windows in the vendor's
+    // effective timezone (recurring — no event jobs needed). ONE_TIME:
+    // unchanged absolute-window logic.
+    const computeShouldBeLive = (
+      sched: NonNullable<ProductWithSchedule["productSchedule"]> & {
+        windows?: { dayOfWeek: number; startMinute: number; endMinute: number; enabled: boolean }[];
+        vendorTimezone?: string | null;
+      },
+    ) => {
+      if ((sched as any).type === "WEEKLY") {
+        if (sched.enabled === false) return false;
+        return evaluateProductSchedule(
+          { ...(sched as any), type: "WEEKLY" },
+          now,
+          (sched as any).vendorTimezone ?? null,
+          false,
+        );
+      }
       if (!sched.goLiveAt || !sched.takeDownAt) return false;
       const goLiveAt = new Date(sched.goLiveAt);
       const takeDownAt = new Date(sched.takeDownAt);
@@ -217,7 +252,10 @@ export const fixLiveStatusJob = async (isServerStartup: boolean = false, silent:
       while (true) {
         const batch: ProductWithSchedule[] = await prisma.product.findMany({
           where: { productSchedule: { isNot: null } },
-          include: { productSchedule: true },
+          include: {
+            productSchedule: { include: { windows: true } },
+            vendor: { select: { timezone: true, operatingHours: true } },
+          },
           skip,
           take: batchSize,
           orderBy: { id: "asc" },
@@ -229,7 +267,12 @@ export const fixLiveStatusJob = async (isServerStartup: boolean = false, silent:
 
         for (const product of batch) {
           const sched = product.productSchedule!;
-          const shouldBeLive = computeShouldBeLive(sched);
+          const vendorTz = (product as any).vendor;
+          const shouldBeLive = computeShouldBeLive({
+            ...(sched as any),
+            windows: (sched as any).windows ?? [],
+            vendorTimezone: resolveVendorTimezone(vendorTz?.timezone, vendorTz?.operatingHours),
+          });
           const computedLiveUntil = shouldBeLive && sched.takeDownAt ? new Date(sched.takeDownAt) : null;
 
           const productNeedsUpdate =
@@ -293,7 +336,10 @@ export const fixLiveStatusJob = async (isServerStartup: boolean = false, silent:
             },
           },
         },
-        include: { productSchedule: true },
+        include: {
+            productSchedule: { include: { windows: true } },
+            vendor: { select: { timezone: true, operatingHours: true } },
+          },
       });
 
       if (!silent) console.log(`🔍 Found ${products.length} products with relevant schedules`);
@@ -302,7 +348,12 @@ export const fixLiveStatusJob = async (isServerStartup: boolean = false, silent:
         const sched = product.productSchedule!;
         if (!sched?.goLiveAt && !sched?.takeDownAt) continue; // skip products with no schedule
 
-        const shouldBeLive = computeShouldBeLive(sched);
+        const vendorTz = (product as any).vendor;
+        const shouldBeLive = computeShouldBeLive({
+          ...(sched as any),
+          windows: (sched as any).windows ?? [],
+          vendorTimezone: resolveVendorTimezone(vendorTz?.timezone, vendorTz?.operatingHours),
+        });
         const computedLiveUntil = shouldBeLive && sched.takeDownAt ? new Date(sched.takeDownAt) : null;
 
         const productNeedsUpdate =

@@ -9,6 +9,7 @@ import {
   serviceAreasSchema,
 } from "../validations/vendorSettingsSchema";
 import { createAuditLog } from "../utils/auditLog.service";
+import { invalidateMarketplaceDiscoveryCaches } from "../services/clearCaches";
 
 const vendorSelect = {
   operatingHours: true,
@@ -16,6 +17,7 @@ const vendorSelect = {
   serviceAreas: true,
   order_openAT: true,
   order_closeAT: true,
+  isLive: true,
 } as const;
 
 function parseOrThrow<T>(result: { success: boolean; data?: T; error?: { flatten: () => unknown } }, label: string): T {
@@ -58,4 +60,57 @@ export const updateServiceAreas = async (req: AuthRequest, res: Response) => {
   const updated = await prisma.user.update({ where: { id: req.user!.id }, data: { serviceAreas }, select: vendorSelect });
   await createAuditLog({ userId: req.user!.id, action: "VENDOR_SERVICE_AREAS_UPDATED", req, metadata: { serviceAreas } });
   return sendSuccess(res, updated, "Service areas saved");
+};
+
+// ── Vendor Live (marketplace migration) ─────────────────────────────────────
+import { z } from "zod";
+import { redisProducts } from "../lib/redis";
+import { scanKeys } from "../lib/redisScan";
+
+const vendorLiveSchema = z.object({ isLive: z.boolean() });
+
+async function invalidateVendorLiveCaches(): Promise<void> {
+  // Vendor live state affects every marketplace-discovery surface.
+  await invalidateMarketplaceDiscoveryCaches();
+}
+
+/**
+ * PATCH /api/vendor/settings/live
+ * Toggles whether this vendor is currently operating on the marketplace.
+ * Going LIVE requires KYC verification (platform precondition recorded in
+ * the schema). Going offline is always allowed — it pauses NEW marketplace
+ * activity only: carts keep their items, existing/paid orders are untouched,
+ * and product detail pages remain viewable.
+ */
+export const updateVendorLive = async (req: AuthRequest, res: Response) => {
+  const parsed = vendorLiveSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new ValidationError("Invalid live status", parsed.error.flatten());
+  }
+  const { isLive } = parsed.data;
+
+  // KYC status lives on the User row, not in the JWT — load it fresh.
+  const vendor = await prisma.user.findUnique({
+    where: { id: req.user!.id },
+    select: { kycStatus: true },
+  });
+  if (isLive && vendor?.kycStatus !== "VERIFIED") {
+    throw new ValidationError("KYC verification is required before going live.");
+  }
+
+  const updated = await prisma.user.update({
+    where: { id: req.user!.id },
+    data: { isLive },
+    select: { ...vendorSelect, isLive: true },
+  });
+
+  await invalidateVendorLiveCaches();
+  await createAuditLog({
+    userId: req.user!.id,
+    action: isLive ? "VENDOR_WENT_LIVE" : "VENDOR_WENT_OFFLINE",
+    req,
+    metadata: { isLive },
+  });
+
+  return sendSuccess(res, updated, isLive ? "Vendor is now live" : "Vendor is now offline");
 };

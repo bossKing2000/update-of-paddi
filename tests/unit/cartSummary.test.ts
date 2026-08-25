@@ -31,7 +31,9 @@ function makeCartItem(overrides: any = {}) {
       archived: false,
       isLive: true,
       vendorId: "vendor-1",
-      vendor: { name: "Mama Put" },
+      // Vendor Live migration: fixtures default to an operating vendor so
+      // the marketplace-availability gate passes unless a test opts out.
+      vendor: { name: "Mama Put", isLive: true, deliveryPreferences: { acceptingOrders: true } },
       productSchedule: null,
       ...(overrides.product || {}),
     },
@@ -63,6 +65,21 @@ describe("cartSummaryService", () => {
     expect(result.vendorBreakdown[0].items).toHaveLength(1);
   });
 
+  it("Vendor Live: excludes items whose vendor went offline or paused orders, keeping the item count honest", async () => {
+    mockedFindFirst.mockResolvedValue({
+      items: [
+        makeCartItem({ id: "a" }),
+        makeCartItem({ id: "b", product: { vendorId: "vendor-2", vendor: { name: "Closed Kitchen", isLive: false } } }),
+        makeCartItem({ id: "c", product: { vendorId: "vendor-3", vendor: { name: "Paused Kitchen", deliveryPreferences: { acceptingOrders: false } } } }),
+      ],
+    });
+
+    const result = await cartSummaryService({ userId: "user-1" });
+    expect(result.excludedOfflineItemCount).toBe(2);
+    expect(result.vendorBreakdown).toHaveLength(1);
+    expect(result.vendorBreakdown[0].items).toHaveLength(1);
+  });
+
   it("groups items by vendor and sums subtotals correctly", async () => {
     mockedFindFirst.mockResolvedValue({
       items: [
@@ -71,7 +88,7 @@ describe("cartSummaryService", () => {
           id: "b",
           quantity: 1,
           unitPrice: 500,
-          product: { vendorId: "vendor-2", vendor: { name: "Suya Spot" } },
+          product: { vendorId: "vendor-2", vendor: { name: "Suya Spot", isLive: true, deliveryPreferences: { acceptingOrders: true } } },
         }),
       ],
     });

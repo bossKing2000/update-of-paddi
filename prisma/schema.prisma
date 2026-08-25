@@ -35,6 +35,23 @@ model User {
   deliveryPreferences Json?
   serviceAreas        Json?
 
+  // ── Vendor Live (marketplace migration) ──────────────────────
+  // VENDOR only: whether this vendor is currently operating on the
+  // marketplace. This is the vendor-level counterpart of the per-product
+  // schedule mirror below — a product is marketplace-available only while
+  // its vendor is live AND accepting orders AND the product itself is
+  // available/unarchived within its own schedule. Customers cannot toggle
+  // this; vendors flip it via PATCH /api/vendor/settings/live (KYC VERIFIED
+  // required to go live). Default false for new vendors; existing vendors
+  // were backfilled to true by the migration so pre-migration behavior is
+  // preserved until each vendor explicitly goes offline.
+  isLive Boolean @default(false)
+
+  // IANA timezone for the vendor's business (e.g. "Africa/Lagos"). Used to
+  // evaluate recurring product schedules in the vendor's local time.
+  // Effective timezone = timezone ?? operatingHours.timezone ?? UTC.
+  timezone String?
+
   // ── Vendor payout fields ──────────────────────────────────────
   // Didn't exist at all before — there was no way for a vendor to ever
   // receive a payout through the platform. commissionRate is per-vendor
@@ -198,17 +215,52 @@ model ProductSchedule {
   productId String  @unique
   product   Product @relation(fields: [productId], references: [id])
 
+  // ONE_TIME = absolute goLiveAt/takeDownAt window (legacy/compat).
+  // WEEKLY  = recurring weekly windows in ProductScheduleWindow, evaluated
+  // against the vendor's effective timezone. The schedule definition is
+  // the authoritative source; Product.isLive remains a display mirror.
+  type    ProductScheduleType @default(ONE_TIME)
+  enabled Boolean             @default(true)
+
   goLiveAt   DateTime?
   takeDownAt DateTime?
   isLive     Boolean   @default(false)
 
-  // 🧭 Grace control for this session
+  // 🧭 Grace control for this session (ONE_TIME domain)
   graceMinutes       Int?    @default(0)
   autoGraceEnabled   Boolean @default(false)
   manualGraceEnabled Boolean @default(false)
 
+  // WEEKLY recurrence range (optional). Interpreted as dates in the
+  // vendor's effective timezone; inclusive on both ends.
+  startDate DateTime?
+  endDate   DateTime?
+
+  windows ProductScheduleWindow[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// One availability window inside a WEEKLY ProductSchedule. Multiple rows
+// per day are allowed (e.g. lunch 12:00–15:00 + dinner 18:00–22:00).
+// endMinute <= startMinute means the window crosses midnight into the next
+// day (e.g. Friday 22:00–02:00 → active Sat 00:00–02:00 as well).
+model ProductScheduleWindow {
+  id          String          @id @default(uuid())
+  scheduleId  String
+  schedule    ProductSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  dayOfWeek   Int             // 0 = Sunday … 6 = Saturday (JS/Postgres dow)
+  startMinute Int             // minutes from local midnight (0–1439)
+  endMinute   Int             // minutes from local midnight (1–1440); <= start ⇒ overnight
+  enabled     Boolean         @default(true)
+
+  @@index([scheduleId, dayOfWeek])
+}
+
+enum ProductScheduleType {
+  ONE_TIME
+  WEEKLY
 }
 
 model ProductOption {

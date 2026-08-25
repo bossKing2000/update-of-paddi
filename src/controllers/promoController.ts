@@ -6,6 +6,7 @@ import { DiscountType } from "@prisma/client";
 import { sendSuccess, sendCreated } from "../utils/apiResponse";
 import { NotFoundError, ForbiddenError, ValidationError } from "../errors/AppError";
 import { ensureString } from "../utils/paramUtils";
+import { getActivePromotionsForCustomer } from "../services/promoService";
 
 const createPromoSchema = z.object({
   code: z.string().min(3).max(20).regex(/^[A-Za-z0-9]+$/, "Code must be alphanumeric"),
@@ -108,55 +109,12 @@ export const reactivatePromo = async (req: AuthRequest, res: Response) => {
 // GET /customer/promotions/active — customer-facing browse. Previously
 // there was no way for a customer to discover a promo without already
 // knowing its code; every existing route in this file is vendor-only
-// (self-management of promos a vendor created). This mirrors the same
-// eligibility checks promoService.applyPromoService uses at checkout
-// (active, within its date window, not exhausted) so a promo that's shown
-// here is actually redeemable, not just theoretically "active" in the DB.
+// (self-management of promos a vendor created). The eligibility checks
+// (active, within its date window, not exhausted) live in
+// promoService.getActivePromotionsForCustomer, shared with GET /api/home/feed.
 export const getActivePromotions = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
-  const now = new Date();
-
-  const candidates = await prisma.promotion.findMany({
-    where: {
-      isActive: true,
-      OR: [{ startsAt: null }, { startsAt: { lte: now } }],
-      AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gte: now } }] }],
-    },
-    include: {
-      vendor: { select: { id: true, brandName: true, brandLogo: true } },
-    },
-    orderBy: { createdAt: "desc" },
-    take: 20,
-  });
-
-  // Global usage cap not yet exhausted.
-  const withinGlobalLimit = candidates.filter(
-    (p) => p.usageLimit == null || p.usedCount < p.usageLimit,
-  );
-
-  // This customer hasn't personally exhausted their own per-user cap —
-  // batched in one groupBy rather than a count-query per candidate.
-  const personalUsage = await prisma.promotionUsage.groupBy({
-    by: ["promotionId"],
-    where: { userId, promotionId: { in: withinGlobalLimit.map((p) => p.id) } },
-    _count: { promotionId: true },
-  });
-  const usedByMe = new Map(personalUsage.map((u) => [u.promotionId, u._count.promotionId]));
-
-  const promotions = withinGlobalLimit
-    .filter((p) => (usedByMe.get(p.id) ?? 0) < p.maxUsesPerUser)
-    .map((p) => ({
-      id: p.id,
-      code: p.code,
-      name: p.name,
-      description: p.description,
-      type: p.type,
-      value: p.value,
-      maxDiscount: p.maxDiscount,
-      minOrderAmount: p.minOrderAmount,
-      expiresAt: p.expiresAt,
-      vendor: p.vendor ? { id: p.vendor.id, name: p.vendor.brandName, logo: p.vendor.brandLogo } : null,
-    }));
+  const promotions = await getActivePromotionsForCustomer(userId);
 
   return sendSuccess(res, { promotions }, "Active promotions retrieved");
 };

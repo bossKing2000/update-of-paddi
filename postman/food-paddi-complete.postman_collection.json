@@ -5490,6 +5490,67 @@
           }
         }
       ]
+    },
+    {
+      "name": "17 Home Feed",
+      "description": "Phase 3A composed homepage feed (GET /api/home/feed). Authentication is OPTIONAL: guests get the public feed; verified customers additionally get active promotions and their unread notification count. Sections fail in isolation. Cached ~90s under home:feed:*.",
+      "item": [
+        {
+          "name": "Home feed - guest (no location)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/home/feed",
+            "description": "Guest request without coordinates. Returns categories, live products, popular products, new products, catalog page, empty nearbyVendors (hasLocation=false), empty promotions and unreadNotifications=0."
+          }
+        },
+        {
+          "name": "Home feed - guest with location",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/home/feed?lat=6.5244&lng=3.3792",
+            "description": "Guest feed including nearby open vendors within the default 5km radius."
+          }
+        },
+        {
+          "name": "Home feed - authenticated customer",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/home/feed?lat=6.5244&lng=3.3792",
+            "description": "Same feed enriched for a verified CUSTOMER token: active promotions eligible to this user plus unreadNotifications count.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Home feed - category filter",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/home/feed?category=LUNCH&limit=10",
+            "description": "Category applies only to product sections (new products / catalog); categories list itself stays complete. Invalid category returns the standard validation error envelope."
+          }
+        },
+        {
+          "name": "Home feed - invalid coordinates degrade gracefully",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/home/feed?lat=91&lng=3.3792",
+            "description": "Out-of-range or partial coordinates never fail the feed — nearbyVendors simply reports hasLocation=false with empty items."
+          }
+        }
+      ]
     }
   ],
   "event": []

@@ -264,3 +264,56 @@ export async function redeemPromo(
   });
   return true;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Active customer promotions listing (Phase 3A)
+//
+// Extracted verbatim from promoController.getActivePromotions so that both
+// the original endpoint and the new GET /api/home/feed composition share one
+// implementation. Read-only: does not touch redemption/usage logic.
+// ─────────────────────────────────────────────────────────────────────────────
+export async function getActivePromotionsForCustomer(userId: string) {
+  const now = new Date();
+
+  const candidates = await prisma.promotion.findMany({
+    where: {
+      isActive: true,
+      OR: [{ startsAt: null }, { startsAt: { lte: now } }],
+      AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gte: now } }] }],
+    },
+    include: {
+      vendor: { select: { id: true, brandName: true, brandLogo: true } },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+  });
+
+  // Global usage cap not yet exhausted.
+  const withinGlobalLimit = candidates.filter(
+    (p) => p.usageLimit == null || p.usedCount < p.usageLimit,
+  );
+
+  // This customer hasn't personally exhausted their own per-user cap —
+  // batched in one groupBy rather than a count-query per candidate.
+  const personalUsage = await prisma.promotionUsage.groupBy({
+    by: ["promotionId"],
+    where: { userId, promotionId: { in: withinGlobalLimit.map((p) => p.id) } },
+    _count: { promotionId: true },
+  });
+  const usedByMe = new Map(personalUsage.map((u) => [u.promotionId, u._count.promotionId]));
+
+  return withinGlobalLimit
+    .filter((p) => (usedByMe.get(p.id) ?? 0) < p.maxUsesPerUser)
+    .map((p) => ({
+      id: p.id,
+      code: p.code,
+      name: p.name,
+      description: p.description,
+      type: p.type,
+      value: p.value,
+      maxDiscount: p.maxDiscount,
+      minOrderAmount: p.minOrderAmount,
+      expiresAt: p.expiresAt,
+      vendor: p.vendor ? { id: p.vendor.id, name: p.vendor.brandName, logo: p.vendor.brandLogo } : null,
+    }));
+}

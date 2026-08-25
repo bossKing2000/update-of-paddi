@@ -6,6 +6,7 @@ import {
   redisUsersSessions,
   ShopCartRedis,
 } from "../lib/redis";
+import { scanKeys } from "../lib/redisScan";
 import { RedisClientType } from "redis";
 
 /**
@@ -132,5 +133,18 @@ export const clearProductCache = async (
     );
   } catch (err) {
     console.error("[CACHE] Cache clear error:", err);
+  }
+};
+
+/**
+ * Invalidates every marketplace-DISCOVERY cache that depends on vendor
+ * operating state or product schedule state. Used by the vendor-live toggle
+ * and by schedule mutations. (Cart/checkout/payment never trust caches, so
+ * only discovery surfaces need this sweep.)
+ */
+export const invalidateMarketplaceDiscoveryCaches = async (): Promise<void> => {
+  for (const pattern of ["home:feed:*", "products:mostPopular:*", "products:all:*"]) {
+    const keys = await scanKeys(redisProducts, pattern);
+    if (keys.length) await redisProducts.del(keys);
   }
 };

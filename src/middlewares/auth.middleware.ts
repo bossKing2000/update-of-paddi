@@ -63,6 +63,51 @@ export const authenticate = async (
   next();
 };
 
+// Middleware: Optional authentication for endpoints that enrich the response
+// when a valid token is present but must still serve guests (e.g. the home
+// feed). Uses exactly the same JWT + Redis-session verification as
+// `authenticate`; any failure — missing header, bad token, revoked session —
+// silently continues as an unauthenticated request instead of throwing.
+// Personalization data is therefore only ever derived from a *verified*
+// token; guests can never read another user's private data.
+export const optionalAuth = async (
+  req: Request,
+  _res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const authReq = req as AuthRequest;
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return next();
+  }
+
+  try {
+    const token = authHeader.split(' ')[1];
+
+    const decoded = jwt.verify(token, config.jwtSecret) as {
+      id: string;
+      role: string;
+      sessionId: string;
+    };
+
+    if (!decoded.sessionId) return next();
+
+    const session = await getUserSession(decoded.id, decoded.sessionId);
+    if (!session) return next();
+
+    authReq.user = {
+      id: decoded.id,
+      role: decoded.role,
+      sessionId: decoded.sessionId,
+    };
+  } catch {
+    // Invalid/expired token on an enrichment-only endpoint: treat as guest.
+  }
+
+  next();
+};
+
 // Generic role-gate middleware factory. All the role-specific middlewares
 // below are thin wrappers around this — one implementation, consistent
 // behavior, easy to extend (e.g. requireRole('VENDOR', 'ADMIN')).

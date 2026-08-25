@@ -1,6 +1,14 @@
 import express from "express";
 import { authenticate, authorizeAdmin } from "../middlewares/auth.middleware";
-import { goLive, takeDown, extendGrace, fixLiveStatuses } from "../controllers/productScheduleController";
+import {
+  goLive,
+  takeDown,
+  extendGrace,
+  fixLiveStatuses,
+  getWeeklySchedule,
+  putWeeklySchedule,
+  disableWeeklySchedule,
+} from "../controllers/productScheduleController";
 
 const router = express.Router();
 
@@ -12,6 +20,11 @@ router.post("/:id/schedule/go-live", authenticate, goLive);
 // in the controller).
 router.post("/:id/schedule/take-down", authenticate, takeDown);
 router.post("/:id/schedule/extend-grace", authenticate, extendGrace);
+
+// Weekly recurring schedules (mature scheduling system)
+router.get("/:id/schedule", authenticate, getWeeklySchedule);
+router.put("/:id/schedule/weekly", authenticate, putWeeklySchedule);
+router.delete("/:id/schedule/weekly", authenticate, disableWeeklySchedule);
 
 // Internal maintenance endpoint (also runs on a cron) — was completely
 // unauthenticated before.

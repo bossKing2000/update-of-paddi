@@ -13,6 +13,8 @@ import { scanKeys } from "../lib/redisScan";
 import {
   clearProductFromCarts,
   trackProductView,
+  fetchProductPage,
+  fetchMostPopularProducts,
 } from "../services/product.service";
 import { CACHE_KEYS, CACHE_TTLS } from "../services/redisCacheTiming";
 import { productIndexQueue } from "../jobs/workers jobs/redis-baseQueue";
@@ -238,7 +240,6 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
 
   const categoryQuery = (req.query.category as string)?.toUpperCase();
   const vendorIdQuery = req.query.vendorId as string | undefined;
-  const where: Prisma.ProductWhereInput = { archived: false };
 
   if (categoryQuery && categoryQuery !== "ALL") {
     if (!Object.values(Category).includes(categoryQuery as Category)) {
@@ -246,9 +247,7 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
         `Invalid category. Valid options: ${Object.values(Category).join(", ")}`,
       );
     }
-    where.category = categoryQuery as Category;
   }
-  if (vendorIdQuery) where.vendorId = vendorIdQuery;
 
   const cacheKey = vendorIdQuery
     ? `products:vendor:${vendorIdQuery}:category=${categoryQuery ?? "ALL"}:page=${page}:limit=${limit}`
@@ -269,50 +268,21 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
     );
   }
 
-  const [dbProducts, total] = await Promise.all([
-    prisma.product.findMany({
-      where,
+  const [dbResult] = await Promise.all([
+    fetchProductPage({
       skip,
       take: limit,
-      // isLive first, then newest — done at the DB level instead of
-      // fetching everything and sorting in JS.
-      orderBy: [{ isLive: "desc" }, { createdAt: "desc" }],
-      select: {
-        id: true,
-        name: true,
-        price: true,
-        category: true,
-        thumbnail: true,
-        images: true,
-        popularityPercent: true,
-        isLive: true,
-        productSchedule: {
-          select: { goLiveAt: true, takeDownAt: true, graceMinutes: true },
-        },
-        vendor: {
-          select: { id: true, name: true, brandName: true, avatarUrl: true },
-        },
-      },
+      category: categoryQuery && categoryQuery !== "ALL" ? categoryQuery : undefined,
+      vendorId: vendorIdQuery,
     }),
-    prisma.product.count({ where }),
   ]);
 
-  const products: ProductResponse[] = dbProducts.map((p) => ({
-    id: p.id,
-    name: p.name,
-    price: p.price,
-    category: p.category,
-    images: p.thumbnail
-      ? [p.thumbnail]
-      : p.images.length > 0
-        ? [p.images[0]]
-        : [],
-    popularityPercent: p.popularityPercent,
-    isLive: computeIsLive(p.productSchedule, p.isLive),
-    goLiveAt: p.productSchedule?.goLiveAt || null,
-    liveUntil: p.productSchedule?.takeDownAt || null,
-    vendor: p.vendor,
+  const products: ProductResponse[] = dbResult.products.map((p) => ({
+    ...p,
+    category: p.category as ProductResponse["category"],
   }));
+
+  const total = dbResult.total;
 
   const pagination = {
     total,
@@ -1007,49 +977,14 @@ export const getMostPopularProducts = async (req: Request, res: Response) => {
 
   // Filtered by isLive directly in SQL (both the page query and the count
   // query) rather than fetching a page of "archived = false" rows and
-  // filtering out non-live ones in JS afterward. The previous approach
-  // applied LIMIT/OFFSET *before* filtering, so a page could return
-  // anywhere from 0 to `limit` items after the JS filter while `total`/
-  // `totalPages` were still computed from the unfiltered count — pagination
-  // that didn't actually match what was returned. isLive is kept
-  // reasonably fresh by fixLiveStatusJob (runs every 5 minutes), which is
-  // an acceptable trade-off for a popularity listing (unlike checkout,
-  // where exact real-time accuracy matters far more).
-  const rawProducts: any[] = await prisma.$queryRawUnsafe(
-    `
-    SELECT p.id, p.name, p.price, p.images, p."averageRating", p."reviewCount",
-           p."popularityScore", p."popularityPercent", p."totalViews", p.category,
-           p."isLive", p."archived",
-           s."goLiveAt", s."takeDownAt", s."graceMinutes"
-    FROM "Product" p
-    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
-    WHERE p."archived" = false AND p."isLive" = true
-    ORDER BY p."popularityScore" DESC
-    LIMIT $1 OFFSET $2;
-    `,
-    limit,
+  // filtering out non-live ones in JS afterward. isLive is kept reasonably
+  // fresh by fixLiveStatusJob (runs every 5 minutes) — see
+  // fetchMostPopularProducts in product.service.ts, which now owns this
+  // query so GET /api/home/feed can reuse it verbatim.
+  const { products, total: totalCount } = await fetchMostPopularProducts({
     skip,
-  );
-
-  // isLive is still recomputed from the schedule for *display* accuracy
-  // (in case the stored column is a few minutes stale) — just not used to
-  // filter/exclude rows, since that's what broke pagination.
-  const products = rawProducts.map((p) => {
-    const schedule =
-      p.goLiveAt || p.takeDownAt || p.graceMinutes
-        ? {
-            goLiveAt: p.goLiveAt ?? undefined,
-            takeDownAt: p.takeDownAt ?? undefined,
-            graceMinutes: p.graceMinutes ?? undefined,
-          }
-        : null;
-    return { ...p, isLive: computeIsLive(schedule, p.isLive) };
+    take: limit,
   });
-
-  const totalResult: { count: number }[] = await prisma.$queryRawUnsafe(
-    `SELECT COUNT(*)::int AS count FROM "Product" p WHERE p."archived" = false AND p."isLive" = true;`,
-  );
-  const totalCount = totalResult[0]?.count ?? 0;
 
   res.setHeader("X-Cache", "MISS");
   const pagination = {

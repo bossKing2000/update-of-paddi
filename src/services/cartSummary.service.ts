@@ -1,6 +1,7 @@
 import prisma from "../lib/prisma";
 import { calculateDeliveryFee } from "./deliveryFee.service";
 import { applyPromoService } from "./promoService";
+import { isProductCurrentlyAvailable, isVendorOperating } from "./vendorAvailability.service";
 
 type SummaryInput = {
   userId: string;
@@ -76,18 +77,27 @@ export const cartSummaryService = async ({
 
   if (!cart || cart.items.length === 0) return empty;
 
-  // Only items that are currently purchasable (live + within schedule
-  // window + not archived) count toward the summary — mirrors the same
-  // live/offline split checkoutCart already applies, so the total shown
-  // here always matches what checkout will actually charge.
+  // Only items that are currently marketplace-available count toward the
+  // summary — mirrors the exact availability split checkoutCart applies
+  // (Vendor Live: vendor operating AND product within its own schedule and
+  // not archived), so the total shown here always matches what checkout
+  // will actually charge.
   const now = new Date();
   const purchasableItems = cart.items.filter((item) => {
     const product = item.product;
     if (product.archived) return false;
-    const schedule = product.productSchedule;
-    const withinSchedule =
-      !schedule || ((!schedule.goLiveAt || schedule.goLiveAt <= now) && (!schedule.takeDownAt || schedule.takeDownAt >= now));
-    return product.isLive && withinSchedule;
+    const vendorOperating = isVendorOperating(item.product.vendor as {
+      isLive: boolean;
+      deliveryPreferences?: unknown;
+    });
+    return (
+      vendorOperating &&
+      isProductCurrentlyAvailable({
+        archived: product.archived,
+        isLive: product.isLive,
+        productSchedule: product.productSchedule,
+      }, now)
+    );
   });
 
   const excludedOfflineItemCount = cart.items.length - purchasableItems.length;

@@ -10,6 +10,7 @@ import { getClientInfo } from "../utils/ip";
 import { AuthRequest } from "../middlewares/auth.middleware";
 import { OrderStatus, PaymentStatus, ActivityType, RefundStatus } from "@prisma/client";
 import { recordActivityBundle } from "../utils/activityUtils";
+import { assertVendorAvailableForOrdering } from "../services/vendorAvailability.service";
 import { sendSuccess, sendCreated } from "../utils/apiResponse";
 import { NotFoundError, ValidationError, ConflictError, ForbiddenError, UpstreamServiceError } from "../errors/AppError";
 import { ensureString } from "../utils/paramUtils";
@@ -70,6 +71,28 @@ function assertProductsStillLive(orders: Awaited<ReturnType<typeof getPayableOrd
   }
 }
 
+/**
+ * Vendor Live gate: no NEW payment may be initiated for orders whose vendor
+ * has gone offline or paused orders. Already-paid/completed orders are
+ * untouched — this only stops fresh marketplace activity mid-flow.
+ */
+async function assertVendorsStillOperating(orders: Awaited<ReturnType<typeof getPayableOrderBatch>>) {
+  const vendorIds = [...new Set(orders.map((o) => o.vendorId))];
+  const vendors = await prisma.user.findMany({
+    where: { id: { in: vendorIds } },
+    select: { id: true, name: true, brandName: true, isLive: true, deliveryPreferences: true },
+  });
+  const byId = new Map(vendors.map((v) => [v.id, v]));
+
+  for (const vendorId of vendorIds) {
+    const vendor = byId.get(vendorId);
+    assertVendorAvailableForOrdering(
+      vendor ? { ...vendor, kycStatus: null } : null,
+      vendor ? `${vendor.brandName || vendor.name}` : "This vendor",
+    );
+  }
+}
+
 // POST /api/payments/start
 export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
@@ -79,6 +102,7 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
 
   const orders = await getPayableOrderBatch(idempotencyKey, userId);
   assertProductsStillLive(orders);
+  await assertVendorsStillOperating(orders);
 
   const now = nowUtc();
   const paymentWindowMinutes = 15;
@@ -339,6 +363,7 @@ export const chargeSavedCard = async (req: AuthRequest, res: Response) => {
 
   const orders = await getPayableOrderBatch(idempotencyKey, userId);
   assertProductsStillLive(orders);
+  await assertVendorsStillOperating(orders);
 
   const totalAmount = orders.reduce((sum, o) => sum + o.totalPrice, 0);
   const now = nowUtc();
