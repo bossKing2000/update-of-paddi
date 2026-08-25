@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.fixLiveStatuses = exports.extendGrace = exports.takeDown = exports.goLive = void 0;
+exports.disableWeeklySchedule = exports.putWeeklySchedule = exports.getWeeklySchedule = exports.fixLiveStatuses = exports.extendGrace = exports.takeDown = exports.goLive = void 0;
 const prisma_1 = __importDefault(require("../lib/prisma"));
 const productLiveWorker_1 = require("../jobs/workers jobs/productLiveWorker");
 const productDeactivateJob_1 = require("../jobs/workers jobs/productDeactivateJob");
@@ -16,6 +16,10 @@ const client_1 = require("@prisma/client");
 const apiResponse_1 = require("../utils/apiResponse");
 const AppError_1 = require("../errors/AppError");
 const logger_1 = require("../lib/logger");
+const scheduleRules_service_1 = require("../services/scheduleRules.service");
+const vendorAvailability_service_1 = require("../services/vendorAvailability.service");
+const clearCaches_2 = require("../services/clearCaches");
+const productScheduleSchema_1 = require("../validations/productScheduleSchema");
 /**
  * Vendor schedules a product to go live, or goes live immediately
  */
@@ -47,12 +51,19 @@ const goLive = async (req, res) => {
                 takeDownAt: endTime,
                 graceMinutes,
                 isLive: isImmediate,
+                type: "ONE_TIME",
+                enabled: true, // a fresh one-time schedule re-enables the row
             },
             update: {
                 goLiveAt: liveTime,
                 takeDownAt: endTime,
                 graceMinutes,
                 isLive: isImmediate,
+                // Re-scheduling via go-live converts the row back to ONE_TIME and
+                // clears any weekly windows — one authoritative schedule per
+                // product, last write wins.
+                type: "ONE_TIME",
+                enabled: true,
             },
         }),
         prisma_1.default.product.update({
@@ -60,6 +71,14 @@ const goLive = async (req, res) => {
             data: { isLive: isImmediate, liveUntil: endTime },
         }),
     ]);
+    // A weekly schedule (if any) was replaced by this one-time schedule.
+    const schedRow = await prisma_1.default.productSchedule.findUnique({
+        where: { productId },
+        select: { id: true },
+    });
+    if (schedRow) {
+        await prisma_1.default.productScheduleWindow.deleteMany({ where: { scheduleId: schedRow.id } });
+    }
     // Extend pending payments' expiry so a customer mid-checkout isn't cut
     // off right as the vendor extends their live window.
     // Fixed: was comparing against 'pending' (lowercase) — Payment.status
@@ -149,6 +168,10 @@ const takeDown = async (req, res) => {
                 goLiveAt: null,
                 takeDownAt: null,
                 graceMinutes: 0,
+                // Vendor Live separation: taking the product down disables BOTH
+                // schedule modes (one-time window cleared; weekly paused). This is
+                // a product-availability action and never touches User.isLive.
+                enabled: false,
             },
         }),
         prisma_1.default.product.update({
@@ -156,6 +179,7 @@ const takeDown = async (req, res) => {
             data: { isLive: false, liveUntil: null },
         }),
     ]);
+    await (0, clearCaches_2.invalidateMarketplaceDiscoveryCaches)();
     // clearProductCache already does a comprehensive SCAN-based invalidation
     // across every relevant key pattern and every Redis instance — the
     // extra manual per-key deletes and a second duplicate SCAN loop that
@@ -305,3 +329,177 @@ const fixLiveStatuses = async (_req, res) => {
     return (0, apiResponse_1.sendSuccess)(res, { updatedCount, updates }, "Product live statuses updated successfully.");
 };
 exports.fixLiveStatuses = fixLiveStatuses;
+// ─────────────────────────────────────────────────────────────────────────────
+// WEEKLY recurring schedules (mature scheduling system)
+//
+// A product has exactly ONE ProductSchedule row; its `type` selects the
+// evaluation mode (ONE_TIME = legacy absolute window, WEEKLY = recurring
+// windows evaluated in the vendor's effective timezone). Creating a weekly
+// schedule replaces whatever was there — last write wins, never ambiguous.
+// ─────────────────────────────────────────────────────────────────────────────
+const HHMM_TO_MINUTE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const toMinutes = (hhmm) => {
+    const m = HHMM_TO_MINUTE.exec(hhmm);
+    if (!m)
+        throw new AppError_1.ValidationError(`Invalid time "${hhmm}". Use 24h HH:mm.`);
+    return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+};
+async function loadOwnedProduct(productId, req) {
+    const product = await prisma_1.default.product.findUnique({
+        where: { id: productId },
+        include: { vendor: { select: { id: true, timezone: true, operatingHours: true } } },
+    });
+    if (!product)
+        throw new AppError_1.NotFoundError("Product");
+    if (product.vendorId !== req.user.id && req.user.role !== "ADMIN") {
+        throw new AppError_1.ForbiddenError("You can only manage schedules for your own products");
+    }
+    return product;
+}
+/** GET /api/product/:id/schedule — full schedule + live evaluation for editors. */
+const getWeeklySchedule = async (req, res) => {
+    const productId = (0, paramUtils_1.ensureString)(req.params.id);
+    const product = await prisma_1.default.product.findUnique({
+        where: { id: productId },
+        include: { vendor: { select: { timezone: true, operatingHours: true } } },
+    });
+    if (!product)
+        throw new AppError_1.NotFoundError("Product");
+    const schedule = await prisma_1.default.productSchedule.findUnique({
+        where: { productId },
+        include: { windows: { orderBy: [{ dayOfWeek: "asc" }, { startMinute: "asc" }] } },
+    });
+    const tz = (0, vendorAvailability_service_1.resolveVendorTimezone)(product.vendor?.timezone, product.vendor?.operatingHours);
+    const currentlyActive = (0, scheduleRules_service_1.evaluateProductSchedule)(schedule, new Date(), tz, product.isLive);
+    return (0, apiResponse_1.sendSuccess)(res, {
+        productId,
+        timezone: tz,
+        type: schedule?.type ?? null,
+        enabled: schedule ? !!schedule.enabled : false,
+        startDate: schedule?.startDate ?? null,
+        endDate: schedule?.endDate ?? null,
+        goLiveAt: schedule?.goLiveAt ?? null,
+        takeDownAt: schedule?.takeDownAt ?? null,
+        graceMinutes: schedule?.graceMinutes ?? null,
+        isLive: product.isLive,
+        currentlyActive,
+        windows: schedule?.windows.map((w) => ({
+            id: w.id,
+            dayOfWeek: w.dayOfWeek,
+            startTime: `${String(Math.floor(w.startMinute / 60)).padStart(2, "0")}:${String(w.startMinute % 60).padStart(2, "0")}`,
+            endTime: `${String(Math.floor(w.endMinute / 60)).padStart(2, "0")}:${String(w.endMinute % 60).padStart(2, "0")}`,
+            overnight: w.endMinute <= w.startMinute,
+            enabled: w.enabled,
+        })) ?? [],
+    });
+};
+exports.getWeeklySchedule = getWeeklySchedule;
+/**
+ * PUT /api/product/:id/schedule/weekly
+ * Creates or replaces the product's WEEKLY schedule atomically.
+ * Body: { enabled?, startDate?, endDate?, windows: [{ dayOfWeek, startTime, endTime }] }
+ */
+const putWeeklySchedule = async (req, res) => {
+    const productId = (0, paramUtils_1.ensureString)(req.params.id);
+    const parsed = productScheduleSchema_1.weeklyScheduleSchema.safeParse(req.body);
+    if (!parsed.success) {
+        throw new AppError_1.ValidationError("Invalid weekly schedule", parsed.error.flatten().fieldErrors);
+    }
+    const product = await loadOwnedProduct(productId, req);
+    const { enabled = true, startDate, endDate, windows } = parsed.data;
+    // Normalized minute intervals per day (overnight windows split across the
+    // wrap for overlap detection only — storage keeps the single row).
+    const byDay = new Map();
+    const seen = new Set();
+    for (const w of windows) {
+        const s = toMinutes(w.startTime);
+        const e = toMinutes(w.endTime);
+        if (s === e)
+            throw new AppError_1.ValidationError(`Window ${w.startTime}–${w.endTime} has zero length.`);
+        const key = `${w.dayOfWeek}-${w.startTime}-${w.endTime}`;
+        if (seen.has(key)) {
+            throw new AppError_1.ValidationError(`Duplicate window on day ${w.dayOfWeek}: ${w.startTime}–${w.endTime}.`);
+        }
+        seen.add(key);
+        // Expand into linear intervals (overnight wraps past 1440).
+        const intervals = e > s ? [{ s, e }] : [{ s, e: 1440 }, { s: 0, e }];
+        const list = byDay.get(w.dayOfWeek) ?? [];
+        for (const iv of intervals)
+            list.push(iv);
+        byDay.set(w.dayOfWeek, list);
+    }
+    // Overlap detection within each day over the normalized intervals.
+    for (const [day, intervals] of byDay) {
+        intervals.sort((a, b) => a.s - b.s || a.e - b.e);
+        for (let i = 1; i < intervals.length; i++) {
+            if (intervals[i].s < intervals[i - 1].e) {
+                throw new AppError_1.ValidationError(`Overlapping windows on day ${day}. Windows must not overlap.`);
+            }
+        }
+    }
+    if (!product.vendorId)
+        throw new AppError_1.NotFoundError("Vendor");
+    const schedule = await prisma_1.default.$transaction(async (tx) => {
+        const row = await tx.productSchedule.upsert({
+            where: { productId },
+            create: {
+                productId,
+                type: "WEEKLY",
+                enabled,
+                startDate: startDate ? new Date(startDate) : null,
+                endDate: endDate ? new Date(endDate) : null,
+            },
+            update: {
+                type: "WEEKLY",
+                enabled,
+                startDate: startDate ? new Date(startDate) : null,
+                endDate: endDate ? new Date(endDate) : null,
+                // switching modes clears any leftover one-time window
+                goLiveAt: null,
+                takeDownAt: null,
+                graceMinutes: 0,
+            },
+        });
+        await tx.productScheduleWindow.deleteMany({ where: { scheduleId: row.id } });
+        if (windows.length > 0 && enabled) {
+            await tx.productScheduleWindow.createMany({
+                data: windows.map((w) => ({
+                    scheduleId: row.id,
+                    dayOfWeek: w.dayOfWeek,
+                    startMinute: toMinutes(w.startTime),
+                    endMinute: toMinutes(w.endTime),
+                    enabled: true,
+                })),
+            });
+        }
+        return tx.productSchedule.findUnique({
+            where: { productId },
+            include: { windows: { orderBy: [{ dayOfWeek: "asc" }, { startMinute: "asc" }] } },
+        });
+    });
+    // Mirror + discovery caches: weekly state changes marketplace visibility.
+    await (0, clearCaches_1.clearProductCache)(productId, product.vendorId);
+    await (0, clearCaches_2.invalidateMarketplaceDiscoveryCaches)();
+    return (0, apiResponse_1.sendSuccess)(res, schedule, "Weekly schedule saved");
+};
+exports.putWeeklySchedule = putWeeklySchedule;
+/**
+ * DELETE /api/product/:id/schedule/weekly — disables recurrence without
+ * deleting history. The row remains with enabled=false and no windows.
+ */
+const disableWeeklySchedule = async (req, res) => {
+    const productId = (0, paramUtils_1.ensureString)(req.params.id);
+    const product = await loadOwnedProduct(productId, req);
+    const existing = await prisma_1.default.productSchedule.findUnique({ where: { productId } });
+    if (!existing)
+        throw new AppError_1.NotFoundError("Schedule");
+    const updated = await prisma_1.default.productSchedule.update({
+        where: { productId },
+        data: { type: "WEEKLY", enabled: false },
+    });
+    await prisma_1.default.productScheduleWindow.deleteMany({ where: { scheduleId: existing.id } });
+    await (0, clearCaches_1.clearProductCache)(productId, product.vendorId);
+    await (0, clearCaches_2.invalidateMarketplaceDiscoveryCaches)();
+    return (0, apiResponse_1.sendSuccess)(res, updated, "Weekly schedule disabled");
+};
+exports.disableWeeklySchedule = disableWeeklySchedule;

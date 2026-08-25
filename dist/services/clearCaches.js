@@ -1,7 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.clearProductCache = void 0;
+exports.invalidateMarketplaceDiscoveryCaches = exports.clearProductCache = void 0;
 const redis_1 = require("../lib/redis");
+const redisScan_1 = require("../lib/redisScan");
 /**
  * Helper function to scan and delete Redis keys using redis v4/v5
  */
@@ -89,3 +90,17 @@ const clearProductCache = async (productId, vendorId) => {
     }
 };
 exports.clearProductCache = clearProductCache;
+/**
+ * Invalidates every marketplace-DISCOVERY cache that depends on vendor
+ * operating state or product schedule state. Used by the vendor-live toggle
+ * and by schedule mutations. (Cart/checkout/payment never trust caches, so
+ * only discovery surfaces need this sweep.)
+ */
+const invalidateMarketplaceDiscoveryCaches = async () => {
+    for (const pattern of ["home:feed:*", "products:mostPopular:*", "products:all:*"]) {
+        const keys = await (0, redisScan_1.scanKeys)(redis_1.redisProducts, pattern);
+        if (keys.length)
+            await redis_1.redisProducts.del(keys);
+    }
+};
+exports.invalidateMarketplaceDiscoveryCaches = invalidateMarketplaceDiscoveryCaches;

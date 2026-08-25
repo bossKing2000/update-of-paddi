@@ -54,6 +54,8 @@ const vendorSupport_routes_1 = __importDefault(require("./routes/vendorSupport.r
 const aiRouter_1 = __importDefault(require("./routes/aiRouter"));
 const admin_routes_1 = __importDefault(require("./routes/admin.routes"));
 const promoRoutes_1 = __importDefault(require("./routes/promoRoutes"));
+const customerPromotions_routes_1 = __importDefault(require("./routes/customerPromotions.routes"));
+const homeFeed_routes_1 = __importDefault(require("./routes/homeFeed.routes"));
 const referralRoutes_1 = __importDefault(require("./routes/referralRoutes"));
 const riderOperations_routes_1 = require("./routes/riderOperations.routes");
 const backfillThumbnails_1 = require("./jobs/sripts/backfillThumbnails");
@@ -137,6 +139,8 @@ app.use("/api/vendor/support", vendorSupport_routes_1.default);
 app.use("/api/ai", aiRouter_1.default);
 app.use("/api/admin", admin_routes_1.default);
 app.use("/api/promotions", promoRoutes_1.default);
+app.use("/api/promotions", customerPromotions_routes_1.default);
+app.use("/api/home", homeFeed_routes_1.default);
 app.use("/api/referrals", referralRoutes_1.default);
 app.use("/api/rider", riderOperations_routes_1.riderOperationsRoutes);
 app.use("/api/admin/rider", riderOperations_routes_1.riderOperationsAdminRoutes);

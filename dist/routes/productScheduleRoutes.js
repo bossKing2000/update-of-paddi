@@ -15,6 +15,10 @@ router.post("/:id/schedule/go-live", auth_middleware_1.authenticate, productSche
 // in the controller).
 router.post("/:id/schedule/take-down", auth_middleware_1.authenticate, productScheduleController_1.takeDown);
 router.post("/:id/schedule/extend-grace", auth_middleware_1.authenticate, productScheduleController_1.extendGrace);
+// Weekly recurring schedules (mature scheduling system)
+router.get("/:id/schedule", auth_middleware_1.authenticate, productScheduleController_1.getWeeklySchedule);
+router.put("/:id/schedule/weekly", auth_middleware_1.authenticate, productScheduleController_1.putWeeklySchedule);
+router.delete("/:id/schedule/weekly", auth_middleware_1.authenticate, productScheduleController_1.disableWeeklySchedule);
 // Internal maintenance endpoint (also runs on a cron) — was completely
 // unauthenticated before.
 router.get("/fix-live-statuses", auth_middleware_1.authenticate, auth_middleware_1.authorizeAdmin, productScheduleController_1.fixLiveStatuses);

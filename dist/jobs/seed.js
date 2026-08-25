@@ -419,6 +419,10 @@ async function main() {
             brandLogo: faker_1.faker.image.url(),
             preferences: faker_1.faker.helpers.arrayElements(["DESSERT", "DRINK", "DINNER", "BREAKFAST", "LUNCH"]),
             isEmailVerified: true,
+            // Vendor Live: seeded vendors operate on the marketplace so seeded
+            // products remain discoverable/orderable under the new availability
+            // model (a small share intentionally offline for realism).
+            isLive: i % 8 !== 0,
         });
     }
     // --------------------------

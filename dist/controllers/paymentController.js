@@ -15,6 +15,7 @@ const config_1 = __importDefault(require("../config/config"));
 const ip_1 = require("../utils/ip");
 const client_1 = require("@prisma/client");
 const activityUtils_1 = require("../utils/activityUtils");
+const vendorAvailability_service_1 = require("../services/vendorAvailability.service");
 const apiResponse_1 = require("../utils/apiResponse");
 const AppError_1 = require("../errors/AppError");
 const paramUtils_1 = require("../utils/paramUtils");
@@ -69,6 +70,23 @@ function assertProductsStillLive(orders) {
         }
     }
 }
+/**
+ * Vendor Live gate: no NEW payment may be initiated for orders whose vendor
+ * has gone offline or paused orders. Already-paid/completed orders are
+ * untouched — this only stops fresh marketplace activity mid-flow.
+ */
+async function assertVendorsStillOperating(orders) {
+    const vendorIds = [...new Set(orders.map((o) => o.vendorId))];
+    const vendors = await prisma_1.default.user.findMany({
+        where: { id: { in: vendorIds } },
+        select: { id: true, name: true, brandName: true, isLive: true, deliveryPreferences: true },
+    });
+    const byId = new Map(vendors.map((v) => [v.id, v]));
+    for (const vendorId of vendorIds) {
+        const vendor = byId.get(vendorId);
+        (0, vendorAvailability_service_1.assertVendorAvailableForOrdering)(vendor ? { ...vendor, kycStatus: null } : null, vendor ? `${vendor.brandName || vendor.name}` : "This vendor");
+    }
+}
 // POST /api/payments/start
 const initiateOrderPayment = async (req, res) => {
     const userId = req.user.id;
@@ -78,6 +96,7 @@ const initiateOrderPayment = async (req, res) => {
     const { idempotencyKey, mobileSdk = false } = parsed.data;
     const orders = await getPayableOrderBatch(idempotencyKey, userId);
     assertProductsStillLive(orders);
+    await assertVendorsStillOperating(orders);
     const now = (0, time_1.nowUtc)();
     const paymentWindowMinutes = 15;
     const finalPaymentExpiresAt = (0, time_1.addMinutesUtc)(now, paymentWindowMinutes);
@@ -313,6 +332,7 @@ const chargeSavedCard = async (req, res) => {
     const userEmail = user.email;
     const orders = await getPayableOrderBatch(idempotencyKey, userId);
     assertProductsStillLive(orders);
+    await assertVendorsStillOperating(orders);
     const totalAmount = orders.reduce((sum, o) => sum + o.totalPrice, 0);
     const now = (0, time_1.nowUtc)();
     await prisma_1.default.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentInitiatedAt: now } });
