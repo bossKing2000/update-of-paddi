@@ -1,0 +1,5496 @@
+{
+  "info": {
+    "_postman_id": "f5a5e62a-7f6d-4f65-8d39-0e5c5b7e2a11",
+    "name": "Food Paddi API - Complete Endpoint Collection",
+    "description": "Generated from the uploaded update-of-paddi-main source. Includes all routes mounted by src/server.ts, direct server operations, the Paystack webhook, and routers implemented in source but not mounted by the current server entrypoint. Replace placeholder IDs/tokens/files with values from your environment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000"
+    },
+    {
+      "key": "customerPromotionsBase",
+      "value": "/api/customer/promotions"
+    },
+    {
+      "key": "customerSupportBase",
+      "value": "/api/customer/support"
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    },
+    {
+      "key": "refreshToken",
+      "value": ""
+    },
+    {
+      "key": "emailVerificationToken",
+      "value": ""
+    },
+    {
+      "key": "resetCode",
+      "value": ""
+    },
+    {
+      "key": "resetToken",
+      "value": ""
+    },
+    {
+      "key": "userId",
+      "value": ""
+    },
+    {
+      "key": "sessionId",
+      "value": ""
+    },
+    {
+      "key": "vendorId",
+      "value": ""
+    },
+    {
+      "key": "adminUserId",
+      "value": ""
+    },
+    {
+      "key": "deliveryUserId",
+      "value": ""
+    },
+    {
+      "key": "driverId",
+      "value": ""
+    },
+    {
+      "key": "productId",
+      "value": ""
+    },
+    {
+      "key": "productOptionId",
+      "value": ""
+    },
+    {
+      "key": "addressId",
+      "value": ""
+    },
+    {
+      "key": "cartItemId",
+      "value": ""
+    },
+    {
+      "key": "summaryId",
+      "value": ""
+    },
+    {
+      "key": "idempotencyKey",
+      "value": "checkout-example-20260824-001"
+    },
+    {
+      "key": "orderId",
+      "value": ""
+    },
+    {
+      "key": "assignmentId",
+      "value": ""
+    },
+    {
+      "key": "broadcastId",
+      "value": ""
+    },
+    {
+      "key": "reference",
+      "value": ""
+    },
+    {
+      "key": "paymentId",
+      "value": ""
+    },
+    {
+      "key": "cardId",
+      "value": ""
+    },
+    {
+      "key": "notificationId",
+      "value": ""
+    },
+    {
+      "key": "reviewId",
+      "value": ""
+    },
+    {
+      "key": "vendorReviewId",
+      "value": ""
+    },
+    {
+      "key": "promotionId",
+      "value": ""
+    },
+    {
+      "key": "specialRequestId",
+      "value": ""
+    },
+    {
+      "key": "offerId",
+      "value": ""
+    },
+    {
+      "key": "ticketId",
+      "value": ""
+    },
+    {
+      "key": "withdrawalId",
+      "value": ""
+    },
+    {
+      "key": "payoutId",
+      "value": ""
+    },
+    {
+      "key": "refundRequestId",
+      "value": ""
+    },
+    {
+      "key": "reviewReportId",
+      "value": ""
+    },
+    {
+      "key": "vehicleDeliveryPersonId",
+      "value": ""
+    },
+    {
+      "key": "imageFile1",
+      "value": ""
+    },
+    {
+      "key": "imageFile2",
+      "value": ""
+    },
+    {
+      "key": "proofFile",
+      "value": ""
+    },
+    {
+      "key": "vehicleDocumentFile",
+      "value": ""
+    },
+    {
+      "key": "paymentWebhookSecret",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "01 Auth & Account",
+      "description": "Public auth, token refresh, onboarding, profile, addresses, and nearby vendors.",
+      "item": [
+        {
+          "name": "Register customer - JSON example",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"customer_demo\",\n  \"name\": \"Demo Customer\",\n  \"email\": \"customer@example.com\",\n  \"password\": \"Password123!\",\n  \"phoneNumber\": \"08012345678\",\n  \"role\": \"CUSTOMER\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Public registration. The source schema requires name, email, password, and role; password is at least 6 characters. The response returns accessToken and sets a refreshToken cookie."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "",
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.accessToken) pm.environment.set('accessToken', j.accessToken);",
+                  "if (j.refreshToken) pm.environment.set('refreshToken', j.refreshToken);",
+                  "if (j.user && j.user.id) pm.environment.set('userId', j.user.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register vendor - multipart example",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/auth/register",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "username",
+                  "value": "vendor_demo",
+                  "type": "text"
+                },
+                {
+                  "key": "name",
+                  "value": "Demo Vendor",
+                  "type": "text"
+                },
+                {
+                  "key": "email",
+                  "value": "vendor@example.com",
+                  "type": "text"
+                },
+                {
+                  "key": "password",
+                  "value": "Password123!",
+                  "type": "text"
+                },
+                {
+                  "key": "phoneNumber",
+                  "value": "08012345679",
+                  "type": "text"
+                },
+                {
+                  "key": "role",
+                  "value": "VENDOR",
+                  "type": "text"
+                },
+                {
+                  "key": "brandName",
+                  "value": "Demo Kitchen",
+                  "type": "text"
+                },
+                {
+                  "key": "avatarUrl",
+                  "type": "file",
+                  "src": "{{imageFile1}}"
+                }
+              ]
+            },
+            "description": "The route uses upload.single(\"avatarUrl\"). Do not manually add Content-Type; Postman will add the multipart boundary."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "",
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.accessToken) pm.environment.set('accessToken', j.accessToken);",
+                  "if (j.refreshToken) pm.environment.set('refreshToken', j.refreshToken);",
+                  "if (j.user && j.user.id) pm.environment.set('userId', j.user.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register delivery person - JSON example",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/register",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"driver_demo\",\n  \"name\": \"Demo Driver\",\n  \"email\": \"driver@example.com\",\n  \"password\": \"Password123!\",\n  \"phoneNumber\": \"08012345680\",\n  \"role\": \"DELIVERY\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Registration also creates the linked DeliveryPerson row when role is DELIVERY."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "",
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.accessToken) pm.environment.set('accessToken', j.accessToken);",
+                  "if (j.refreshToken) pm.environment.set('refreshToken', j.refreshToken);",
+                  "if (j.user && j.user.id) pm.environment.set('userId', j.user.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login - web cookie flow",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"customer@example.com\",\n  \"password\": \"Password123!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Requires a verified email. The server sets an httpOnly refreshToken cookie; accessToken is returned in JSON."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "",
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.accessToken) pm.environment.set('accessToken', j.accessToken);",
+                  "if (j.refreshToken) pm.environment.set('refreshToken', j.refreshToken);",
+                  "if (j.user && j.user.id) pm.environment.set('userId', j.user.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login - mobile flow",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-client-type",
+                "value": "mobile",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"customer@example.com\",\n  \"password\": \"Password123!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "With x-client-type: mobile, the refreshToken is also returned in JSON."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "",
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.accessToken) pm.environment.set('accessToken', j.accessToken);",
+                  "if (j.refreshToken) pm.environment.set('refreshToken', j.refreshToken);",
+                  "if (j.user && j.user.id) pm.environment.set('userId', j.user.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh access token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/refresh-token",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Accepts refreshToken from the cookie or JSON body. The response returns new accessToken and refreshToken and refreshes the same Redis session."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "",
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.accessToken) pm.environment.set('accessToken', j.accessToken);",
+                  "if (j.refreshToken) pm.environment.set('refreshToken', j.refreshToken);",
+                  "if (j.user && j.user.id) pm.environment.set('userId', j.user.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Logout current device",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/logout",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Revokes only the current per-device Redis session and clears the refresh cookie."
+          }
+        },
+        {
+          "name": "Logout all devices",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/logout-all-devices",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Deletes all sessions and increments tokenVersion, invalidating outstanding refresh tokens."
+          }
+        },
+        {
+          "name": "List active sessions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/auth/sessions",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Returns active per-device sessions with a current flag."
+          }
+        },
+        {
+          "name": "Revoke one session",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/auth/sessions/{{sessionId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Replace sessionId in the URL with a value returned by List active sessions."
+          }
+        },
+        {
+          "name": "Get login history",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/auth/login-history",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Returns up to 20 recent login-history rows."
+          }
+        },
+        {
+          "name": "Get profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/auth/profile",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Returns the authenticated profile and onboarding state."
+          }
+        },
+        {
+          "name": "Update profile - JSON fields",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/api/auth/profile",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "name",
+                  "value": "Updated Demo Name",
+                  "type": "text"
+                },
+                {
+                  "key": "phoneNumber",
+                  "value": "08012345678",
+                  "type": "text"
+                },
+                {
+                  "key": "bio",
+                  "value": "A short profile bio.",
+                  "type": "text"
+                },
+                {
+                  "key": "preferences",
+                  "value": "[\"push_orders\",\"nearby_vendors\"]",
+                  "type": "text"
+                },
+                {
+                  "key": "brandName",
+                  "value": "Updated Kitchen",
+                  "type": "text"
+                },
+                {
+                  "key": "brandLogo",
+                  "value": "https://example.com/logo.png",
+                  "type": "text"
+                },
+                {
+                  "key": "vehicleType",
+                  "value": "Motorcycle",
+                  "type": "text"
+                },
+                {
+                  "key": "licensePlate",
+                  "value": "ABC-123XY",
+                  "type": "text"
+                },
+                {
+                  "key": "status",
+                  "value": "AVAILABLE",
+                  "type": "text"
+                },
+                {
+                  "key": "avatarUrl",
+                  "type": "file",
+                  "src": "{{imageFile1}}"
+                }
+              ]
+            },
+            "description": "Multipart update. Fields are role-filtered by the controller; brand fields apply to VENDOR and vehicle fields are applied to DELIVERY. An uploaded avatar overrides avatarUrl."
+          }
+        },
+        {
+          "name": "Legacy all-user listing (unprotected)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/auth/alluser",
+            "description": "This route is still physically wired in auth.routes.ts despite comments saying it was removed. Treat it as a security finding and remove or protect it in production."
+          }
+        },
+        {
+          "name": "Select role",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/select-role",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"CUSTOMER\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "For an account without a role. Allowed values: CUSTOMER, VENDOR, DELIVERY."
+          }
+        },
+        {
+          "name": "Request password reset code",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/forgot-password",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"customer@example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "In non-production, the six-character reset code is logged by the server because email sending is commented out in this flow."
+          }
+        },
+        {
+          "name": "Verify reset code",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/verify-reset-code",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"customer@example.com\",\n  \"code\": \"ABC123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Use the six-character code from the email/log. The response returns a short-lived resetToken and replaces the DB code with that token."
+          }
+        },
+        {
+          "name": "Securely reset password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/secure-reset-password",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"resetToken\": \"{{resetToken}}\",\n  \"newPassword\": \"NewPassword123!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Requires the resetToken from Verify reset code. It revokes all sessions after changing the password."
+          }
+        },
+        {
+          "name": "Verify email",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/auth/verify-email?token={{emailVerificationToken}}",
+            "description": "Returns an HTML success/failure page. The token is generated at registration; the registration response does not expose it."
+          }
+        },
+        {
+          "name": "Resend verification email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/resend-verification",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"customer@example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Generates a verification token and sends an email. The source sets a 30-second expiry for this resend flow."
+          }
+        },
+        {
+          "name": "Google login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/google-login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idToken\": \"<GOOGLE_ID_TOKEN_FROM_GOOGLE_SIGN_IN>\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "The backend verifies the Google ID token against GOOGLE_CLIENT_ID and returns access/refresh tokens."
+          }
+        },
+        {
+          "name": "Create address",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/addresses",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"Home\",\n  \"street\": \"12 Example Street\",\n  \"city\": \"Lagos\",\n  \"state\": \"Lagos\",\n  \"country\": \"Nigeria\",\n  \"zipCode\": \"100001\",\n  \"latitude\": 6.5244,\n  \"longitude\": 3.3792,\n  \"isDefault\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Address fields label, street, city, and country are required. Save the returned address.id into addressId."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.address && j.data.address.id) pm.environment.set('addressId', j.data && j.data.address && j.data.address.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List addresses",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/auth/addresses",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Update address",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/addresses/{{addressId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"Work\",\n  \"street\": \"1 Updated Avenue\",\n  \"city\": \"Lagos\",\n  \"state\": \"Lagos\",\n  \"country\": \"Nigeria\",\n  \"isDefault\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "The controller enforces ownership and accepts a partial address body."
+          }
+        },
+        {
+          "name": "Delete address",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/auth/addresses/{{addressId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Deletes only an address owned by the authenticated user."
+          }
+        },
+        {
+          "name": "Find nearby vendors",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/auth/nearby?lat=6.5244&lng=3.3792&radius=5",
+            "description": "Public nearby-vendor search. radius is kilometers and defaults to 5. Response is {success:true,data:[...]} with distanceKm, isOpen, averageRating, and reviewCount."
+          }
+        },
+        {
+          "name": "Verify vendor or rider NIN",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/kyc/verify-nin",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nin\": \"12345678901\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Authenticated VENDOR or DELIVERY only. Requires configured Dojah credentials and a real NIN in a non-test environment."
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 Products",
+      "description": "Public catalog/search plus vendor product management.",
+      "item": [
+        {
+          "name": "List products",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/product?page=1&limit=20&category=ALL&vendorId={{vendorId}}",
+            "description": "Public paginated catalog. limit is capped at 20; category is a Prisma Category enum and vendorId is optional."
+          }
+        },
+        {
+          "name": "List categories",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/product/categories"
+          }
+        },
+        {
+          "name": "Product suggestions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/product/p/suggestions?q=jollof",
+            "description": "q must contain at least two characters. Returns up to 12 suggestions."
+          }
+        },
+        {
+          "name": "Search products",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/product/p/search?q=jollof rice&page=1&limit=20&sortBy=relevance",
+            "description": "q is required. sortBy supports relevance, priceAsc, priceDesc, popularity, and newest."
+          }
+        },
+        {
+          "name": "Most popular live products",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/product/p/most?page=1&limit=50",
+            "description": "Public popularity listing. limit is capped at 50."
+          }
+        },
+        {
+          "name": "Get product by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/product/{{productId}}"
+          }
+        },
+        {
+          "name": "Create product - multipart",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/product",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "name",
+                  "value": "Jollof Rice Special",
+                  "type": "text"
+                },
+                {
+                  "key": "description",
+                  "value": "A generous serving of smoky party jollof rice.",
+                  "type": "text"
+                },
+                {
+                  "key": "price",
+                  "value": "3500",
+                  "type": "text"
+                },
+                {
+                  "key": "category",
+                  "value": "LUNCH",
+                  "type": "text"
+                },
+                {
+                  "key": "archived",
+                  "value": "false",
+                  "type": "text"
+                },
+                {
+                  "key": "options",
+                  "value": "[{\"name\":\"Extra chicken\",\"price\":1200},{\"name\":\"Fried plantain\",\"price\":500}]",
+                  "type": "text"
+                },
+                {
+                  "key": "images",
+                  "type": "file",
+                  "src": "{{imageFile1}}"
+                },
+                {
+                  "key": "images",
+                  "type": "file",
+                  "src": "{{imageFile2}}"
+                }
+              ]
+            },
+            "description": "Vendor only. Upload 1-6 images using repeated images fields; optional video fields can be repeated in the request but the update path permits one final video. options is JSON text when sent as multipart."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.product && j.data.product.id) pm.environment.set('productId', j.data && j.data.product && j.data.product.id);",
+                  "if (j.data && j.data.product && j.data.product.options && j.data.product.options[0] && j.data.product.options[0].id) pm.environment.set('productOptionId', j.data && j.data.product && j.data.product.options && j.data.product.options[0] && j.data.product.options[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update product - smart multipart format",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/api/product/{{productId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "name",
+                  "value": "Jollof Rice Special - Updated",
+                  "type": "text"
+                },
+                {
+                  "key": "price",
+                  "value": "3800",
+                  "type": "text"
+                },
+                {
+                  "key": "imageUpdates",
+                  "value": "{\"keep\":[\"https://res.cloudinary.com/demo/image/upload/v1/food-paddi/current.jpg\"],\"delete\":[]}",
+                  "type": "text"
+                },
+                {
+                  "key": "videoUpdates",
+                  "value": "{\"delete\":false}",
+                  "type": "text"
+                },
+                {
+                  "key": "options",
+                  "value": "[{\"id\":\"{{productOptionId}}\",\"name\":\"Extra chicken\",\"price\":1400},{\"name\":\"Coleslaw\",\"price\":400}]",
+                  "type": "text"
+                },
+                {
+                  "key": "images",
+                  "type": "file",
+                  "src": "{{imageFile1}}"
+                }
+              ]
+            },
+            "description": "Vendor owner only. imageUpdates/videoUpdates are JSON strings in multipart; do not send them together with the legacy images/video arrays."
+          }
+        },
+        {
+          "name": "Archive or unarchive product",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/product/{{productId}}/archive",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"archived\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor owner only. Use false to unarchive."
+          }
+        },
+        {
+          "name": "Hard-delete never-ordered product",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/product/{{productId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Vendor owner only. Products with any order history return a conflict and must be archived instead."
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 Product Scheduling",
+      "description": "Vendor scheduling and admin maintenance for product live status.",
+      "item": [
+        {
+          "name": "Schedule product go-live",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/product/{{productId}}/schedule/go-live",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"goLiveAt\": \"2026-08-24T12:00:00.000Z\",\n  \"takeDownAt\": \"2026-08-24T18:00:00.000Z\",\n  \"graceMinutes\": 15\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor owner only. ISO datetime strings are required and takeDownAt must be after goLiveAt. If goLiveAt is in the past, the product becomes live immediately."
+          }
+        },
+        {
+          "name": "Take product down now",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/product/{{productId}}/schedule/take-down",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor owner or ADMIN. No body is required."
+          }
+        },
+        {
+          "name": "Extend live grace period",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/product/{{productId}}/schedule/extend-grace",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"extraMinutes\": 30\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor owner or ADMIN. Product must currently be live."
+          }
+        },
+        {
+          "name": "Fix product live statuses",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/product/fix-live-statuses",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Admin-only maintenance endpoint; the job also runs from cron."
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 Cart & Checkout",
+      "description": "Customer cart, pricing snapshot, and checkout.",
+      "item": [
+        {
+          "name": "Get cart",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/cart",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Add item to cart",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/cart/add",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"productId\": \"{{productId}}\",\n  \"quantity\": 2,\n  \"selectedOptions\": [\n    \"{{productOptionId}}\"\n  ],\n  \"specialRequest\": \"Please pack sauce separately.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer only. quantity defaults to 1, selectedOptions is an array of product-option UUIDs, and specialRequest is max 500 characters."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.items && j.data.items[0] && j.data.items[0].id) pm.environment.set('cartItemId', j.data && j.data.items && j.data.items[0] && j.data.items[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update cart item",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/cart/items/{{cartItemId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 3,\n  \"selectedOptions\": [\n    \"{{productOptionId}}\"\n  ],\n  \"specialRequest\": \"Updated note.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer only. quantity may be 0 as an edge case; update is partial."
+          }
+        },
+        {
+          "name": "Remove cart item",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/cart/items/{{cartItemId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get cart summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/cart/summary?addressId={{addressId}}&promoCode=WELCOME10",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Customer only. The returned summaryId is single-use, expires after 30 minutes, and is required for checkout."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.summaryId) pm.environment.set('summaryId', j.data && j.data.summaryId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Checkout cart",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/cart/checkout",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"summaryId\": \"{{summaryId}}\",\n  \"addressId\": \"{{addressId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer only. Creates one order per vendor, validates the summary and live pricing, and uses Idempotency-Key to make retries safe."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.orders && j.data.orders[0] && j.data.orders[0].id) pm.environment.set('orderId', j.data && j.data.orders && j.data.orders[0] && j.data.orders[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Clear cart",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/cart",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Customer only."
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 Orders & Special Orders",
+      "description": "Orders, status transitions, special-order requests/offers, and analytics.",
+      "item": [
+        {
+          "name": "List my orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/order?page=1&limit=10&status=AWAITING_PAYMENT&paymentStatus=PENDING",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get one order",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/order/{{orderId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Update order status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/order/vendor/order/{{orderId}}/update-status",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"COOKING\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "The state machine is role-sensitive: VENDOR can move PAYMENT_CONFIRMED -> COOKING -> READY_FOR_PICKUP -> OUT_FOR_DELIVERY; CUSTOMER confirms COMPLETED from OUT_FOR_DELIVERY; customer or vendor can cancel in allowed states. Payment must be successful for fulfillment transitions."
+          }
+        },
+        {
+          "name": "List special requests",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/order/special-requests?page=1&limit=20&status=OFFER_MADE",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create special request",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/order/special-requests",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"productId\": \"{{productId}}\",\n  \"quantity\": 5,\n  \"details\": \"Please prepare five family-size portions with mild spice.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer only. details is 1-1000 characters."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.request && j.data.request.id) pm.environment.set('specialRequestId', j.data && j.data.request && j.data.request.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Vendor makes special offer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/order/special-requests/{{specialRequestId}}/offers",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"price\": 18000,\n  \"message\": \"We can prepare this for pickup in 45 minutes.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor only. price is positive and message is optional up to 1000 characters."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.offer && j.data.offer.id) pm.environment.set('offerId', j.data && j.data.offer && j.data.offer.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Accept special offer",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/order/special-offers/{{offerId}}/accept",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"addressId\": \"{{addressId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer who owns the request only. Creates an AWAITING_PAYMENT order and rejects competing offers."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.order && j.data.order.id) pm.environment.set('orderId', j.data && j.data.order && j.data.order.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reject one special offer",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/order/special-offers/{{offerId}}/reject",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer who owns the request only."
+          }
+        },
+        {
+          "name": "Reject special request",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/order/special-requests/{{specialRequestId}}/reject",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer who owns the request only; all offers are rejected."
+          }
+        },
+        {
+          "name": "Vendor order stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/order/vendor/stats",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Customer order stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/order/customer/stats",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Vendor report",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/order/vendor/report",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 Payments",
+      "description": "Paystack payments, refunds, saved cards, OTP, receipts, and verification.",
+      "item": [
+        {
+          "name": "Start web payment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-device-channel",
+                "value": "web",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/payments/start",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotencyKey\": \"{{idempotencyKey}}\",\n  \"mobileSdk\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer only. The idempotencyKey must match the checkout batch. Returns paymentUrl and reference; payment amount is calculated server-side."
+          }
+        },
+        {
+          "name": "Start mobile SDK payment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "x-device-channel",
+                "value": "mobile",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/payments/start",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotencyKey\": \"{{idempotencyKey}}\",\n  \"mobileSdk\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer only. Returns paymentData with reference, amount in kobo, email, publicKey, and metadata."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.paymentData && j.data.paymentData.reference) pm.environment.set('reference', j.data && j.data.paymentData && j.data.paymentData.reference);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm payment by reference",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/payments/confirm/{{reference}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Authenticated fallback after Paystack redirect. Verifies Paystack directly and finalizes successful payment."
+          }
+        },
+        {
+          "name": "List my payments",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/payments/user",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Request refund",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/payments/refund",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reference\": \"{{reference}}\",\n  \"reason\": \"The delivered order was materially different from the description.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer only. Payment must be SUCCESS and only one refund request may exist per reference."
+          }
+        },
+        {
+          "name": "Verify payment before fulfillment",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/payments/orders/{{orderId}}/verify-payment",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Save card token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/payments/cards/save",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cardToken\": \"tok_example_from_paystack\",\n  \"last4\": \"4081\",\n  \"brand\": \"visa\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Store only the gateway authorization token, not raw card data. This endpoint expects a token, last4, and brand."
+          }
+        },
+        {
+          "name": "Charge saved card",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/payments/cards/charge",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotencyKey\": \"{{idempotencyKey}}\",\n  \"cardId\": \"{{cardId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer only. The server charges Paystack; response may require OTP with a reference."
+          }
+        },
+        {
+          "name": "Submit saved-card OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/payments/cards/submit-otp",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reference\": \"{{reference}}\",\n  \"otp\": \"123456\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Continue a saved-card charge when Paystack returns send_otp. A send_pin response indicates another gateway step is required."
+          }
+        },
+        {
+          "name": "List saved cards",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/payments/cards",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.cards && j.data.cards[0] && j.data.cards[0].id) pm.environment.set('cardId', j.data && j.data.cards && j.data.cards[0] && j.data.cards[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Set default saved card",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/payments/cards/default",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cardId\": \"{{cardId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Delete saved card",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/payments/cards/{{cardId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get payment receipt URL",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/payments/receipt/{{paymentId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Authenticated owner-only access. Returns a public PDF URL from the receipt record."
+          }
+        }
+      ]
+    },
+    {
+      "name": "07 Delivery Assignments",
+      "description": "Vendor/admin assignment and delivery-person operations.",
+      "item": [
+        {
+          "name": "Assign driver or broadcast order",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/delivery/assign",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"orderId\": \"{{orderId}}\",\n  \"driverId\": \"{{driverId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "VENDOR owner of the order or ADMIN. Omit driverId to broadcast to nearby drivers."
+          }
+        },
+        {
+          "name": "Accept assignment",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/{{assignmentId}}/accept",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Delivery-person only."
+          }
+        },
+        {
+          "name": "Decline assignment",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/{{assignmentId}}/decline",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Delivery-person only."
+          }
+        },
+        {
+          "name": "List my assignments",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/my-assignments",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Delivery-person only."
+          }
+        },
+        {
+          "name": "List broadcast offers",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/offers",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Delivery-person only."
+          }
+        },
+        {
+          "name": "Update delivery assignment status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/delivery/{{assignmentId}}/status",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"PICKED_UP\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Delivery-person only. Valid DeliveryStatus values are those in the Prisma enum; DELIVERED requires accepted proof of delivery."
+          }
+        },
+        {
+          "name": "Update driver location",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/delivery/location",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"latitude\": 6.5244,\n  \"longitude\": 3.3792\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Delivery-person only."
+          }
+        },
+        {
+          "name": "Set driver online status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/delivery/online-status",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isOnline\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Delivery-person only."
+          }
+        },
+        {
+          "name": "Get assignment by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/{{assignmentId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Authenticated. Controller allows the assigned driver, order customer, order vendor, or ADMIN."
+          }
+        },
+        {
+          "name": "Get driver history",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/driver/{{driverId}}/history",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "A driver may view only their own history unless ADMIN."
+          }
+        },
+        {
+          "name": "Get customer delivery history",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/customer/{{userId}}/history",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "A customer may view only their own delivery history unless ADMIN."
+          }
+        },
+        {
+          "name": "Get driver analytics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/driver/{{driverId}}/analytics",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "A driver may view only their own analytics unless ADMIN."
+          }
+        },
+        {
+          "name": "Find available drivers",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/driver/available?latitude=6.5244&longitude=3.3792",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Delivery-person only; latitude and longitude are required."
+          }
+        },
+        {
+          "name": "Accept broadcast offer",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/broadcast/{{broadcastId}}/accept",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Delivery-person only."
+          }
+        },
+        {
+          "name": "Decline broadcast offer",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/broadcast/{{broadcastId}}/decline",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Delivery-person only."
+          }
+        }
+      ]
+    },
+    {
+      "name": "08 Reviews",
+      "description": "Product/vendor reviews, replies, votes, reports, and summaries.",
+      "item": [
+        {
+          "name": "List product reviews",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/review/{{productId}}/reviews?page=1&limit=10"
+          }
+        },
+        {
+          "name": "Product review summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/review/{{productId}}/reviews/summary?page=1&limit=10"
+          }
+        },
+        {
+          "name": "Create product review - multipart",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/review/{{productId}}/reviews",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "productId",
+                  "value": "{{productId}}",
+                  "type": "text"
+                },
+                {
+                  "key": "rating",
+                  "value": "5",
+                  "type": "text"
+                },
+                {
+                  "key": "comment",
+                  "value": "Excellent meal and fast delivery.",
+                  "type": "text"
+                },
+                {
+                  "key": "images",
+                  "type": "file",
+                  "src": "{{imageFile1}}"
+                }
+              ]
+            },
+            "description": "Customer only and requires a completed order containing the product. productId, rating, and optional comment are validated; images may be uploaded under repeated images fields."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.review && j.data.review.id) pm.environment.set('reviewId', j.data && j.data.review && j.data.review.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update product review - multipart",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/api/review/{{productId}}/reviews/{{reviewId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "productId",
+                  "value": "{{productId}}",
+                  "type": "text"
+                },
+                {
+                  "key": "rating",
+                  "value": "4",
+                  "type": "text"
+                },
+                {
+                  "key": "comment",
+                  "value": "Updated review text.",
+                  "type": "text"
+                },
+                {
+                  "key": "images",
+                  "type": "file",
+                  "src": "{{imageFile1}}"
+                }
+              ]
+            },
+            "description": "Customer owner only. The controller requires productId in the schema but ignores it for reassignment safety."
+          }
+        },
+        {
+          "name": "Delete product review",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/review/{{productId}}/reviews/{{reviewId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Vote review helpfulness",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/review/reviews/{{reviewId}}/vote",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isHelpful\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Authenticated users except the review author. reviewId comes from the path and is merged into validation."
+          }
+        },
+        {
+          "name": "Report review",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/review/reviews/{{reviewId}}/report",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"This review appears to contain abusive or spam content.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Authenticated users. One report per user/review."
+          }
+        },
+        {
+          "name": "Vendor reply to review",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/review/reviews/{{reviewId}}/reply",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Thank you for your feedback; we are glad you enjoyed it.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor owner of the reviewed product. The route path provides reviewId; message is at least two characters."
+          }
+        },
+        {
+          "name": "Delete vendor reply",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/review/reviews/{{reviewId}}/reply",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List vendor reviews",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/review/vendor/{{vendorId}}/reviews?page=1&limit=10"
+          }
+        },
+        {
+          "name": "Vendor review summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/review/vendor/{{vendorId}}/reviews/summary"
+          }
+        },
+        {
+          "name": "Create vendor review",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/review/vendor/{{vendorId}}/reviews",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rating\": 5,\n  \"comment\": \"Great service and reliable delivery.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Customer only and requires a completed order from this vendor."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.review && j.data.review.id) pm.environment.set('vendorReviewId', j.data && j.data.review && j.data.review.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get one vendor review",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/review/vendor/reviews/single/{{vendorReviewId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "09 Notifications",
+      "description": "Notification listing and read-state operations.",
+      "item": [
+        {
+          "name": "List notifications",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/notifications?page=1&limit=20",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Mark notification read",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/api/notifications/{{notificationId}}/read",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Mark all notifications read",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/api/notifications/read-all",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "10 Promotions",
+      "description": "Vendor promotions and referral flows.",
+      "item": [
+        {
+          "name": "Create vendor promotion",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/promotions",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"WELCOME10\",\n  \"name\": \"Welcome discount\",\n  \"description\": \"Ten percent off your first order.\",\n  \"type\": \"PERCENTAGE\",\n  \"value\": 10,\n  \"maxDiscount\": 2000,\n  \"startsAt\": \"2026-08-24T00:00:00.000Z\",\n  \"expiresAt\": \"2026-09-30T23:59:59.000Z\",\n  \"usageLimit\": 100,\n  \"maxUsesPerUser\": 1,\n  \"minOrderAmount\": 5000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor only. DiscountType must match the Prisma enum; percentage values cannot exceed 100."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.promo && j.data.promo.id) pm.environment.set('promotionId', j.data && j.data.promo && j.data.promo.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List my promotions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/promotions/mine",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Update vendor promotion",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/promotions/{{promotionId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Welcome discount updated\",\n  \"value\": 15,\n  \"maxDiscount\": 2500\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor owner only. At least one field is required."
+          }
+        },
+        {
+          "name": "Deactivate vendor promotion",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/api/promotions/{{promotionId}}/deactivate",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Reactivate vendor promotion",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/api/promotions/{{promotionId}}/reactivate",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Vendor owner only; expired promotions cannot be reactivated."
+          }
+        },
+        {
+          "name": "Get my referral code",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/referrals/my-code",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Apply referral code",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/referrals/apply",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"PADDIABC123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Authenticated user only and only once. Self-referral is rejected."
+          }
+        },
+        {
+          "name": "Get referral rewards",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/referrals/my-rewards",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "11 Vendor Dashboard & Settings",
+      "description": "Vendor dashboard, payouts, bank details, preferences, service areas, follow graph, and support.",
+      "item": [
+        {
+          "name": "Vendor dashboard",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/dashboard",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Vendor analytics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/analytics",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Revenue overview",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/revenue-overview?period=thisWeek",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "period is optional and supports thisWeek, lastWeek, or lastMonth."
+          }
+        },
+        {
+          "name": "Product performance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/product-performance",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Recent vendor activity",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/recent-activity?page=1&limit=20",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Product live control",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/product-live-control",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "All vendor products",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/products/all?page=1&limit=20",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Clear vendor cache",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/cache/clear",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Vendor payout summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/payouts",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List supported vendor banks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/payouts/banks",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get vendor bank details",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/payouts/bank-details",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Set vendor bank details",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/vendor/payouts/bank-details",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bankName\": \"Example Bank\",\n  \"bankCode\": \"058\",\n  \"bankAccountNumber\": \"0123456789\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor only. The controller verifies the account with Paystack before saving and masks the account number in reads."
+          }
+        },
+        {
+          "name": "Deprecated vendor summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/summary",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Deprecated live products",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/products/live",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Deprecated total products",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/products/total",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Deprecated recent orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/orders/recent",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Deprecated revenue chart",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/revenue",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Deprecated average order value",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/orders/average-value",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Deprecated customer return rate",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/customers/return-rate",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Deprecated peak hours",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/orders/peak-hours",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get vendor settings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/settings",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Update operating hours",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/vendor/settings/operating-hours",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"timezone\": \"Africa/Lagos\",\n  \"monday\": {\n    \"enabled\": true,\n    \"open\": \"09:00\",\n    \"close\": \"22:00\"\n  },\n  \"tuesday\": {\n    \"enabled\": true,\n    \"open\": \"09:00\",\n    \"close\": \"22:00\"\n  },\n  \"wednesday\": {\n    \"enabled\": true,\n    \"open\": \"09:00\",\n    \"close\": \"22:00\"\n  },\n  \"thursday\": {\n    \"enabled\": true,\n    \"open\": \"09:00\",\n    \"close\": \"22:00\"\n  },\n  \"friday\": {\n    \"enabled\": true,\n    \"open\": \"09:00\",\n    \"close\": \"23:00\"\n  },\n  \"saturday\": {\n    \"enabled\": true,\n    \"open\": \"10:00\",\n    \"close\": \"23:00\"\n  },\n  \"sunday\": {\n    \"enabled\": false,\n    \"open\": null,\n    \"close\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor only. All seven day objects are required; time values use HH:mm."
+          }
+        },
+        {
+          "name": "Update delivery preferences",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/vendor/settings/delivery-preferences",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"acceptingOrders\": true,\n  \"deliveryEnabled\": true,\n  \"deliveryRadiusKm\": 10,\n  \"baseDeliveryFee\": 500,\n  \"preparationTimeMinutes\": 45\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor only."
+          }
+        },
+        {
+          "name": "Update service areas",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/vendor/settings/service-areas",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"areas\": [\n    {\n      \"id\": \"lagos-mainland\",\n      \"label\": \"Lagos Mainland\",\n      \"city\": \"Lagos\",\n      \"state\": \"Lagos\",\n      \"radiusKm\": 10,\n      \"enabled\": true\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor only. Maximum 50 service areas."
+          }
+        },
+        {
+          "name": "Follow vendor",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/vendor-follow/follow",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vendorId\": \"{{vendorId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Authenticated user; target must be a VENDOR and cannot be the caller."
+          }
+        },
+        {
+          "name": "Unfollow vendor",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/vendor-follow/unfollow",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vendorId\": \"{{vendorId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Following status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor-follow/status/{{vendorId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List vendor followers",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor-follow/vendor/{{vendorId}}/followers?page=1&limit=25",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Vendor follower count",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor-follow/vendor/{{vendorId}}/follower-count",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List followed vendors",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor-follow/following?page=1&limit=25",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create vendor support ticket",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/vendor/support/tickets",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"category\": \"PAYOUT\",\n  \"subject\": \"Payout account needs review\",\n  \"description\": \"Please review the bank verification result for our vendor payout account.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Vendor only. category supports ACCOUNT, ORDER, PAYOUT, MENU, TECHNICAL, OTHER."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.ticket && j.data.ticket.id) pm.environment.set('ticketId', j.data && j.data.ticket && j.data.ticket.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List vendor support tickets",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/vendor/support/tickets?page=1&limit=20",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "12 Rider Operations",
+      "description": "Rider profile, payouts, withdrawals, proof, vehicle, support, and admin reviews.",
+      "item": [
+        {
+          "name": "Rider status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/rider/status",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Rider payout summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/rider/payouts",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List supported rider banks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/rider/payouts/banks",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Set rider bank details",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/rider/payouts/bank-details",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bankName\": \"Example Bank\",\n  \"bankCode\": \"058\",\n  \"accountNumber\": \"0123456789\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Delivery-person only. accountNumber must be exactly 10 digits and is verified with Paystack."
+          }
+        },
+        {
+          "name": "Request rider withdrawal",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/rider/payouts/withdrawals",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 1500,\n  \"idempotencyKey\": \"rider-withdrawal-20260824-001\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Delivery-person only. Requires ACTIVE status, VERIFIED KYC, a verified payout account, and minimum amount of 100."
+          }
+        },
+        {
+          "name": "Submit delivery proof - multipart",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/rider/assignments/{{assignmentId}}/proof",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "recipientName",
+                  "value": "Jane Doe",
+                  "type": "text"
+                },
+                {
+                  "key": "note",
+                  "value": "Package handed to recipient at the front desk.",
+                  "type": "text"
+                },
+                {
+                  "key": "proof",
+                  "type": "file",
+                  "src": "{{proofFile}}"
+                }
+              ]
+            },
+            "description": "Delivery-person owner only. proof must be an image and assignment status must be PICKED_UP or EN_ROUTE."
+          }
+        },
+        {
+          "name": "Get rider vehicle",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/rider/vehicle",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create or update rider vehicle",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/rider/vehicle",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vehicleType\": \"Motorcycle\",\n  \"licensePlate\": \"ABC-123XY\",\n  \"make\": \"Honda\",\n  \"model\": \"CB125\",\n  \"color\": \"Black\",\n  \"documentUrl\": \"https://example.com/vehicle-document.jpg\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Delivery-person only. Saves the vehicle as PENDING for review."
+          }
+        },
+        {
+          "name": "Upload rider vehicle document",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/rider/vehicle/document",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "document",
+                  "type": "file",
+                  "src": "{{vehicleDocumentFile}}"
+                }
+              ]
+            },
+            "description": "Delivery-person only. Save vehicle details first; document must be an image."
+          }
+        },
+        {
+          "name": "Create rider support ticket",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/rider/support/tickets",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"category\": \"PAYOUT\",\n  \"subject\": \"Withdrawal status question\",\n  \"description\": \"Please explain the current status of my withdrawal request.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Delivery-person only."
+          }
+        },
+        {
+          "name": "List rider support tickets",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/rider/support/tickets?page=1&limit=20",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Admin list rider withdrawals",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/rider/withdrawals?page=1&limit=20&status=PENDING",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Admin process rider withdrawal",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/rider/withdrawals/{{withdrawalId}}/process",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Admin only. Initiates Paystack transfer and leaves wallet debit to the signed transfer.success webhook."
+          }
+        },
+        {
+          "name": "Admin review delivery proof",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/rider/assignments/{{assignmentId}}/proof/review",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"VERIFIED\",\n  \"reviewNote\": \"Proof is clear and recipient details are present.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Admin only. status is VERIFIED or REJECTED."
+          }
+        },
+        {
+          "name": "Admin review rider vehicle",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/rider/vehicles/{{vehicleDeliveryPersonId}}/review",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"APPROVED\",\n  \"reviewNote\": \"Vehicle document verified.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Admin only. status is APPROVED, REJECTED, or SUSPENDED."
+          }
+        },
+        {
+          "name": "Admin review rider support ticket",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/rider/support/tickets/{{ticketId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"IN_PROGRESS\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Admin only. status is OPEN, IN_PROGRESS, RESOLVED, or CLOSED."
+          }
+        },
+        {
+          "name": "Read delivery proof",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/delivery/assignments/{{assignmentId}}/proof",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Authenticated assignment-involved user: driver, customer, vendor, or ADMIN."
+          }
+        }
+      ]
+    },
+    {
+      "name": "13 Admin",
+      "description": "Admin-only platform management, moderation, payouts, and audit logs.",
+      "item": [
+        {
+          "name": "Admin dashboard",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/dashboard",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List users",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/users?page=1&limit=20&role=CUSTOMER&search=demo",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get user",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/users/{{userId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Set user role",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/users/{{userId}}/role",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"CUSTOMER\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Set user KYC status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/users/{{userId}}/kyc-status",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kycStatus\": \"VERIFIED\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Admin only. kycStatus is PENDING, VERIFIED, or REJECTED."
+          }
+        },
+        {
+          "name": "Block user",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/users/{{userId}}/block",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Repeated policy violations.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Admin only. Blocking revokes all target sessions."
+          }
+        },
+        {
+          "name": "Unblock user",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/users/{{userId}}/unblock",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "List vendors",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/vendors?page=1&limit=20",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Set vendor commission rate",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/vendors/{{vendorId}}/commission-rate",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"commissionRate\": 0.15\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Admin only. Value must be between 0 and 1; 0.15 means 15%."
+          }
+        },
+        {
+          "name": "List all orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/orders?page=1&limit=20&status=COMPLETED",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get admin order",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/orders/{{orderId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Force order status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/orders/{{orderId}}/status",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"CANCELLED\",\n  \"reason\": \"Administrative correction after dispute review.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Admin override bypasses the normal customer/vendor state machine; use sparingly."
+          }
+        },
+        {
+          "name": "List payments",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/payments?page=1&limit=20&status=SUCCESS",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List refund requests",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/refund-requests?page=1&limit=20&status=PENDING",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Update refund request",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/refund-requests/{{refundRequestId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"APPROVED\",\n  \"adminNote\": \"Refund approved after review.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Use PENDING -> APPROVED or REJECTED; then APPROVED -> COMPLETED to move money through Paystack. For a partial completed refund, include amount in naira."
+          }
+        },
+        {
+          "name": "Pending vendor payouts",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/payouts/pending",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List vendor payouts",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/payouts?page=1&limit=20&status=PENDING",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Process new vendor payout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/payouts/process",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vendorId\": \"{{vendorId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Creates and processes a payout for eligible completed orders. To retry a failed payout instead, send payoutId."
+          }
+        },
+        {
+          "name": "Retry failed vendor payout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/payouts/process",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"payoutId\": \"{{payoutId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Mark manual vendor payout paid",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/payouts/{{payoutId}}/mark-paid",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Only for pending payouts with no Paystack reference."
+          }
+        },
+        {
+          "name": "List reported reviews",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/review-reports?page=1&limit=20",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Resolve review report",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/review-reports/{{reviewReportId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"dismiss\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "action is dismiss or remove."
+          }
+        },
+        {
+          "name": "Set delivery-person status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/delivery/{{deliveryUserId}}/status",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"ACTIVE\",\n  \"reason\": \"KYC and vehicle review completed.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "status must match DeliveryPersonStatus. SUSPENDED also revokes sessions and sets offline."
+          }
+        },
+        {
+          "name": "List audit logs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/audit-logs?page=1&limit=20&action=PAYOUT",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List all promotions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/promotions?page=1&limit=20&scope=platform",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create platform promotion",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/promotions",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"PLATFORM20\",\n  \"name\": \"Platform-wide discount\",\n  \"description\": \"A platform-wide promotion.\",\n  \"type\": \"PERCENTAGE\",\n  \"value\": 20,\n  \"maxDiscount\": 3000,\n  \"startsAt\": \"2026-08-24T00:00:00.000Z\",\n  \"expiresAt\": \"2026-09-30T23:59:59.000Z\",\n  \"usageLimit\": 1000,\n  \"maxUsesPerUser\": 1,\n  \"minOrderAmount\": 5000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Admin only; creates a platform-wide promotion with vendorId null."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.data && j.data.promo && j.data.promo.id) pm.environment.set('promotionId', j.data && j.data.promo && j.data.promo.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Deactivate any promotion",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/promotions/{{promotionId}}/deactivate",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "14 AI",
+      "description": "Search correction, recommendations, and vendor availability suggestion endpoints.",
+      "item": [
+        {
+          "name": "Correct search query",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/ai/search-correct?query=jolof rice",
+            "description": "query is required; this endpoint uses offline correction."
+          }
+        },
+        {
+          "name": "Get recommendations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/ai/recommendations?userId={{userId}}",
+            "description": "userId query parameter is required. The route itself has no authenticate middleware."
+          }
+        },
+        {
+          "name": "Suggest vendor availability",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/ai/vendor-availability",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vendorId\": \"{{vendorId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "vendorId is required. The route itself has no authenticate middleware."
+          }
+        }
+      ]
+    },
+    {
+      "name": "15 Seeder & Operations",
+      "description": "Health, API docs, job controls, seeder controls, and Paystack webhook.",
+      "item": [
+        {
+          "name": "Root API ping",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/"
+          }
+        },
+        {
+          "name": "Liveness health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/healthz"
+          }
+        },
+        {
+          "name": "Readiness health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/readyz",
+            "description": "Checks PostgreSQL and Redis; returns 200 when both are healthy and 503 otherwise."
+          }
+        },
+        {
+          "name": "Start popularity job",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/run-popularity-job",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Admin-only. Starts the in-memory popularity job if not already running."
+          }
+        },
+        {
+          "name": "Popularity job progress",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/popularity-progress",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Admin-only. Reads Redis progress state."
+          }
+        },
+        {
+          "name": "Cancel popularity job",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/cancel-popularity-job",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Admin-only."
+          }
+        },
+        {
+          "name": "Reset popularity job",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/reset-popularity-job",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Admin-only."
+          }
+        },
+        {
+          "name": "Open Swagger API docs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/docs",
+            "description": "Mounted in development by default and in production only when ENABLE_API_DOCS=true."
+          }
+        },
+        {
+          "name": "Start database seeder",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/seeder/run-seeder",
+            "description": "Operational endpoint; the current router has no authentication middleware."
+          }
+        },
+        {
+          "name": "Stop database seeder",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/seeder/stop-seeder",
+            "description": "Operational endpoint; the current router has no authentication middleware."
+          }
+        },
+        {
+          "name": "Seeder progress",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/seeder/seeder-progress"
+          }
+        },
+        {
+          "name": "Paystack charge.success webhook",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/payments/webhook",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event\": \"charge.success\",\n  \"data\": {\n    \"reference\": \"{{reference}}\",\n    \"amount\": 100000,\n    \"channel\": \"card\",\n    \"metadata\": {\n      \"userId\": \"{{userId}}\",\n      \"idempotencyKey\": \"{{idempotencyKey}}\"\n    },\n    \"authorization\": {\n      \"authorization_code\": \"AUTH_CODE_FROM_PAYSTACK\",\n      \"last4\": \"4081\",\n      \"brand\": \"visa\",\n      \"reusable\": true,\n      \"channel\": \"card\"\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Direct server route before express.json(). It requires a valid x-paystack-signature HMAC-SHA512 over the exact raw JSON body, accepts charge.success/transfer.success/transfer.failed, and returns plain text. Configure paymentWebhookSecret with PAYSTACK_SECRET_KEY. Use a real existing payment reference for a meaningful test."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "",
+                  "const secret = pm.environment.get('paymentWebhookSecret') || '';",
+                  "const raw = pm.request.body ? pm.request.body.raw : '';",
+                  "const signature = CryptoJS.HmacSHA512(raw, secret).toString(CryptoJS.enc.Hex);",
+                  "pm.request.headers.upsert({key: 'x-paystack-signature', value: signature});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "16 Implemented but not mounted",
+      "description": "These routers exist in source but are not mounted in the current src/server.ts. Adjust the base variables after adding a mount in the server.",
+      "item": [
+        {
+          "name": "Browse active customer promotions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}{{customerPromotionsBase}}/active",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Implemented by customerPromotions.routes.ts but not mounted by the current src/server.ts. Set customerPromotionsBase to the path you add in server.ts."
+          }
+        },
+        {
+          "name": "Create customer support ticket",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}{{customerSupportBase}}/tickets",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"category\": \"ORDER\",\n  \"subject\": \"Question about my order\",\n  \"description\": \"I need help understanding the current status of my order.\",\n  \"orderId\": \"{{orderId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Implemented by customerSupport.routes.ts but not mounted by the current src/server.ts. Set customerSupportBase to your chosen mount path."
+          }
+        },
+        {
+          "name": "List customer support tickets",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}{{customerSupportBase}}/tickets?page=1&limit=20",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Implemented by customerSupport.routes.ts but not mounted by the current src/server.ts."
+          }
+        }
+      ]
+    }
+  ],
+  "event": []
+}
