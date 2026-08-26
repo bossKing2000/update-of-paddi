@@ -456,7 +456,7 @@ export async function fetchProductPage(opts: {
  * Vendor Live filtering reuses VENDOR_OPERATING_SQL. Sorted identically to
  * the Prisma path so Explore sorting behaves consistently across modes.
  */
-async function fetchAvailableOnlyProducts(opts: {
+export async function fetchAvailableOnlyProducts(opts: {
   skip: number;
   take: number;
   category?: string;
@@ -543,7 +543,7 @@ async function fetchAvailableOnlyProducts(opts: {
            v."timezone" AS "vendor_timezone", v."operatingHours" AS "vendor_operatingHours"
     FROM "Product" p
     ${VENDOR_OPERATING_SQL}
-    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
+    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id${LOCAL_CALENDAR_SQL}
     WHERE ${whereSql}
     ORDER BY ${orderBySql}
     LIMIT ${take} OFFSET ${skip};
@@ -555,12 +555,9 @@ async function fetchAvailableOnlyProducts(opts: {
     `
     SELECT COUNT(*)::int AS count
     FROM "Product" p
-    LEFT JOIN "User" v ON v."id" = p."vendorId"
-      AND COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') <> 'false'
-    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
-    WHERE v."isLive" = true
-      AND p."archived" = false
-      ${conditions.length ? `AND ${whereSql}` : ""}
+    ${VENDOR_OPERATING_SQL}
+    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id${LOCAL_CALENDAR_SQL}
+    WHERE ${whereSql}
     ;
     `,
     ...params,
