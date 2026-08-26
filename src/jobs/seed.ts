@@ -599,7 +599,7 @@ async function seedDatabase() {
     where: { role: Role.CUSTOMER },
   });
   const deliveryUsers = await prisma.user.findMany({
-    where: { role: Role.DELIVERY },
+    where: { role: Role.DELIVERY, deliveryPerson: null },
   });
   const deliveryProfiles: Prisma.DeliveryPersonCreateManyInput[] =
     deliveryUsers.map((user) => ({
