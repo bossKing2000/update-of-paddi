@@ -1,5 +1,12 @@
 import "dotenv/config";
-import {redisNotifications,redisProducts,redisSearch,redisTotalViews,redisUsersSessions,ShopCartRedis,} from "../lib/redis";
+import {
+  redisNotifications,
+  redisProducts,
+  redisSearch,
+  redisTotalViews,
+  redisUsersSessions,
+  ShopCartRedis,
+} from "../lib/redis";
 
 async function clearAllCaches() {
   try {
@@ -24,7 +31,7 @@ async function clearAllCaches() {
       { name: "search", client: redisSearch },
       { name: "views", client: redisTotalViews },
       // { name: "userSessions", client: redisUsersSessions},
-      { name: "shopCart", client: ShopCartRedis}
+      { name: "shopCart", client: ShopCartRedis },
     ];
 
     for (const { name, client } of clients) {
@@ -53,6 +60,3 @@ async function clearAllCaches() {
 clearAllCaches();
 
 // Run with: npx ts-node src/jobs/clearRedisCache.ts
-
-
- 

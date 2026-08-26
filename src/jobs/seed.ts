@@ -53,7 +53,7 @@ export const SEED_CONFIG = {
     "SEED_LIVE_PERCENTAGE_MIN",
     "SEED_LIVE_PERCENTAGE_MAX",
     10,
-    60,
+    40,
   ),
   optionsPerProduct: envRange("SEED_OPTIONS_MIN", "SEED_OPTIONS_MAX", 1, 3),
   productReviewsPerProduct: envRange(
@@ -499,11 +499,17 @@ const videoUrls = [
 ];
 
 function randomImages() {
-  return [faker.helpers.arrayElement(imageUrls)];
+  return faker.helpers.arrayElements(
+    imageUrls,
+    faker.number.int({ min: 1, max: Math.min(6, imageUrls.length) }),
+  );
 }
 
 function randomVideos() {
-  return [faker.helpers.arrayElement(videoUrls)];
+  return faker.helpers.arrayElements(
+    videoUrls,
+    faker.number.int({ min: 1, max: Math.min(6, videoUrls.length) }),
+  );
 }
 
 function money(min = 500, max = 5000) {
