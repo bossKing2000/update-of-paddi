@@ -8,6 +8,17 @@ import {
 } from "./vendorAvailability.service";
 import { evaluateProductSchedule } from "./scheduleRules.service";
 
+// Catalog sort values accepted by GET /api/product?sortBy=…
+// "popularity" ranks by popularityScore; the rest map to stored fields.
+// Omitted/empty sortBy preserves the historical live-first browse order.
+export const CATALOG_SORT_VALUES = [
+  "popularity",
+  "priceAsc",
+  "priceDesc",
+  "newest",
+] as const;
+export type CatalogSortValue = (typeof CATALOG_SORT_VALUES)[number];
+
 // Fetch products with aggregate ratings
 export async function getProductsWithAggregates(
   whereClause: Prisma.ProductWhereInput,
@@ -279,12 +290,42 @@ export async function fetchProductPage(opts: {
   vendorId?: string;
   /** Marketplace surfaces set this; plain browse (GET /product) does not. */
   vendorMustBeOperating?: boolean;
+  /** Catalog sorting: popularity | priceAsc | priceDesc | newest. */
+  sortBy?: string;
+  minPrice?: number;
+  maxPrice?: number;
+  /** Only currently-orderable marketplace products (authoritative rules). */
+  availableOnly?: boolean;
 }): Promise<ProductPageResult> {
-  const { skip, take, category, vendorId, vendorMustBeOperating } = opts;
+  const {
+    skip,
+    take,
+    category,
+    vendorId,
+    vendorMustBeOperating,
+    sortBy,
+    minPrice,
+    maxPrice,
+    availableOnly,
+  } = opts;
+
+  // Availability filtering cannot be expressed by the Prisma query builder
+  // (per-row grace arithmetic + weekly windows), so this flag routes to the
+  // dedicated raw-SQL implementation below. It reuses the SAME fragments as
+  // every other live listing — no second evaluator.
+  if (availableOnly) {
+    return fetchAvailableOnlyProducts({ skip, take, category, vendorId, sortBy });
+  }
 
   const where: Prisma.ProductWhereInput = { archived: false };
   if (category) where.category = category as Prisma.EnumCategoryFilter;
   if (vendorId) where.vendorId = vendorId;
+  if (opts.minPrice != null || opts.maxPrice != null) {
+    where.price = {
+      ...(opts.minPrice != null ? { gte: opts.minPrice } : {}),
+      ...(opts.maxPrice != null ? { lte: opts.maxPrice } : {}),
+    } as Prisma.FloatFilter;
+  }
   if (vendorMustBeOperating) {
     where.vendor = {
       isLive: true,
@@ -299,12 +340,32 @@ export async function fetchProductPage(opts: {
     };
   }
 
+  // Catalog sorting. Default (omitted sortBy) preserves the historical
+  // live-first / newest-first browse ordering exactly.
+  let orderBy: Prisma.ProductOrderByWithRelationInput[];
+  switch (opts.sortBy) {
+    case "popularity":
+      orderBy = [{ popularityScore: "desc" }, { createdAt: "desc" }];
+      break;
+    case "priceAsc":
+      orderBy = [{ price: "asc" }, { createdAt: "desc" }];
+      break;
+    case "priceDesc":
+      orderBy = [{ price: "desc" }, { createdAt: "desc" }];
+      break;
+    case "newest":
+      orderBy = [{ createdAt: "desc" }];
+      break;
+    default:
+      orderBy = [{ isLive: "desc" }, { createdAt: "desc" }];
+  }
+
   const [dbProducts, total] = await Promise.all([
     prisma.product.findMany({
       where,
       skip,
       take,
-      orderBy: [{ isLive: "desc" }, { createdAt: "desc" }],
+      orderBy,
       select: {
         id: true,
         name: true,
@@ -382,6 +443,162 @@ export async function fetchProductPage(opts: {
   });
 
   return { products, total };
+}
+
+/**
+ * availableOnly=true listing: currently-orderable marketplace products.
+ *
+ * Orderability = NOT archived AND vendor operating AND schedule active, where
+ * the schedule evaluation mirrors evaluateProductSchedule exactly:
+ *   - complete ONE_TIME window: goLiveAt <= NOW() <= takeDownAt + grace
+ *   - WEEKLY: enabled + date range + an active window today/yesterday-tail
+ *   - missing/incomplete schedule defers to the stored isLive mirror
+ * Vendor Live filtering reuses VENDOR_OPERATING_SQL. Sorted identically to
+ * the Prisma path so Explore sorting behaves consistently across modes.
+ */
+async function fetchAvailableOnlyProducts(opts: {
+  skip: number;
+  take: number;
+  category?: string;
+  vendorId?: string;
+  sortBy?: string;
+}): Promise<ProductPageResult> {
+  const { skip, take, category, vendorId } = opts;
+
+  const conditions: string[] = [
+    `p."archived" = false`,
+    `( -- authoritative availability (Vendor Live + schedules)
+        v."isLive" = true
+        AND COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') <> 'false'
+        AND (
+          (s."id" IS NULL AND p."isLive" = true)
+          OR (
+            s."type" = 'ONE_TIME'
+            AND s."goLiveAt" IS NOT NULL
+            AND s."takeDownAt" IS NOT NULL
+            AND NOW() >= s."goLiveAt"
+            AND NOW() <= s."takeDownAt" + (COALESCE(s."graceMinutes", 0) * INTERVAL '1 minute')
+          )
+          OR (
+            (s."type" = 'ONE_TIME')
+            AND (s."goLiveAt" IS NULL OR s."takeDownAt" IS NULL)
+            AND p."isLive" = true
+          )
+          OR (
+            s."type" = 'WEEKLY'
+            AND s."enabled" = true
+            AND (s."startDate" IS NULL OR cal.ldate >= (s."startDate" AT TIME ZONE 'UTC')::date)
+            AND (s."endDate"   IS NULL OR cal.ldate <= (s."endDate"   AT TIME ZONE 'UTC')::date)
+            AND EXISTS (
+              SELECT 1 FROM "ProductScheduleWindow" w
+              WHERE w."scheduleId" = s."id"
+                AND w."enabled" = true
+                AND (
+                  (w."endMinute" > w."startMinute"
+                    AND w."dayOfWeek" = cal.ldow
+                    AND w."startMinute" <= cal.lmin
+                    AND cal.lmin < w."endMinute")
+                  OR (
+                    w."endMinute" <= w."startMinute"
+                    AND w."dayOfWeek" = cal.ldow
+                    AND cal.lmin >= w."startMinute"
+                  )
+                  OR (
+                    w."endMinute" <= w."startMinute"
+                    AND w."dayOfWeek" = (cal.ldow + 6) % 7
+                    AND cal.lmin < w."endMinute"
+                  )
+                )
+            )
+          )
+        )
+      )`,
+  ];
+  const params: unknown[] = [];
+  if (category) {
+    conditions.push(`p."category"::text = $${params.length + 1}`);
+    params.push(category);
+  }
+  if (vendorId) {
+    conditions.push(`p."vendorId" = $${params.length + 1}`);
+    params.push(vendorId);
+  }
+
+  let orderBySql = `p."isLive" DESC, p."createdAt" DESC`;
+  if (opts.sortBy === "popularity") orderBySql = `p."popularityScore" DESC, p."createdAt" DESC`;
+  else if (opts.sortBy === "priceAsc") orderBySql = `p.price ASC`;
+  else if (opts.sortBy === "priceDesc") orderBySql = `p.price DESC`;
+  else if (opts.sortBy === "newest") orderBySql = `p."createdAt" DESC`;
+
+  const whereSql = conditions.join("\n      AND ");
+
+  const rows: any[] = await prisma.$queryRawUnsafe(
+    `
+    SELECT p.id, p.name, p.price, p.images, p.thumbnail,
+           p."popularityPercent", p."isLive", p."archived",
+           s."type" AS "scheduleType",
+           s."goLiveAt", s."takeDownAt", s."graceMinutes",
+           v."id" AS "vendor_id", v."name" AS "vendor_name",
+           v."brandName" AS "vendor_brandName", v."avatarUrl" AS "vendor_avatarUrl",
+           v."timezone" AS "vendor_timezone", v."operatingHours" AS "vendor_operatingHours"
+    FROM "Product" p
+    ${VENDOR_OPERATING_SQL}
+    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
+    WHERE ${whereSql}
+    ORDER BY ${orderBySql}
+    LIMIT ${take} OFFSET ${skip};
+    `,
+    ...params,
+  );
+
+  const totalResult: { count: number }[] = await prisma.$queryRawUnsafe(
+    `
+    SELECT COUNT(*)::int AS count
+    FROM "Product" p
+    LEFT JOIN "User" v ON v."id" = p."vendorId"
+      AND COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') <> 'false'
+    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
+    WHERE v."isLive" = true
+      AND p."archived" = false
+      ${conditions.length ? `AND ${whereSql}` : ""}
+    ;
+    `,
+    ...params,
+  );
+
+  const now = new Date();
+  const products: ProductListItem[] = rows.map((r) => {
+    const schedule =
+      r.scheduleType != null || r.goLiveAt || r.takeDownAt
+        ? {
+            type: r.scheduleType ?? undefined,
+            goLiveAt: r.goLiveAt ?? undefined,
+            takeDownAt: r.takeDownAt ?? undefined,
+            graceMinutes: r.graceMinutes ?? undefined,
+          }
+        : null;
+    return {
+      id: r.id,
+      name: r.name,
+      price: r.price,
+      category: r.category as string,
+      images: r.thumbnail ? [r.thumbnail] : (r.images?.length ?? 0) > 0 ? [r.images[0]] : [],
+      popularityPercent: r.popularityPercent ?? 0,
+      isLive: true,
+      goLiveAt: r.goLiveAt ?? null,
+      liveUntil: r.takeDownAt ?? null,
+      vendorOperating: true,
+      orderable: true,
+      vendor: {
+        id: r.vendor_id,
+        name: r.vendor_name,
+        brandName: r.vendor_brandName,
+        avatarUrl: r.vendor_avatarUrl,
+      },
+    };
+  });
+
+  return { products, total: totalResult[0]?.count ?? products.length };
 }
 
 export async function fetchMostPopularProducts(opts: {

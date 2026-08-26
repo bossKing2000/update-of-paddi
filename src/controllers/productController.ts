@@ -15,6 +15,8 @@ import {
   trackProductView,
   fetchProductPage,
   fetchMostPopularProducts,
+  CATALOG_SORT_VALUES,
+  type CatalogSortValue,
 } from "../services/product.service";
 import { CACHE_KEYS, CACHE_TTLS } from "../services/redisCacheTiming";
 import { productIndexQueue } from "../jobs/workers jobs/redis-baseQueue";
@@ -249,11 +251,50 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
     }
   }
 
+  // Explore filters (backward-compatible additions).
+  let minPrice: number | undefined;
+  if (req.query.minPrice != null && String(req.query.minPrice).trim() !== "") {
+    minPrice = Number(req.query.minPrice);
+    if (!Number.isFinite(minPrice) || minPrice < 0) {
+      throw new ValidationError("minPrice must be a non-negative number");
+    }
+  }
+  let maxPrice: number | undefined;
+  if (req.query.maxPrice != null && String(req.query.maxPrice).trim() !== "") {
+    maxPrice = Number(req.query.maxPrice);
+    if (!Number.isFinite(maxPrice) || maxPrice < 0) {
+      throw new ValidationError("maxPrice must be a non-negative number");
+    }
+  }
+  if (minPrice != null && maxPrice != null && minPrice > maxPrice) {
+    throw new ValidationError("minPrice cannot be greater than maxPrice");
+  }
+
+  const sortBy = String(req.query.sortBy ?? "").trim();
+  if (sortBy !== "" && !CATALOG_SORT_VALUES.includes(sortBy as CatalogSortValue)) {
+    throw new ValidationError(
+      `Invalid sortBy. Valid options: ${CATALOG_SORT_VALUES.join(", ")}`,
+    );
+  }
+
+  const availableOnlyRaw = String(req.query.availableOnly ?? "").toLowerCase();
+  if (availableOnlyRaw !== "" && availableOnlyRaw !== "true" && availableOnlyRaw !== "false") {
+    throw new ValidationError("availableOnly must be 'true' or 'false'");
+  }
+  const availableOnly = availableOnlyRaw === "true";
+
+  const filterKey = [
+    sortBy || "",
+    minPrice != null ? `mp${minPrice}` : "",
+    maxPrice != null ? `xp${maxPrice}` : "",
+    availableOnly ? "av1" : "",
+  ]
+    .filter(Boolean)
+    .join("-");
+
   const cacheKey = vendorIdQuery
-    ? `products:vendor:${vendorIdQuery}:category=${categoryQuery ?? "ALL"}:page=${page}:limit=${limit}`
-    : categoryQuery && categoryQuery !== "ALL"
-      ? `products:category:${categoryQuery}:page=${page}:limit=${limit}`
-      : CACHE_KEYS.PRODUCTS_ALL(page, limit);
+    ? `products:vendor:${vendorIdQuery}:category=${categoryQuery ?? "ALL"}:page=${page}:limit=${limit}${filterKey ? `:f=${filterKey}` : ""}`
+    : `${CACHE_KEYS.PRODUCTS_ALL(page, limit)}${filterKey ? `:f=${filterKey}` : ""}`;
 
   const cached = await redisProducts.get(cacheKey);
   if (cached) {
@@ -274,6 +315,10 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
       take: limit,
       category: categoryQuery && categoryQuery !== "ALL" ? categoryQuery : undefined,
       vendorId: vendorIdQuery,
+      sortBy: sortBy || undefined,
+      minPrice,
+      maxPrice,
+      availableOnly,
     }),
   ]);
 
@@ -838,9 +883,73 @@ export const searchProducts = async (req: Request, res: Response) => {
   const fuzzyThreshold = 0.1;
   const sortBy = (req.query.sortBy as string) || "relevance";
 
+  // Explore filters (backward-compatible additions).
+  let minPrice: number | undefined;
+  if (req.query.minPrice != null && String(req.query.minPrice).trim() !== "") {
+    minPrice = Number(req.query.minPrice);
+    if (!Number.isFinite(minPrice) || minPrice < 0) {
+      throw new ValidationError("minPrice must be a non-negative number");
+    }
+  }
+  let maxPrice: number | undefined;
+  if (req.query.maxPrice != null && String(req.query.maxPrice).trim() !== "") {
+    maxPrice = Number(req.query.maxPrice);
+    if (!Number.isFinite(maxPrice) || maxPrice < 0) {
+      throw new ValidationError("maxPrice must be a non-negative number");
+    }
+  }
+  if (minPrice != null && maxPrice != null && minPrice > maxPrice) {
+    throw new ValidationError("minPrice cannot be greater than maxPrice");
+  }
+
+  const categoryQuery = (req.query.category as string)?.toUpperCase();
+  if (categoryQuery && categoryQuery !== "ALL") {
+    if (!Object.values(Category).includes(categoryQuery as Category)) {
+      throw new ValidationError(
+        `Invalid category. Valid options: ${Object.values(Category).join(", ")}`,
+      );
+    }
+  }
+
+  const availableOnlyRaw = String(req.query.availableOnly ?? "").toLowerCase();
+  if (
+    availableOnlyRaw !== "" &&
+    availableOnlyRaw !== "true" &&
+    availableOnlyRaw !== "false"
+  ) {
+    throw new ValidationError("availableOnly must be 'true' or 'false'");
+  }
+
   const corrected = correctQuery(q);
 
-  const cacheKey = CACHE_KEYS.SEARCH(corrected, sortBy, undefined, page, limit);
+  // Cache key includes every new filter so different combinations never
+  // share an entry.
+  const filterKey = [
+    categoryQuery ?? "",
+    minPrice != null ? `mp${minPrice}` : "",
+    maxPrice != null ? `xp${maxPrice}` : "",
+    availableOnlyRaw === "true" ? "av1" : "",
+  ]
+    .filter(Boolean)
+    .join("-");
+
+  const cacheKey =
+    CACHE_KEYS.SEARCH(corrected, sortBy, undefined, page, limit) +
+    (filterKey ? `:f=${filterKey}` : "");
+
+  // ── Dynamic discovery filters (category / price / availability) ──
+  // Category is whitelist-validated against the enum; prices are validated
+  // numbers. Both are safe to interpolate after validation.
+  const vendorJoin =
+    availableOnlyRaw === "true"
+      ? ` JOIN "User" v ON v."id" = p."vendorId" AND v."isLive" = true AND COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') <> 'false'`
+      : "";
+  const extraWhereSql =
+    (categoryQuery && categoryQuery !== "ALL"
+      ? ` AND p."category"::text = '${categoryQuery}'`
+      : "") +
+    (minPrice != null ? ` AND p.price >= ${minPrice}` : "") +
+    (maxPrice != null ? ` AND p.price <= ${maxPrice}` : "");
   const cached = await redisSearch.get(cacheKey);
   if (cached) {
     const data = JSON.parse(cached);
@@ -883,10 +992,10 @@ export const searchProducts = async (req: Request, res: Response) => {
       END AS "computedIsLive",
       ts_rank_cd(setweight(to_tsvector('english', p.name), 'A') || setweight(to_tsvector('english', p.description), 'B'), websearch_to_tsquery('english', $1)) AS rank,
       (p.name ILIKE $2 OR p.description ILIKE $2) AS exact_match
-    FROM "Product" p
+    FROM "Product" p${vendorJoin}
     LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
     WHERE p.archived = false
-      AND (p.tsvector_col @@ websearch_to_tsquery('english', $1) OR p.name ILIKE $2 OR p.description ILIKE $2)
+      AND (p.tsvector_col @@ websearch_to_tsquery('english', $1) OR p.name ILIKE $2 OR p.description ILIKE $2)${extraWhereSql}
     ORDER BY exact_match DESC, "computedIsLive" DESC, rank DESC, ${secondaryOrder}
     LIMIT $3 OFFSET $4;
   `,
@@ -912,9 +1021,9 @@ export const searchProducts = async (req: Request, res: Response) => {
           ELSE p."isLive"
         END AS "computedIsLive",
         similarity(p.name || ' ' || p.description, $1) AS sim_score
-      FROM "Product" p
+      FROM "Product" p${vendorJoin}
       LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
-      WHERE p.archived = false AND similarity(p.name || ' ' || p.description, $1) > $2
+      WHERE p.archived = false AND similarity(p.name || ' ' || p.description, $1) > $2${extraWhereSql}
       ORDER BY "computedIsLive" DESC, sim_score DESC, ${secondaryOrder}
       LIMIT $3 OFFSET $4;
     `,
@@ -934,8 +1043,8 @@ export const searchProducts = async (req: Request, res: Response) => {
 
   const totalResult = await prisma.$queryRawUnsafe<{ total: bigint }[]>(
     `
-    SELECT COUNT(*)::bigint AS total FROM "Product" p
-    WHERE p.archived = false AND (p.tsvector_col @@ websearch_to_tsquery('english', $1) OR p.name ILIKE $2 OR p.description ILIKE $2);
+    SELECT COUNT(*)::bigint AS total FROM "Product" p${vendorJoin}
+    WHERE p.archived = false AND (p.tsvector_col @@ websearch_to_tsquery('english', $1) OR p.name ILIKE $2 OR p.description ILIKE $2)${extraWhereSql};
   `,
     corrected,
     `%${corrected}%`,

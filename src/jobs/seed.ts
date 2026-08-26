@@ -45,7 +45,7 @@ function envRange(
 /** Change these defaults, or override any value with the matching SEED_* env variable. */
 export const SEED_CONFIG = {
   vendors: envInt("SEED_VENDORS", 200),
-  customers: envInt("SEED_CUSTOMERS", 500),
+  customers: envInt("SEED_CUSTOMERS", 1000),
   deliveryPeople: envInt("SEED_DELIVERY", 20),
   addressesPerUser: envRange("SEED_ADDRESSES_MIN", "SEED_ADDRESSES_MAX", 1, 2),
   productsPerVendor: envRange("SEED_PRODUCTS_MIN", "SEED_PRODUCTS_MAX", 1, 10),
