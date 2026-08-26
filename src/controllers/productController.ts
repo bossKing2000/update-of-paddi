@@ -283,18 +283,18 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
   }
   const availableOnly = availableOnlyRaw === "true";
 
+  // Deterministic cache key: every parameter that can change the result set
+  // is represented so two different requests NEVER share a cache entry.
   const filterKey = [
-    sortBy || "",
-    minPrice != null ? `mp${minPrice}` : "",
-    maxPrice != null ? `xp${maxPrice}` : "",
-    availableOnly ? "av1" : "",
-  ]
-    .filter(Boolean)
-    .join("-");
+    `sort=${sortBy || "default"}`,
+    minPrice != null ? `min=${minPrice}` : "min=none",
+    maxPrice != null ? `max=${maxPrice}` : "max=none",
+    `av=${availableOnly ? 1 : 0}`,
+  ].join(":");
 
-  const cacheKey = vendorIdQuery
-    ? `products:vendor:${vendorIdQuery}:category=${categoryQuery ?? "ALL"}:page=${page}:limit=${limit}${filterKey ? `:f=${filterKey}` : ""}`
-    : `${CACHE_KEYS.PRODUCTS_ALL(page, limit)}${filterKey ? `:f=${filterKey}` : ""}`;
+  const vendorPart = vendorIdQuery ? `vendor=${vendorIdQuery}:` : "";
+  const categoryPart = `category=${categoryQuery ?? "ALL"}`;
+  const cacheKey = `products:all:${vendorPart}${categoryPart}:page=${page}:limit=${limit}:${filterKey}`;
 
   const cached = await redisProducts.get(cacheKey);
   if (cached) {
