@@ -209,38 +209,52 @@ const WEEKLY_SCHEDULE_ACTIVE_SQL = `
       (
         s."type" = 'WEEKLY'
         AND s."enabled" = true
-        AND (
-          s."startDate" IS NULL OR
-          (NOW() AT TIME ZONE COALESCE(v."timezone", NULLIF(v."operatingHours" ->> 'timezone', ''), 'UTC'))::date >= (s."startDate" AT TIME ZONE 'UTC')::date
-        )
-        AND (
-          s."endDate" IS NULL OR
-          (NOW() AT TIME ZONE COALESCE(v."timezone", NULLIF(v."operatingHours" ->> 'timezone', ''), 'UTC'))::date <= (s."endDate" AT TIME ZONE 'UTC')::date
-        )
+        AND (s."startDate" IS NULL OR cal.ldate >= (s."startDate" AT TIME ZONE 'UTC')::date)
+        AND (s."endDate"   IS NULL OR cal.ldate <= (s."endDate"   AT TIME ZONE 'UTC')::date)
         AND EXISTS (
           SELECT 1 FROM "ProductScheduleWindow" w
           WHERE w."scheduleId" = s."id"
             AND w."enabled" = true
             AND (
-              -- same-day window
+              -- Same-day window: [startMinute, endMinute) on its own weekday.
               (
-                w."dayOfWeek" = EXTRACT(dow FROM NOW() AT TIME ZONE COALESCE(v."timezone", NULLIF(v."operatingHours" ->> 'timezone', ''), 'UTC'))::int
-                AND w."startMinute" <= EXTRACT(HOUR FROM NOW() AT TIME ZONE COALESCE(v."timezone", NULLIF(v."operatingHours" ->> 'timezone', ''), 'UTC'))::int * 60 + EXTRACT(MINUTE FROM NOW() AT TIME ZONE COALESCE(v."timezone", NULLIF(v."operatingHours" ->> 'timezone', ''), 'UTC'))::int
-                AND (
-                  (w."endMinute" > w."startMinute"
-                    AND (EXTRACT(HOUR FROM NOW() AT TIME ZONE COALESCE(v."timezone", NULLIF(v."operatingHours" ->> 'timezone', ''), 'UTC'))::int * 60 + EXTRACT(MINUTE FROM NOW() AT TIME ZONE COALESCE(v."timezone", NULLIF(v."operatingHours" ->> 'timezone', ''), 'UTC'))::int) < w."endMinute")
-                  )
-                )
+                w."endMinute" > w."startMinute"
+                AND w."dayOfWeek" = cal.ldow
+                AND w."startMinute" <= cal.lmin
+                AND cal.lmin < w."endMinute"
               )
-              -- post-midnight tail of YESTERDAY's overnight window
+              -- Overnight window, evening side: own weekday at/after start.
               OR (
                 w."endMinute" <= w."startMinute"
-                AND w."dayOfWeek" = (EXTRACT(dow FROM NOW() AT TIME ZONE COALESCE(v."timezone", NULLIF(v."operatingHours" ->> 'timezone', ''), 'UTC'))::int + 6) % 7
-                AND (EXTRACT(HOUR FROM NOW() AT TIME ZONE COALESCE(v."timezone", NULLIF(v."operatingHours" ->> 'timezone', ''), 'UTC'))::int * 60 + EXTRACT(MINUTE FROM NOW() AT TIME ZONE COALESCE(v."timezone", NULLIF(v."operatingHours" ->> 'timezone', ''), 'UTC'))::int) < w."endMinute"
+                AND w."dayOfWeek" = cal.ldow
+                AND cal.lmin >= w."startMinute"
+              )
+              -- Overnight window, post-midnight tail:
+              -- matches YESTERDAY's row before its earlier endMinute.
+              OR (
+                w."endMinute" <= w."startMinute"
+                AND w."dayOfWeek" = (cal.ldow + 6) % 7
+                AND cal.lmin < w."endMinute"
               )
             )
         )
       )`;
+
+/**
+ * Vendor-local calendar for the weekly predicate, computed once per row via
+ * a lateral join. Kept beside WEEKLY_SCHEDULE_ACTIVE_SQL so the SQL and the
+ * TS evaluator (scheduleRules.service) stay semantically identical.
+ */
+const LOCAL_CALENDAR_SQL = `
+    JOIN LATERAL (
+      SELECT
+        EXTRACT(dow FROM t)::int AS ldow,
+        EXTRACT(hour FROM t)::int * 60 + EXTRACT(minute FROM t)::int AS lmin,
+        t::date AS ldate
+      FROM (
+        SELECT (NOW() AT TIME ZONE COALESCE(v."timezone", NULLIF(v."operatingHours" ->> 'timezone', ''), 'UTC')) AS t
+      ) tz
+    ) cal ON true`;
 
 /**
  * Marketplace-liveness predicate for raw SQL listings. Semantics:
@@ -391,7 +405,7 @@ export async function fetchMostPopularProducts(opts: {
            COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') AS "acceptingOrders"
     FROM "Product" p
     ${VENDOR_OPERATING_SQL}
-    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
+    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id${LOCAL_CALENDAR_SQL}
     WHERE p."archived" = false
       AND ${weeklyAwareLivePredicate()}
     ORDER BY p."popularityScore" DESC
@@ -402,7 +416,14 @@ export async function fetchMostPopularProducts(opts: {
   );
 
   const products = rawProducts.map((p) => {
-    if (p.scheduleType === "WEEKLY") return { ...p, isLive: true, orderable: true };
+    if (p.scheduleType === "WEEKLY")
+      return {
+        ...p,
+        isLive: true,
+        vendorOperating:
+          p.vendorIsLive === "true" && p.acceptingOrders !== "false",
+        orderable: true,
+      };
     const schedule =
       p.goLiveAt || p.takeDownAt || p.graceMinutes
         ? {
@@ -427,7 +448,7 @@ export async function fetchMostPopularProducts(opts: {
     `SELECT COUNT(*)::int AS count
      FROM "Product" p
      ${VENDOR_OPERATING_SQL}
-     LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
+     LEFT JOIN "ProductSchedule" s ON s."productId" = p.id${LOCAL_CALENDAR_SQL}
      WHERE p."archived" = false
        AND ${weeklyAwareLivePredicate()};`,
   );
@@ -490,7 +511,7 @@ export async function fetchLiveProducts(opts: {
            COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') AS "acceptingOrders"
     FROM "Product" p
     ${VENDOR_OPERATING_SQL}
-    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
+    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id${LOCAL_CALENDAR_SQL}
     WHERE p."archived" = false
       AND ${weeklyAwareLivePredicate(
         `
@@ -520,7 +541,7 @@ export async function fetchLiveProducts(opts: {
     SELECT COUNT(*)::int AS count
     FROM "Product" p
     ${VENDOR_OPERATING_SQL}
-    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
+    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id${LOCAL_CALENDAR_SQL}
     WHERE p."archived" = false
       AND ${weeklyAwareLivePredicate(
         `
