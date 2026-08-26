@@ -687,7 +687,13 @@ async function seedDatabase() {
       });
     }
   await createMany((data) => prisma.product.createMany({ data }), products);
-  const savedProducts = await prisma.product.findMany();
+  const savedProducts = await prisma.product.findMany({
+    where: {
+      id: {
+        in: products.flatMap((product) => (product.id ? [product.id] : [])),
+      },
+    },
+  });
   const options: Prisma.ProductOptionCreateManyInput[] = [];
   const schedules: Prisma.ProductScheduleCreateManyInput[] = [];
   for (const product of savedProducts) {
@@ -718,7 +724,7 @@ async function seedDatabase() {
     options,
   );
   await createMany(
-    (data) => prisma.productSchedule.createMany({ data }),
+    (data) => prisma.productSchedule.createMany({ data, skipDuplicates: true }),
     schedules,
   );
   setProgress(

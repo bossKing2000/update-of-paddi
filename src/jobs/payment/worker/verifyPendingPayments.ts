@@ -30,6 +30,7 @@ export async function verifyPendingPayments(batchSize = 50) {
       > = await prisma.payment.findMany({
         where: {
           status: { in: [PaymentStatus.PENDING, PaymentStatus.INITIATED] },
+          reference: { not: { startsWith: "SEED-" } },
         },
         orderBy: { id: "asc" },
         take: batchSize,
