@@ -1,14 +1,3 @@
-// // npx ts-node src/jobs/seed.ts
-// // npx prisma db push --force-reset
-// // npx prisma db push
-// //  to make the html live run this : live-server
-// npx prisma migrate resolve --applied "20251004214831_full_migration"
-
-// for locally
-// npx prisma migrate reset
-// npx prisma migrate dev --name init --create-only
-// npx prisma migrate dev
-
 import {
   Prisma,
   PrismaClient,
@@ -16,20 +5,114 @@ import {
   Category,
   OrderStatus,
   PaymentStatus,
+  DeliveryPersonStatus,
+  DeliveryStatus,
+  ProductScheduleType,
+  SupportTicketStatus,
+  SpecialOrderRequestStatus,
+  SpecialOrderOfferStatus,
+  ActivityType,
 } from "@prisma/client";
 import { faker } from "@faker-js/faker";
-import {
-  redisNotifications,
-  redisProducts,
-  redisSearch,
-  ShopCartRedis,
-} from "../lib/redis";
 
 const prisma = new PrismaClient();
-const BATCH_SIZE = 500;
-const MAX_PRODUCTS_PER_VENDOR = 10;
 
-// Seeder runtime state (exported for API access)
+function envInt(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+  return parsed;
+}
+
+type CountRange = { min: number; max: number };
+
+function envRange(
+  minName: string,
+  maxName: string,
+  defaultMin: number,
+  defaultMax: number,
+): CountRange {
+  const min = envInt(minName, defaultMin);
+  const max = envInt(maxName, defaultMax);
+  if (max < min)
+    throw new Error(`${maxName} must be greater than or equal to ${minName}`);
+  return { min, max };
+}
+
+/** Change these defaults, or override any value with the matching SEED_* env variable. */
+export const SEED_CONFIG = {
+  vendors: envInt("SEED_VENDORS", 200),
+  customers: envInt("SEED_CUSTOMERS", 500),
+  deliveryPeople: envInt("SEED_DELIVERY", 20),
+  addressesPerUser: envRange("SEED_ADDRESSES_MIN", "SEED_ADDRESSES_MAX", 1, 2),
+  productsPerVendor: envRange("SEED_PRODUCTS_MIN", "SEED_PRODUCTS_MAX", 1, 10),
+  liveProductPercentage: envRange(
+    "SEED_LIVE_PERCENTAGE_MIN",
+    "SEED_LIVE_PERCENTAGE_MAX",
+    10,
+    60,
+  ),
+  optionsPerProduct: envRange("SEED_OPTIONS_MIN", "SEED_OPTIONS_MAX", 1, 3),
+  productReviewsPerProduct: envRange(
+    "SEED_PRODUCT_REVIEWS_MIN",
+    "SEED_PRODUCT_REVIEWS_MAX",
+    10,
+    50,
+  ),
+  vendorReviewsPerVendor: envRange(
+    "SEED_VENDOR_REVIEWS_MIN",
+    "SEED_VENDOR_REVIEWS_MAX",
+    5,
+    23,
+  ),
+  carts: envRange("SEED_CARTS_MIN", "SEED_CARTS_MAX", 3, 30),
+  cartItemsPerCart: envRange(
+    "SEED_CART_ITEMS_MIN",
+    "SEED_CART_ITEMS_MAX",
+    1,
+    5,
+  ),
+  orders: envRange("SEED_ORDERS_MIN", "SEED_ORDERS_MAX", 5, 200),
+  orderItemsPerOrder: envRange(
+    "SEED_ORDER_ITEMS_MIN",
+    "SEED_ORDER_ITEMS_MAX",
+    1,
+    4,
+  ),
+  assignments: envRange("SEED_ASSIGNMENTS_MIN", "SEED_ASSIGNMENTS_MAX", 10, 30),
+  notifications: envRange(
+    "SEED_NOTIFICATIONS_MIN",
+    "SEED_NOTIFICATIONS_MAX",
+    20,
+    40,
+  ),
+  followers: envRange("SEED_FOLLOWERS_MIN", "SEED_FOLLOWERS_MAX", 5, 30),
+  promotions: envRange("SEED_PROMOTIONS_MIN", "SEED_PROMOTIONS_MAX", 0, 10),
+  supportTickets: envRange(
+    "SEED_SUPPORT_TICKETS_MIN",
+    "SEED_SUPPORT_TICKETS_MAX",
+    0,
+    5,
+  ),
+  specialRequests: envRange(
+    "SEED_SPECIAL_REQUESTS_MIN",
+    "SEED_SPECIAL_REQUESTS_MAX",
+    0,
+    5,
+  ),
+  referralRewards: envRange(
+    "SEED_REFERRAL_REWARDS_MIN",
+    "SEED_REFERRAL_REWARDS_MAX",
+    0,
+    5,
+  ),
+  dateRangeDays: envRange("SEED_DATE_DAYS_MIN", "SEED_DATE_DAYS_MAX", 10, 10),
+  clearRedis: process.env.SEED_CLEAR_REDIS === "true",
+};
+
 export const seederState = {
   running: false,
   current: 0,
@@ -57,574 +140,26 @@ export function stopSeeder() {
 export function runSeeder() {
   if (seederState.running) return false;
   seederState.running = true;
-  seederState.stopRequested = false;
   seederState.current = 0;
-  seederState.total = 100;
+  seederState.stopRequested = false;
   seederState.message = "Starting seeder";
-
-  // Run main in background
-  main()
+  seedDatabase()
     .then(() => {
       seederState.message = "Completed";
     })
-    .catch((err) => {
-      console.error("Seeder failed:", err);
-      seederState.message = `Failed: ${err?.message || err}`;
+    .catch((error: unknown) => {
+      console.error("Seeder failed:", error);
+      seederState.message = `Failed: ${error instanceof Error ? error.message : String(error)}`;
     })
     .finally(() => {
       seederState.running = false;
       seederState.stopRequested = false;
-      seederState.current = seederState.total;
+      seederState.current = 100;
     });
-
   return true;
 }
 
-// ==============================
-// Realistic Random Food Generators
-// ==============================
-
-export function getRandomFoodName(): string {
-  const foods = [
-    // 🍔 Global foods you had
-    "Cheeseburger",
-    "Margherita Pizza",
-    "California Roll",
-    "Spaghetti Carbonara",
-    "Caesar Salad",
-    "Grilled Ribeye Steak",
-    "Club Sandwich",
-    "Beef Taco",
-    "Tom Yum Soup",
-    "Pork Dumplings",
-    "Chocolate Ice Cream",
-    "Blueberry Pancakes",
-    "Chicken Curry",
-    "Loaded Fries",
-    "Red Velvet Cake",
-    "Strawberry Smoothie",
-    "Everything Bagel",
-    "Chicken Burrito",
-    "Belgian Waffle",
-    "Glazed Donut",
-    "Chili Hotdog",
-    "Nacho Supreme",
-    "Seafood Lasagna",
-    "Tonkotsu Ramen",
-    "Chicken Quesadilla",
-    "Falafel Wrap",
-    "Caprese Grilled Cheese",
-    "Vegetable Samosa",
-    "Beef Chow Mein",
-    "Pho Bo",
-    "Pad Thai with Shrimp",
-    "Spinach Gnocchi",
-    "Mac & Cheese with Bacon",
-    "Cheese Omelette",
-    "Beer-battered Fish & Chips",
-    "Buffalo Chicken Wings",
-    "Bruschetta with Tomato & Basil",
-    "Beef Empanadas",
-    "Seafood Paella",
-    "Nutella Crepes",
-    "Chicken Biryani",
-    "Lamb Shawarma",
-    "Ceviche with Lime",
-    "Banana Muffin",
-    "Greek Pita Sandwich",
-    "Fruit Tart",
-    "Chicken Fajitas",
-    "Cobb Salad with Blue Cheese",
-    "Vegetable Spring Rolls",
-    "Miso Soup with Tofu",
-
-    // 🇳🇬 Nigerian dishes (~90)
-    "Jollof Rice",
-    "Fried Rice",
-    "Ofada Rice with Ayamase Sauce",
-    "Banga Soup",
-    "Egusi Soup",
-    "Ogbono Soup",
-    "Okra Soup",
-    "Efo Riro",
-    "Nsala (White Soup)",
-    "Afang Soup",
-    "Edikang Ikong",
-    "Oha Soup",
-    "Bitterleaf Soup",
-    "Gbegiri Soup",
-    "Ewedu Soup",
-    "Amala with Gbegiri and Ewedu",
-    "Pounded Yam with Egusi",
-    "Semovita with Ogbono Soup",
-    "Starch with Banga Soup",
-    "Tuwo Shinkafa with Miyan Kuka",
-    "Tuwo Masara with Miyan Taushe",
-    "Waina (Masa)",
-    "Moin Moin",
-    "Akara (Bean Cakes)",
-    "Suya (Spicy Grilled Meat)",
-    "Kilishi (Beef Jerky)",
-    "Nkwobi (Cow Foot Delicacy)",
-    "Isi Ewu (Goat Head)",
-    "Ukodo (Yam Pepper Soup)",
-    "Goat Meat Pepper Soup",
-    "Catfish Pepper Soup",
-    "Chicken Pepper Soup",
-    "Palm Nut Soup",
-    "Yam Porridge (Asaro)",
-    "Beans Porridge",
-    "Plantain Porridge",
-    "Ewa Agoyin with Agege Bread",
-    "Ofada Rice and Designer Stew",
-    "Ojojo (Water Yam Fritters)",
-    "Ekpang Nkukwo",
-    "Abacha (African Salad)",
-    "Ugba with Fish",
-    "Fisherman Soup",
-    "Atama Soup",
-    "Afang Okazi Soup",
-    "Corn Pudding (Okpa)",
-    "Agidi Jollof",
-    "Agidi White with Pepper Soup",
-    "Boli (Roasted Plantain) with Groundnut",
-    "Roasted Corn with Coconut",
-    "Yam and Egg Sauce",
-    "Boiled Plantain with Garden Egg Sauce",
-    "Beans and Plantain",
-    "Beans and Pap",
-    "Akamu (Pap/Ogi) with Akara",
-    "Custard with Moi Moi",
-    "Nigerian Meat Pie",
-    "Chicken Pie",
-    "Nigerian Fish Roll",
-    "Scotch Egg (Nigerian style)",
-    "Shawarma (Naija Style)",
-    "Gala Sausage Roll",
-    "Puff Puff",
-    "Chin Chin",
-    "Meat Kebab",
-    "Asun (Spicy Goat Meat)",
-    "Ponmo Alata (Peppered Cow Skin)",
-    "Spaghetti Jollof",
-    "Indomie Stir Fry with Egg",
-    "Egg Roll (Nigerian Style)",
-    "Beans Cake Sandwich",
-    "Peppered Snail",
-    "Grilled Croaker Fish",
-    "Fried Titus Fish with Stew",
-    "Dry Fish with Palm Oil Sauce",
-    "Stockfish in Palm Oil Sauce",
-    "Ofada Sauce (Ayamase)",
-    "Goat Meat Stew",
-    "Turkey Stew",
-    "Chicken in Tomato Stew",
-    "Ofe Akwu (Palm Nut Stew)",
-    "Garden Egg Stew",
-    "Okpa Enugu",
-    "Nigerian Pancake",
-    "Coconut Rice",
-    "Jollof Spaghetti",
-    "Boiled Yam with Palm Oil Sauce",
-    "Wheat with Ogbono Soup",
-    "Oatmeal Swallow with Efo Riro",
-
-    // 🇮🇳 Indian dishes
-    "Paneer Butter Masala",
-    "Masala Dosa",
-    "Chicken Tikka Masala",
-    "Rogan Josh",
-    "Dal Makhani",
-    "Hyderabadi Biryani",
-    "Kadai Paneer",
-    "Pav Bhaji",
-    "Chole Bhature",
-    "Pani Puri",
-    "Aloo Paratha",
-    "Palak Paneer",
-    "Vindaloo Curry",
-    "Lamb Rogan Josh",
-    "Butter Naan",
-    "Malai Kofta",
-    "Samosa Chaat",
-    "Gulab Jamun",
-    "Rasmalai",
-    "Jalebi",
-
-    // 🇲🇽 Mexican dishes
-    "Beef Enchiladas",
-    "Chicken Enchiladas Verde",
-    "Churros with Chocolate",
-    "Tamales Rojos",
-    "Carnitas Tacos",
-    "Huevos Rancheros",
-    "Mole Poblano",
-    "Pozole Rojo",
-    "Chilaquiles Verdes",
-    "Elote (Mexican Street Corn)",
-    "Queso Fundido",
-    "Sopes con Carne",
-    "Tres Leches Cake",
-
-    // 🇮🇹 Italian & Mediterranean
-    "Fettuccine Alfredo",
-    "Penne Arrabbiata",
-    "Risotto alla Milanese",
-    "Osso Buco",
-    "Caprese Salad",
-    "Prosciutto with Melon",
-    "Arancini Rice Balls",
-    "Tiramisu",
-    "Panna Cotta",
-    "Cannoli",
-    "Cioppino Seafood Stew",
-
-    // 🇹🇭 Thai & Southeast Asian
-    "Green Curry Chicken",
-    "Massaman Curry",
-    "Som Tum Papaya Salad",
-    "Pad Kra Pao Basil Chicken",
-    "Mango Sticky Rice",
-    "Khao Soi",
-    "Satay Skewers",
-    "Laksa Noodle Soup",
-
-    // 🇯🇵 Japanese
-    "Salmon Nigiri Sushi",
-    "Tempura Udon",
-    "Chicken Katsu Curry",
-    "Okonomiyaki Pancake",
-    "Takoyaki Octopus Balls",
-    "Gyudon Beef Bowl",
-    "Unagi Donburi",
-    "Yakisoba Noodles",
-
-    // 🇪🇹 Ethiopian & others
-    "Injera with Doro Wat",
-    "Misir Wot (Red Lentil Stew)",
-    "Shiro Wat",
-    "Kitfo (Spiced Beef Tartare)",
-    "Tibs Stir Fry",
-    "Baklava",
-    "Shish Kebab",
-    "Hummus with Pita",
-    "Baba Ganoush",
-    "French Onion Soup",
-    "Coq au Vin",
-    "Beef Bourguignon",
-    "Ratatouille",
-    "Croque Monsieur",
-    "Quiche Lorraine",
-    "Crème Brûlée",
-  ];
-  return faker.helpers.arrayElement(foods);
-}
-
-/**
- * ✅ Generate dynamic Nigerian/global food descriptions
- */
-export function getRandomFoodDescription(name: string): string {
-  const adjectives = [
-    // Original
-    "delicious",
-    "fresh",
-    "tasty",
-    "crispy",
-    "spicy",
-    "sweet",
-    "savory",
-    "juicy",
-    "zesty",
-    "mouth-watering",
-    "flavorful",
-    "aromatic",
-    "hearty",
-    "rich",
-    "succulent",
-    "tender",
-    "cheesy",
-    "buttery",
-    "smoky",
-    "golden",
-    "fluffy",
-    "creamy",
-    "peppery",
-    "local",
-    "traditional",
-
-    // Added ~150 more
-    "silky",
-    "velvety",
-    "charred",
-    "light",
-    "airy",
-    "toasty",
-    "roasted",
-    "wholesome",
-    "crunchy",
-    "crumbly",
-    "nutty",
-    "fiery",
-    "herb-infused",
-    "ginger-spiced",
-    "garlicky",
-    "lemony",
-    "citrusy",
-    "caramelized",
-    "sticky",
-    "sticky-sweet",
-    "molten",
-    "oozy",
-    "jammy",
-    "marbled",
-    "butter-rich",
-    "parmesan-crusted",
-    "parboiled",
-    "spongy",
-    "syrupy",
-    "candied",
-    "peppermint-kissed",
-    "fudgy",
-    "gooey",
-    "smouldering",
-    "toffee-like",
-    "toasted-coconut",
-    "earthy",
-    "umami-packed",
-    "glazed",
-    "fried-to-perfection",
-    "slow-braised",
-    "balsamic-drizzled",
-    "honey-glazed",
-    "maple-infused",
-    "sticky-barbecue",
-    "creamy-dreamy",
-    "spiced-up",
-    "hot-n-sweet",
-    "sizzling",
-    "tangy",
-    "refreshing",
-    "fruity",
-    "exotic",
-    "classic",
-    "rustic",
-    "fusion-style",
-    "street-style",
-    "festive",
-    "gourmet",
-    "homestyle",
-    "comforting",
-    "old-fashioned",
-    "fiesta-style",
-    "zesty-lime",
-    "ginger-garlic",
-    "cilantro-fresh",
-    "minty",
-    "coconutty",
-    "butter-garlic",
-    "spiced-honey",
-    "wok-tossed",
-    "sesame-sprinkled",
-    "smoky-bbq",
-    "charcoal-seared",
-    "sticky-garlic",
-    "herbed",
-    "pesto-coated",
-    "sundried-tomato",
-    "chipotle-spiced",
-    "jalapeño-peppery",
-    "miso-flavored",
-    "saffron-infused",
-    "pineapple-glazed",
-    "black-pepper",
-    "five-spice",
-    "teriyaki-brushed",
-    "chili-lime",
-    "wasabi-zinged",
-    "spiced-butter",
-    "creole-seasoned",
-    "cajun-spiced",
-    "harissa-rubbed",
-    "peri-peri",
-    "smoky-chipotle",
-    "zucchini-fresh",
-    "herbaceous",
-    "fiery-red",
-    "leek-flavored",
-    "spring-onion-kissed",
-    "whipped",
-    "thick-cut",
-    "crispy-skinned",
-    "deeply-satisfying",
-    "farm-fresh",
-    "lively",
-    "warming",
-    "comfort-food-style",
-    "lightly-spiced",
-    "spicy-hot",
-    "butter-soft",
-    "velvet-rich",
-    "luxurious",
-    "golden-brown",
-    "toasted-almond",
-    "sesame-rich",
-    "cinnamon-sugar",
-    "decadent",
-    "gluten-free",
-    "sugar-free",
-    "low-carb",
-    "protein-packed",
-    "fiber-rich",
-    "indulgent",
-    "crave-worthy",
-    "zingy",
-    "full-bodied",
-    "grainy-textured",
-    "juicy-bursting",
-    "aroma-rich",
-    "fusion-inspired",
-    "soul-warming",
-    "picnic-perfect",
-    "garden-fresh",
-    "farm-to-table",
-    "keto-friendly",
-    "classic-style",
-    "meaty",
-    "heavenly",
-    "blissful",
-    "chewy",
-    "soft-centered",
-    "double-layered",
-    "ultra-thin",
-    "crispy-edged",
-  ];
-
-  const cookingStyles = [
-    // Original
-    "grilled",
-    "baked",
-    "roasted",
-    "pan-fried",
-    "sautéed",
-    "marinated",
-    "slow-cooked",
-    "peppered",
-    "spiced",
-    "smoked",
-    "stir-fried",
-    "stewed",
-    "charcoal-grilled",
-
-    // Added ~150 more
-    "wood-fired",
-    "oven-roasted",
-    "coal-roasted",
-    "rotisserie-cooked",
-    "air-fried",
-    "deep-fried",
-    "pressure-cooked",
-    "open-flame-seared",
-    "pit-barbecued",
-    "stone-baked",
-    "tandoor-grilled",
-    "skillet-seared",
-    "flash-fried",
-    "hand-tossed",
-    "oven-broiled",
-    "iron-skillet-baked",
-    "wok-seared",
-    "ginger-stirred",
-    "garlic-sautéed",
-    "lemon-butter-seared",
-    "sous-vide",
-    "steamed",
-    "parboiled",
-    "poached",
-    "sun-dried",
-    "herb-crusted",
-    "cheese-stuffed",
-    "chili-rubbed",
-    "coconut-simmered",
-    "ginger-braised",
-    "braised-in-wine",
-    "beer-battered",
-    "tempura-fried",
-    "miso-marinated",
-    "honey-roasted",
-    "balsamic-glazed",
-    "maple-glazed",
-    "hickory-smoked",
-    "applewood-smoked",
-    "mesquite-grilled",
-    "cajun-blackened",
-    "char-seared",
-    "crispy-fried",
-    "creamy-baked",
-    "kettle-cooked",
-    "oven-crisped",
-    "pesto-drizzled",
-    "garlic-butter-basted",
-    "buttermilk-fried",
-    "brine-cured",
-    "hotpot-cooked",
-    "broth-simmered",
-    "korean-bbq-style",
-    "yakitori-grilled",
-    "teppanyaki-seared",
-    "dim-sum-steamed",
-    "oven-slow-roasted",
-    "open-pit-grilled",
-    "salt-crusted-baked",
-    "foil-wrapped-baked",
-    "banana-leaf-steamed",
-    "citrus-marinated",
-    "pineapple-roasted",
-    "ginger-garlic-glazed",
-    "honey-mustard-basted",
-    "peri-peri-grilled",
-    "jerk-style-grilled",
-    "creole-blackened",
-    "moroccan-spiced",
-    "ethiopian-spiced",
-    "thai-coconut-braised",
-    "malaysian-satay-grilled",
-    "filipino-adobo-style",
-    "jamaican-jerk-roasted",
-    "hawaiian-teriyaki-grilled",
-    "mexican-street-grilled",
-    "tangy-lime-marinated",
-    "cilantro-chili-marinated",
-    "chipotle-charred",
-    "piri-piri-rubbed",
-    "hot-oil-seared",
-    "firecracker-fried",
-    "butter-seared",
-    "spice-roasted",
-    "sugar-caramelized",
-    "street-food-style",
-    "café-style-baked",
-    "market-style-grilled",
-    "festival-style-fried",
-    "grandma-style-braised",
-    "homestyle-roasted",
-    "bistro-style-pan-fried",
-    "crispy-pan-seared",
-    "butter-poached",
-    "garlic-herb-baked",
-    "coconut-grilled",
-    "lemon-herb-grilled",
-    "herbed-butter-broiled",
-    "freshly-steamed",
-    "campfire-grilled",
-    "gluten-free-baked",
-  ];
-
-  const adjective = faker.helpers.arrayElement(adjectives);
-  const style = faker.helpers.arrayElement(cookingStyles);
-  return `A ${adjective}, ${style} ${name} served to satisfy your cravings.`;
-}
-
-const foodImageUrls = [
+const imageUrls = [
   "https://images.unsplash.com/photo-1600891964599-f61ba0e24092?w=400&h=300&fit=crop&auto=format&q=80",
   "https://images.unsplash.com/photo-1551218808-94e220e084d2?w=400&h=300&fit=crop&auto=format&q=80",
   "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&h=300&fit=crop&auto=format&q=80",
@@ -708,7 +243,240 @@ const foodImageUrls = [
   "https://images.unsplash.com/photo-1572802419224-296b0aeee0d9?w=400&h=300&fit=crop&auto=format&q=80",
 ];
 
-const foodVideoUrls = [
+const foodNames = [
+  // 🍔 Global foods you had
+  "Cheeseburger",
+  "Margherita Pizza",
+  "California Roll",
+  "Spaghetti Carbonara",
+  "Caesar Salad",
+  "Grilled Ribeye Steak",
+  "Club Sandwich",
+  "Beef Taco",
+  "Tom Yum Soup",
+  "Pork Dumplings",
+  "Chocolate Ice Cream",
+  "Blueberry Pancakes",
+  "Chicken Curry",
+  "Loaded Fries",
+  "Red Velvet Cake",
+  "Strawberry Smoothie",
+  "Everything Bagel",
+  "Chicken Burrito",
+  "Belgian Waffle",
+  "Glazed Donut",
+  "Chili Hotdog",
+  "Nacho Supreme",
+  "Seafood Lasagna",
+  "Tonkotsu Ramen",
+  "Chicken Quesadilla",
+  "Falafel Wrap",
+  "Caprese Grilled Cheese",
+  "Vegetable Samosa",
+  "Beef Chow Mein",
+  "Pho Bo",
+  "Pad Thai with Shrimp",
+  "Spinach Gnocchi",
+  "Mac & Cheese with Bacon",
+  "Cheese Omelette",
+  "Beer-battered Fish & Chips",
+  "Buffalo Chicken Wings",
+  "Bruschetta with Tomato & Basil",
+  "Beef Empanadas",
+  "Seafood Paella",
+  "Nutella Crepes",
+  "Chicken Biryani",
+  "Lamb Shawarma",
+  "Ceviche with Lime",
+  "Banana Muffin",
+  "Greek Pita Sandwich",
+  "Fruit Tart",
+  "Chicken Fajitas",
+  "Cobb Salad with Blue Cheese",
+  "Vegetable Spring Rolls",
+  "Miso Soup with Tofu",
+
+  // 🇳🇬 Nigerian dishes (~90)
+  "Jollof Rice",
+  "Fried Rice",
+  "Ofada Rice with Ayamase Sauce",
+  "Banga Soup",
+  "Egusi Soup",
+  "Ogbono Soup",
+  "Okra Soup",
+  "Efo Riro",
+  "Nsala (White Soup)",
+  "Afang Soup",
+  "Edikang Ikong",
+  "Oha Soup",
+  "Bitterleaf Soup",
+  "Gbegiri Soup",
+  "Ewedu Soup",
+  "Amala with Gbegiri and Ewedu",
+  "Pounded Yam with Egusi",
+  "Semovita with Ogbono Soup",
+  "Starch with Banga Soup",
+  "Tuwo Shinkafa with Miyan Kuka",
+  "Tuwo Masara with Miyan Taushe",
+  "Waina (Masa)",
+  "Moin Moin",
+  "Akara (Bean Cakes)",
+  "Suya (Spicy Grilled Meat)",
+  "Kilishi (Beef Jerky)",
+  "Nkwobi (Cow Foot Delicacy)",
+  "Isi Ewu (Goat Head)",
+  "Ukodo (Yam Pepper Soup)",
+  "Goat Meat Pepper Soup",
+  "Catfish Pepper Soup",
+  "Chicken Pepper Soup",
+  "Palm Nut Soup",
+  "Yam Porridge (Asaro)",
+  "Beans Porridge",
+  "Plantain Porridge",
+  "Ewa Agoyin with Agege Bread",
+  "Ofada Rice and Designer Stew",
+  "Ojojo (Water Yam Fritters)",
+  "Ekpang Nkukwo",
+  "Abacha (African Salad)",
+  "Ugba with Fish",
+  "Fisherman Soup",
+  "Atama Soup",
+  "Afang Okazi Soup",
+  "Corn Pudding (Okpa)",
+  "Agidi Jollof",
+  "Agidi White with Pepper Soup",
+  "Boli (Roasted Plantain) with Groundnut",
+  "Roasted Corn with Coconut",
+  "Yam and Egg Sauce",
+  "Boiled Plantain with Garden Egg Sauce",
+  "Beans and Plantain",
+  "Beans and Pap",
+  "Akamu (Pap/Ogi) with Akara",
+  "Custard with Moi Moi",
+  "Nigerian Meat Pie",
+  "Chicken Pie",
+  "Nigerian Fish Roll",
+  "Scotch Egg (Nigerian style)",
+  "Shawarma (Naija Style)",
+  "Gala Sausage Roll",
+  "Puff Puff",
+  "Chin Chin",
+  "Meat Kebab",
+  "Asun (Spicy Goat Meat)",
+  "Ponmo Alata (Peppered Cow Skin)",
+  "Spaghetti Jollof",
+  "Indomie Stir Fry with Egg",
+  "Egg Roll (Nigerian Style)",
+  "Beans Cake Sandwich",
+  "Peppered Snail",
+  "Grilled Croaker Fish",
+  "Fried Titus Fish with Stew",
+  "Dry Fish with Palm Oil Sauce",
+  "Stockfish in Palm Oil Sauce",
+  "Ofada Sauce (Ayamase)",
+  "Goat Meat Stew",
+  "Turkey Stew",
+  "Chicken in Tomato Stew",
+  "Ofe Akwu (Palm Nut Stew)",
+  "Garden Egg Stew",
+  "Okpa Enugu",
+  "Nigerian Pancake",
+  "Coconut Rice",
+  "Jollof Spaghetti",
+  "Boiled Yam with Palm Oil Sauce",
+  "Wheat with Ogbono Soup",
+  "Oatmeal Swallow with Efo Riro",
+
+  // 🇮🇳 Indian dishes
+  "Paneer Butter Masala",
+  "Masala Dosa",
+  "Chicken Tikka Masala",
+  "Rogan Josh",
+  "Dal Makhani",
+  "Hyderabadi Biryani",
+  "Kadai Paneer",
+  "Pav Bhaji",
+  "Chole Bhature",
+  "Pani Puri",
+  "Aloo Paratha",
+  "Palak Paneer",
+  "Vindaloo Curry",
+  "Lamb Rogan Josh",
+  "Butter Naan",
+  "Malai Kofta",
+  "Samosa Chaat",
+  "Gulab Jamun",
+  "Rasmalai",
+  "Jalebi",
+
+  // 🇲🇽 Mexican dishes
+  "Beef Enchiladas",
+  "Chicken Enchiladas Verde",
+  "Churros with Chocolate",
+  "Tamales Rojos",
+  "Carnitas Tacos",
+  "Huevos Rancheros",
+  "Mole Poblano",
+  "Pozole Rojo",
+  "Chilaquiles Verdes",
+  "Elote (Mexican Street Corn)",
+  "Queso Fundido",
+  "Sopes con Carne",
+  "Tres Leches Cake",
+
+  // 🇮🇹 Italian & Mediterranean
+  "Fettuccine Alfredo",
+  "Penne Arrabbiata",
+  "Risotto alla Milanese",
+  "Osso Buco",
+  "Caprese Salad",
+  "Prosciutto with Melon",
+  "Arancini Rice Balls",
+  "Tiramisu",
+  "Panna Cotta",
+  "Cannoli",
+  "Cioppino Seafood Stew",
+
+  // 🇹🇭 Thai & Southeast Asian
+  "Green Curry Chicken",
+  "Massaman Curry",
+  "Som Tum Papaya Salad",
+  "Pad Kra Pao Basil Chicken",
+  "Mango Sticky Rice",
+  "Khao Soi",
+  "Satay Skewers",
+  "Laksa Noodle Soup",
+
+  // 🇯🇵 Japanese
+  "Salmon Nigiri Sushi",
+  "Tempura Udon",
+  "Chicken Katsu Curry",
+  "Okonomiyaki Pancake",
+  "Takoyaki Octopus Balls",
+  "Gyudon Beef Bowl",
+  "Unagi Donburi",
+  "Yakisoba Noodles",
+
+  // 🇪🇹 Ethiopian & others
+  "Injera with Doro Wat",
+  "Misir Wot (Red Lentil Stew)",
+  "Shiro Wat",
+  "Kitfo (Spiced Beef Tartare)",
+  "Tibs Stir Fry",
+  "Baklava",
+  "Shish Kebab",
+  "Hummus with Pita",
+  "Baba Ganoush",
+  "French Onion Soup",
+  "Coq au Vin",
+  "Beef Bourguignon",
+  "Ratatouille",
+  "Croque Monsieur",
+  "Quiche Lorraine",
+  "Crème Brûlée",
+];
+
+const videoUrls = [
   "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4", // 15s
   "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4", // 10s
   "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4", // 15s
@@ -730,795 +498,618 @@ const foodVideoUrls = [
   "https://videos.pexels.com/video-files/854964/854964-sd_640_360_30fps.mp4",
 ];
 
-function getRandomFoodImage(min: number = 1, max: number = 6): string[] {
-  const count = faker.number.int({ min, max });
-  return Array.from({ length: count }, () =>
-    faker.helpers.arrayElement(foodImageUrls),
-  );
+function randomImages() {
+  return [faker.helpers.arrayElement(imageUrls)];
 }
 
-function getRandomFoodVideo(min: number = 1, max: number = 6): string[] {
-  const count = faker.number.int({ min, max });
-  return Array.from({ length: count }, () =>
-    faker.helpers.arrayElement(foodVideoUrls),
-  );
+function randomVideos() {
+  return [faker.helpers.arrayElement(videoUrls)];
 }
 
-// ==============================
-// Helper: Chunk arrays into smaller batches
-// ==============================
-function chunkArray<T>(array: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < array.length; i += size) {
-    chunks.push(array.slice(i, i + size));
-  }
-  return chunks;
+function money(min = 500, max = 5000) {
+  return faker.number.float({ min, max, fractionDigits: 2 });
+}
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function randomRange(range: CountRange) {
+  return faker.number.int(range);
 }
 
-// ==============================
-// Clear Redis caches safely
-// ==============================
-async function clearRedisCaches() {
-  console.log("🧹 Clearing Redis caches...");
-  const clients = [
-    redisProducts,
-    redisSearch,
-    redisNotifications,
-    ShopCartRedis,
-  ];
-  for (const client of clients) {
-    if (!client.isOpen) await client.connect();
-    await client.flushAll();
-    await client.quit();
-  }
-  console.log("✅ Redis caches cleared");
+function randomSeedDate() {
+  const rangeDays = randomRange(SEED_CONFIG.dateRangeDays);
+  const offset = faker.number.int({
+    min: -rangeDays * DAY_MS,
+    max: rangeDays * DAY_MS,
+  });
+  return new Date(Date.now() + offset);
 }
 
-// ==============================
-// Main Seed Function
-// ==============================
+function addMilliseconds(date: Date, milliseconds: number) {
+  return new Date(date.getTime() + milliseconds);
+}
 
-async function main() {
-  console.log("🌱 Starting database seeding...\n");
+function pick<T>(values: T[]) {
+  return values.length ? faker.helpers.arrayElement(values) : undefined;
+}
+function take<T>(values: T[], count: number) {
+  if (!values.length || count === 0) return [];
+  return faker.helpers.arrayElements(values, Math.min(count, values.length));
+}
+function chunks<T>(values: T[], size = 500): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size)
+    result.push(values.slice(index, index + size));
+  return result;
+}
+async function createMany<T>(
+  create: (data: T[]) => Promise<unknown>,
+  data: T[],
+) {
+  for (const chunk of chunks(data)) if (chunk.length) await create(chunk);
+}
 
-  // ==============================
-  // CONFIGURABLE ENGAGEMENT PARAMETERS
-  // ==============================
-  const CUSTOMER_ENGAGEMENT = 0.8; // 60% of customers place orders
-  const VENDOR_ENGAGEMENT = 0.7; // 70% of vendors have active products
-  const MAX_ORDERS_PER_CUSTOMER = { min: 0, max: 5 };
-  const ORDER_STATUS_PROBABILITIES = [
-    { status: OrderStatus.COMPLETED, weight: 0.5 },
-    { status: OrderStatus.CANCELLED, weight: 0.2 },
-    { status: OrderStatus.PAYMENT_EXPIRED, weight: 0.15 },
-    { status: OrderStatus.PENDING, weight: 0.15 },
-  ];
-  const PAYMENT_STATUS_PROBABILITIES = [
-    { status: PaymentStatus.SUCCESS, weight: 0.5 },
-    { status: PaymentStatus.PENDING, weight: 0.6 },
-    { status: PaymentStatus.FAILED, weight: 0.3 },
-    { status: PaymentStatus.EXPIRED, weight: 0.1 },
-  ];
+async function seedDatabase() {
+  console.log("Starting database seed with configuration:", SEED_CONFIG);
+  const setProgress = (current: number, message: string) => {
+    seederState.current = current;
+    seederState.message = message;
+    console.log(`${current}% ${message}`);
+  };
 
-  function pickWeighted<T extends { status: any; weight: number }>(arr: T[]) {
-    const sum = arr.reduce((acc, e) => acc + e.weight, 0);
-    let rand = Math.random() * sum;
-    for (const e of arr) {
-      if (rand < e.weight) return e.status;
-      rand -= e.weight;
+  const users: Prisma.UserCreateManyInput[] = [];
+  const addUsers = (role: Role, count: number, prefix: string) => {
+    for (let index = 0; index < count; index++) {
+      const name = faker.person.fullName();
+      users.push({
+        name,
+        email: `${prefix}${index}_${faker.string.alphanumeric(6).toLowerCase()}@foodpaddi.test`,
+        username: `${prefix}_${index}_${faker.string.alphanumeric(5).toLowerCase()}`,
+        password: faker.internet.password(),
+        role,
+        preferences: take(Object.values(Category), 2),
+        authProviders: ["local"],
+        bio: faker.lorem.sentence(),
+        avatarUrl: faker.image.avatar(),
+        brandName: role === Role.VENDOR ? `${name} Foods` : undefined,
+        brandLogo: role === Role.VENDOR ? faker.image.url() : undefined,
+        isEmailVerified: true,
+        isLive: role === Role.VENDOR,
+        kycStatus:
+          role === Role.VENDOR || role === Role.DELIVERY
+            ? "VERIFIED"
+            : undefined,
+        timezone: role === Role.VENDOR ? "Africa/Lagos" : undefined,
+      });
     }
-    return arr[0].status;
-  }
+  };
+  addUsers(Role.VENDOR, SEED_CONFIG.vendors, "vendor");
+  addUsers(Role.CUSTOMER, SEED_CONFIG.customers, "customer");
+  addUsers(Role.DELIVERY, SEED_CONFIG.deliveryPeople, "delivery");
+  await createMany((data) => prisma.user.createMany({ data }), users);
+  setProgress(10, `Created ${users.length} users`);
 
-  // ==============================
-  // 1️⃣ USERS (Vendors, Customers, Delivery)
-  // ==============================
-  const totalVendors = 150;
-  const totalCustomers = 500;
-  const totalDeliveryGuys = 20;
-  const usersData: Prisma.UserCreateManyInput[] = [];
-
-  function generateSafeUserIdentifiers(role: string, index: number) {
-    const cleanName = faker.person
-      .firstName()
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "");
-    const email = `${role.toLowerCase()}${index}_${cleanName}@foodpaddi.com`;
-    const baseUsername = faker.internet
-      .username()
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "");
-    const username = `${baseUsername}${index}`;
-    return { email, username };
-  }
-
-  // --------------------------
-  // Delivery Users
-  // --------------------------
-  for (let i = 0; i < totalDeliveryGuys; i++) {
-    const { email, username } = generateSafeUserIdentifiers("delivery", i);
-    usersData.push({
-      name: faker.person.fullName(),
-      email,
-      username,
-      password: faker.internet.password(),
-      role: Role.DELIVERY,
-      bio: faker.lorem.sentence(),
-      avatarUrl: faker.image.avatar(),
-      isEmailVerified: true,
-    });
-  }
-
-  // --------------------------
-  // Vendors
-  // --------------------------
-  for (let i = 0; i < totalVendors; i++) {
-    const { email, username } = generateSafeUserIdentifiers("vendor", i);
-    usersData.push({
-      name: faker.person.fullName(),
-      email,
-      username,
-      password: faker.internet.password(),
-      role: Role.VENDOR,
-      bio: faker.lorem.sentence(),
-      avatarUrl: faker.image.avatar(),
-      brandName: faker.company.name(),
-      brandLogo: faker.image.url(),
-      preferences: faker.helpers.arrayElements([
-        "DESSERT",
-        "DRINK",
-        "DINNER",
-        "BREAKFAST",
-        "LUNCH",
-      ]),
-      isEmailVerified: true,
-      // Vendor Live: seeded vendors operate on the marketplace so seeded
-      // products remain discoverable/orderable under the new availability
-      // model (a small share intentionally offline for realism).
-      isLive: i % 8 !== 0,
-    });
-  }
-
-  // --------------------------
-  // Customers
-  // --------------------------
-  for (let i = 0; i < totalCustomers; i++) {
-    const { email, username } = generateSafeUserIdentifiers("customer", i);
-    usersData.push({
-      name: faker.person.fullName(),
-      email,
-      username,
-      password: faker.internet.password(),
-      role: Role.CUSTOMER,
-      bio: faker.lorem.sentence(),
-      avatarUrl: faker.image.avatar(),
-      preferences: faker.helpers.arrayElements([
-        "DESSERT",
-        "DRINK",
-        "DINNER",
-        "BREAKFAST",
-        "LUNCH",
-      ]),
-      isEmailVerified: true,
-    });
-  }
-
-  await prisma.user.createMany({ data: usersData, skipDuplicates: true });
-  console.log(
-    `✅ Created ${usersData.length} users (Vendors + Customers + Delivery)`,
-  );
-  seederState.current = 10;
-  seederState.message = "Users created";
-
-  // ==============================
-  // 2️⃣ Delivery Profiles
-  // ==============================
+  const vendors = await prisma.user.findMany({ where: { role: Role.VENDOR } });
+  const customers = await prisma.user.findMany({
+    where: { role: Role.CUSTOMER },
+  });
   const deliveryUsers = await prisma.user.findMany({
     where: { role: Role.DELIVERY },
   });
-  const deliveryProfilesData: Prisma.DeliveryPersonCreateManyInput[] =
+  const deliveryProfiles: Prisma.DeliveryPersonCreateManyInput[] =
     deliveryUsers.map((user) => ({
       userId: user.id,
-      vehicleType: faker.helpers.arrayElement(["Bike", "Car", "Van"]),
+      vehicleType: pick(["Bike", "Car", "Van"]),
       licensePlate: faker.vehicle.vrm(),
-      status: faker.helpers.arrayElement(["ACTIVE", "INACTIVE"]),
-      rating: faker.number.float({ min: 0, max: 5, fractionDigits: 1 }),
+      status: DeliveryPersonStatus.ACTIVE,
+      rating: faker.number.float({ min: 3, max: 5, fractionDigits: 1 }),
       totalDeliveries: faker.number.int({ min: 0, max: 50 }),
-      isOnline: faker.datatype.boolean(),
-      latitude: faker.number.float({ min: 4.0, max: 10.0, fractionDigits: 6 }),
-      longitude: faker.number.float({ min: 3.0, max: 6.9, fractionDigits: 6 }),
-      walletBalance: faker.number.float({
-        min: 0,
-        max: 1000,
-        fractionDigits: 2,
-      }),
-      lastSeenAt: faker.date.recent({ days: 3 }),
+      isOnline: true,
+      latitude: faker.number.float({ min: 6.3, max: 6.7, fractionDigits: 6 }),
+      longitude: faker.number.float({ min: 3.2, max: 3.6, fractionDigits: 6 }),
+      walletBalance: money(0, 10000),
+      lastSeenAt: new Date(),
     }));
+  await createMany(
+    (data) => prisma.deliveryPerson.createMany({ data }),
+    deliveryProfiles,
+  );
 
-  if (deliveryProfilesData.length) {
-    await prisma.deliveryPerson.createMany({
-      data: deliveryProfilesData,
-      skipDuplicates: true,
-    });
-    console.log(`🚴 Created ${deliveryProfilesData.length} delivery profiles`);
-    seederState.current = 15;
-    seederState.message = "Delivery profiles created";
+  const addresses: Prisma.AddressCreateManyInput[] = [];
+  for (const user of [...vendors, ...customers, ...deliveryUsers]) {
+    const addressCount = randomRange(SEED_CONFIG.addressesPerUser);
+    for (let index = 0; index < addressCount; index++)
+      addresses.push({
+        userId: user.id,
+        label: index === 0 ? "Home" : `Address ${index + 1}`,
+        street: faker.location.streetAddress(),
+        city: "Lagos",
+        state: "Lagos",
+        country: "Nigeria",
+        zipCode: faker.location.zipCode(),
+        latitude: 6.5,
+        longitude: 3.35,
+        isDefault: index === 0,
+      });
   }
-
-  // ==============================
-  // 3️⃣ Addresses
-  // ==============================
-  const allUsers = await prisma.user.findMany({ select: { id: true } });
-  const addressesData = allUsers.map((user) => ({
-    userId: user.id,
-    label: "Home",
-    street: faker.location.streetAddress(),
-    city: "Lagos",
-    state: "Lagos",
-    country: "Nigeria",
-    zipCode: faker.location.zipCode(),
-    latitude: faker.number.float({ min: 5.3, max: 10.7, fractionDigits: 6 }),
-    longitude: faker.number.float({ min: 3.2, max: 3.9, fractionDigits: 6 }),
-    isDefault: true,
-  }));
-  await prisma.address.createMany({
-    data: addressesData,
-    skipDuplicates: true,
-  });
-  console.log(`✅ Created ${addressesData.length} addresses`);
-  seederState.current = 20;
-  seederState.message = "Addresses created";
-
-  // ==============================
-  // 4️⃣ Products + Options + Reviews
-  // ==============================
-  const allVendors = await prisma.user.findMany({
-    where: { role: Role.VENDOR },
-  });
-  const activeVendors = faker.helpers.arrayElements(
-    allVendors,
-    Math.floor(allVendors.length * VENDOR_ENGAGEMENT),
-  );
-  const allCustomers = await prisma.user.findMany({
-    where: { role: Role.CUSTOMER },
-  });
-  const customers = faker.helpers.arrayElements(
-    allCustomers,
-    Math.floor(allCustomers.length * CUSTOMER_ENGAGEMENT),
+  await createMany((data) => prisma.address.createMany({ data }), addresses);
+  setProgress(
+    20,
+    `Created ${deliveryProfiles.length} delivery profiles and ${addresses.length} addresses`,
   );
 
-  for (const vendor of activeVendors) {
-    const totalProducts = faker.number.int({
-      min: 5,
-      max: MAX_PRODUCTS_PER_VENDOR,
-    });
-    const totalBatches = Math.ceil(totalProducts / BATCH_SIZE);
-
-    for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
-      const batchCount = Math.min(
-        BATCH_SIZE,
-        totalProducts - batchIndex * BATCH_SIZE,
-      );
-
-      const productsData: Prisma.ProductCreateManyInput[] = [];
-      const optionData: Prisma.ProductOptionCreateManyInput[] = [];
-      const reviewData: Prisma.ProductReviewCreateManyInput[] = [];
-      const scheduleData: Prisma.ProductScheduleCreateManyInput[] = [];
-
-      for (let i = 0; i < batchCount; i++) {
-        const foodName = getRandomFoodName();
-        const productId = faker.string.uuid();
-
-        productsData.push({
-          id: productId,
-          name: foodName,
-          description: getRandomFoodDescription(foodName),
-          price: parseFloat(faker.commerce.price({ min: 200, max: 1500 })),
-          archived: false,
-          category: faker.helpers.arrayElement(Object.values(Category)),
-          vendorId: vendor.id,
-          images: getRandomFoodImage(),
-          video: getRandomFoodVideo(),
-          totalViews: faker.number.int({ min: 0, max: 1000 }),
-        });
-
-        // Options
-        const optionCount = faker.number.int({ min: 1, max: 3 });
-        for (let j = 0; j < optionCount; j++) {
-          optionData.push({
-            productId,
-            name: faker.commerce.productAdjective(),
-            price: parseFloat(faker.commerce.price({ min: 100, max: 500 })),
-          });
-        }
-
-        // Reviews
-        const reviewCount = faker.number.int({ min: 2, max: 20 });
-        for (let j = 0; j < reviewCount; j++) {
-          const customer = faker.helpers.arrayElement(customers);
-          reviewData.push({
-            productId,
-            customerId: customer.id,
-            rating: faker.number.int({ min: 0, max: 5 }),
-            comment: faker.lorem.sentence(),
-            images: [],
-            verifiedPurchase: faker.datatype.boolean(),
-          });
-        }
-
-        // ✅ Schedule — ONLY ONE PER PRODUCT
-        scheduleData.push({
-          productId,
-          goLiveAt: faker.date.soon({ days: 2 }),
-          takeDownAt: faker.date.soon({ days: 10 }),
-          isLive: faker.datatype.boolean(),
-          graceMinutes: faker.number.int({ min: 0, max: 30 }),
-        });
-
-        // const goLiveAt = new Date();
-        // const takeDownAt = new Date(Date.now() + 90 * 60 * 1000);
-        // scheduleData.push({
-        //   productId,
-        //   goLiveAt,
-        //   takeDownAt,
-        //   isLive: true,
-        //   graceMinutes: faker.number.int({ min: 0, max: 50 }),
-        // });
-      }
-
-      if (productsData.length)
-        await prisma.product.createMany({ data: productsData });
-      if (optionData.length)
-        await prisma.productOption.createMany({ data: optionData });
-      if (reviewData.length) {
-        const reviewChunks = chunkArray(reviewData, BATCH_SIZE);
-        for (const chunk of reviewChunks) {
-          await prisma.productReview.createMany({ data: chunk });
-          await new Promise((r) => setTimeout(r, 150));
-        }
-      }
-
-      if (scheduleData.length)
-        await prisma.productSchedule.createMany({ data: scheduleData });
-
-      console.log(
-        `✅ Vendor ${vendor.id} batch ${batchIndex + 1}/${totalBatches} seeded`,
-      );
-      await new Promise((r) => setTimeout(r, 200));
+  const products: Prisma.ProductCreateManyInput[] = [];
+  const liveProductPercentage = Math.min(
+    randomRange(SEED_CONFIG.liveProductPercentage),
+    100,
+  );
+  for (const vendor of vendors)
+    for (
+      let index = 0;
+      index < randomRange(SEED_CONFIG.productsPerVendor);
+      index++
+    ) {
+      const name = `${pick(foodNames) || "Meal"} ${index + 1}`;
+      const productIsLive =
+        faker.number.int({ min: 1, max: 100 }) <= liveProductPercentage;
+      products.push({
+        id: faker.string.uuid(),
+        name,
+        description: `${
+          [
+            "A delicious",
+            "A freshly prepared",
+            "A flavorful",
+            "A hearty",
+            "A savory",
+            "A rich and satisfying",
+            "A perfectly seasoned",
+            "A fresh and flavorful",
+            "A tender and delicious",
+            "An aromatic and flavorful",
+          ][Math.floor(Math.random() * 10)]
+        } ${name.toLowerCase()} prepared with care by ${vendor.brandName || vendor.name}.`,
+        price: money(),
+        category: pick(Object.values(Category)) || Category.LUNCH,
+        archived: false,
+        vendorId: vendor.id,
+        images: randomImages(),
+        video: randomVideos(),
+        isLive: productIsLive,
+        liveUntil: productIsLive ? new Date(Date.now() + 30 * DAY_MS) : null,
+        totalViews: faker.number.int({ min: 0, max: 1000 }),
+        isNew: true,
+      });
     }
-  }
-
-  // Approximate progress after products seeded
-  seederState.current = 50;
-  seederState.message = "Products seeded";
-
-  // --------------------------
-  // 8️⃣ Customer Carts
-  // --------------------------
-  const cartCustomers = faker.helpers.arrayElements(
-    allCustomers,
-    Math.floor(allCustomers.length * 0.3),
-  ); // 50% of customers
-  const liveProducts = await prisma.product.findMany({
-    where: { archived: false, isLive: true },
-  });
-
-  for (const customer of cartCustomers) {
-    // 1️⃣ Create cart
-    const cart = await prisma.cart.create({
-      data: {
-        customerId: customer.id,
-        basePrice: 0,
-        totalPrice: 0,
-      },
+  await createMany((data) => prisma.product.createMany({ data }), products);
+  const savedProducts = await prisma.product.findMany();
+  const options: Prisma.ProductOptionCreateManyInput[] = [];
+  const schedules: Prisma.ProductScheduleCreateManyInput[] = [];
+  for (const product of savedProducts) {
+    for (
+      let index = 0;
+      index < randomRange(SEED_CONFIG.optionsPerProduct);
+      index++
+    )
+      options.push({
+        productId: product.id,
+        name: `Option ${index + 1}`,
+        price: money(100, 1000),
+      });
+    schedules.push({
+      productId: product.id,
+      type: ProductScheduleType.ONE_TIME,
+      enabled: true,
+      goLiveAt: new Date(Date.now() - DAY_MS),
+      takeDownAt: product.isLive
+        ? new Date(Date.now() + 30 * DAY_MS)
+        : new Date(Date.now() - DAY_MS),
+      isLive: product.isLive,
+      graceMinutes: 15,
     });
+  }
+  await createMany(
+    (data) => prisma.productOption.createMany({ data }),
+    options,
+  );
+  await createMany(
+    (data) => prisma.productSchedule.createMany({ data }),
+    schedules,
+  );
+  setProgress(
+    35,
+    `Created ${savedProducts.length} products, ${options.length} options and schedules`,
+  );
 
-    // 2️⃣ Pick some products for this cart
-    const cartItemsCount = faker.number.int({ min: 0, max: 5 });
-    const cartProducts = faker.helpers.arrayElements(
+  const liveProducts = savedProducts.filter((product) => product.isLive);
+
+  const productReviews: Prisma.ProductReviewCreateManyInput[] = [];
+  for (const product of savedProducts)
+    for (
+      let index = 0;
+      index < randomRange(SEED_CONFIG.productReviewsPerProduct);
+      index++
+    ) {
+      const customer = pick(customers);
+      if (customer)
+        productReviews.push({
+          productId: product.id,
+          customerId: customer.id,
+          rating: faker.number.int({ min: 3, max: 5 }),
+          comment: faker.lorem.sentence(),
+          images: [],
+          verifiedPurchase: true,
+        });
+    }
+  await createMany(
+    (data) => prisma.productReview.createMany({ data }),
+    productReviews,
+  );
+  const vendorReviews: Prisma.VendorReviewCreateManyInput[] = [];
+  for (const vendor of vendors)
+    for (
+      let index = 0;
+      index < randomRange(SEED_CONFIG.vendorReviewsPerVendor);
+      index++
+    ) {
+      const customer = pick(customers);
+      if (customer)
+        vendorReviews.push({
+          vendorId: vendor.id,
+          customerId: customer.id,
+          rating: faker.number.int({ min: 3, max: 5 }),
+          comment: faker.lorem.sentence(),
+        });
+    }
+  await createMany(
+    (data) => prisma.vendorReview.createMany({ data }),
+    vendorReviews,
+  );
+
+  const carts: Prisma.CartCreateManyInput[] = [];
+  for (let index = 0; index < randomRange(SEED_CONFIG.carts); index++) {
+    const customer = pick(customers);
+    if (customer)
+      carts.push({ customerId: customer.id, basePrice: 0, totalPrice: 0 });
+  }
+  await createMany((data) => prisma.cart.createMany({ data }), carts);
+  const savedCarts = await prisma.cart.findMany({
+    orderBy: { createdAt: "desc" },
+    take: carts.length,
+  });
+  for (const cart of savedCarts) {
+    const cartProducts = take(
       liveProducts,
-      cartItemsCount,
+      randomRange(SEED_CONFIG.cartItemsPerCart),
     );
-
-    let basePrice = 0;
-    const cartData: Prisma.CartItemCreateManyInput[] = cartProducts.map(
+    let total = 0;
+    const items: Prisma.CartItemCreateManyInput[] = cartProducts.map(
       (product) => {
-        const quantity = faker.number.int({ min: 1, max: 5 });
-        const unitPrice = product.price;
-        const subtotal = quantity * unitPrice;
-        basePrice += subtotal;
-
+        const quantity = faker.number.int({ min: 1, max: 3 });
+        const subtotal = product.price * quantity;
+        total += subtotal;
         return {
           cartId: cart.id,
           productId: product.id,
           quantity,
-          unitPrice,
+          unitPrice: product.price,
           subtotal,
-          specialRequest: faker.datatype.boolean()
-            ? faker.lorem.sentence()
-            : null,
+          specialRequest: null,
         };
       },
     );
-
-    // 3️⃣ Insert CartItems
-    if (cartData.length) {
-      await prisma.cartItem.createMany({ data: cartData });
-    }
-
-    // 4️⃣ Update cart totalPrice
+    await createMany((data) => prisma.cartItem.createMany({ data }), items);
     await prisma.cart.update({
       where: { id: cart.id },
-      data: { basePrice, totalPrice: basePrice },
+      data: { basePrice: total, totalPrice: total },
     });
   }
+  setProgress(50, `Created ${savedCarts.length} carts`);
 
-  console.log(`🛒 Created carts for ${cartCustomers.length} customers`);
-  seederState.current = 65;
-  seederState.message = "Carts created";
-
-  // ==============================
-  // 5️⃣ Vendor Reviews
-  // ==============================
-  const vendorReviewsData: Prisma.VendorReviewCreateManyInput[] = [];
-  for (const vendor of activeVendors) {
-    const reviewCount = faker.number.int({ min: 0, max: 5000 });
-    for (let i = 0; i < reviewCount; i++) {
-      const customer = faker.helpers.arrayElement(customers);
-      vendorReviewsData.push({
-        vendorId: vendor.id,
-        customerId: customer.id,
-        rating: faker.number.int({ min: 0, max: 5 }),
-        comment: faker.lorem.sentence(),
-      });
-    }
-  }
-
-  if (vendorReviewsData.length) {
-    const vendorChunks = chunkArray(vendorReviewsData, BATCH_SIZE);
-    for (const chunk of vendorChunks) {
-      await prisma.vendorReview.createMany({ data: chunk });
-      await new Promise((r) => setTimeout(r, 150));
-    }
-  }
-  console.log("✅ Vendor reviews seeded");
-  seederState.current = 80;
-  seederState.message = "Vendor reviews created";
-
-  // ==============================
-  // 7️⃣ Orders + Order Items + Payments
-  // ==============================
-  const engagedCustomers = faker.helpers.arrayElements(
-    allCustomers,
-    Math.floor(allCustomers.length * CUSTOMER_ENGAGEMENT),
-  );
-  const allProducts = await prisma.product.findMany();
-
-  // Helper function to generate realistic order dates
-  function generateOrderDate() {
-    const today = new Date();
-
-    // Distribution: 70% past (1-30 days ago), 20% today, 10% future (1-5 days ahead)
-    const random = Math.random();
-
-    if (random < 0.7) {
-      // Past orders: 1 to 30 days ago
-      const daysAgo = faker.number.int({ min: 1, max: 30 });
-      const date = new Date();
-      date.setDate(date.getDate() - daysAgo);
-
-      // Set random time during business hours (8 AM to 10 PM)
-      date.setHours(faker.number.int({ min: 8, max: 22 }));
-      date.setMinutes(faker.number.int({ min: 0, max: 59 }));
-      date.setSeconds(faker.number.int({ min: 0, max: 59 }));
-
-      return date;
-    } else if (random < 0.9) {
-      // Today's orders (within last 24 hours)
-      const date = new Date();
-
-      // For today, allow any time up to now
-      const hoursAgo = faker.number.int({ min: 0, max: 23 });
-      const minutesAgo = faker.number.int({ min: 0, max: 59 });
-
-      date.setHours(date.getHours() - hoursAgo);
-      date.setMinutes(date.getMinutes() - minutesAgo);
-
-      return date;
-    } else {
-      // Future orders: 1 to 5 days ahead (for pre-orders or scheduled orders)
-      const daysAhead = faker.number.int({ min: 1, max: 5 });
-      const date = new Date();
-      date.setDate(date.getDate() + daysAhead);
-
-      // Set random time during business hours
-      date.setHours(faker.number.int({ min: 8, max: 22 }));
-      date.setMinutes(faker.number.int({ min: 0, max: 59 }));
-      date.setSeconds(faker.number.int({ min: 0, max: 59 }));
-
-      return date;
-    }
-  }
-
-  for (const customer of engagedCustomers) {
-    const ordersCount = faker.number.int(MAX_ORDERS_PER_CUSTOMER);
-
-    for (let i = 0; i < ordersCount; i++) {
-      // Generate order date with realistic distribution
-      const orderDate = generateOrderDate();
-
-      const vendor = faker.helpers.arrayElement(activeVendors);
-      const vendorProducts = allProducts.filter(
-        (p) => p.vendorId === vendor.id,
-      );
-      if (!vendorProducts.length) continue;
-
-      const orderProducts = faker.helpers.arrayElements(
-        vendorProducts,
-        faker.number.int({ min: 1, max: Math.min(5, vendorProducts.length) }),
-      );
-
-      let basePrice = 0;
-      const orderItemsData: Prisma.OrderItemCreateManyInput[] = [];
-
-      for (const product of orderProducts) {
-        const quantity = faker.number.int({ min: 1, max: 5 });
-        const subtotal = quantity * product.price;
-        basePrice += subtotal;
-
-        orderItemsData.push({
-          orderId: "", // Will be set later
-          productId: product.id,
-          quantity,
-          unitPrice: product.price,
-          subtotal,
-        });
-      }
-
-      const extraCharge = faker.number.float({
-        min: 10,
-        max: 5500,
-        fractionDigits: 2,
-      });
-      const totalPrice = basePrice + extraCharge;
-      const orderStatus = pickWeighted(ORDER_STATUS_PROBABILITIES);
-
-      const customerAddresses = await prisma.address.findMany({
-        where: { userId: customer.id },
-      });
-      const address = faker.helpers.arrayElement(customerAddresses);
-
-      // Determine if order should be completed (for paidAt)
-      const isCompleted = orderStatus === OrderStatus.COMPLETED;
-
-      // Calculate payment grace period (15 minutes default)
-      const paymentGraceMinutes = 15;
-      const protectedUntil = new Date(
-        orderDate.getTime() + paymentGraceMinutes * 60 * 1000,
-      );
-
-      // First create the order (will get current timestamp for createdAt)
-      const order = await prisma.order.create({
-        data: {
-          customerId: customer.id,
-          vendorId: vendor.id,
-          addressId: address?.id,
-          basePrice,
-          extraCharge,
-          totalPrice,
-          status: orderStatus,
-          customerApproval: true,
-          // If order is completed, set paidAt to a time shortly after order creation
-          paidAt: isCompleted
-            ? new Date(
-                orderDate.getTime() +
-                  faker.number.int({ min: 30000, max: 3600000 }),
-              ) // 30 sec to 1 hour later
-            : null,
-          // Set payment status based on order status
-          paymentStatus: isCompleted
-            ? PaymentStatus.SUCCESS
-            : orderStatus === OrderStatus.CANCELLED
-              ? PaymentStatus.FAILED
-              : PaymentStatus.PENDING,
-          // Payment started shortly after order
-          paymentStartedAt: new Date(
-            orderDate.getTime() + faker.number.int({ min: 1000, max: 30000 }),
-          ), // 1-30 seconds after order
-          // Protection period for order modification/cancellation
-          protectedUntil,
-          // Payment grace period
-          paymentGraceMinutes,
-        },
-      });
-
-      // Update the order with our custom created date using raw SQL
-      await prisma.$executeRaw`
-      UPDATE "Order" 
-      SET "createdAt" = ${orderDate}, 
-          "updatedAt" = ${orderDate}
-      WHERE id = ${order.id}
-    `;
-
-      // Create order items
-      const itemsToCreate = orderItemsData.map((item) => ({
-        ...item,
-        orderId: order.id,
-      }));
-
-      if (itemsToCreate.length) {
-        await prisma.orderItem.createMany({ data: itemsToCreate });
-
-        // Update order items with custom timestamps
-        for (const item of itemsToCreate) {
-          await prisma.$executeRaw`
-          UPDATE "OrderItem"
-          SET "createdAt" = ${orderDate}, 
-              "updatedAt" = ${orderDate}
-          WHERE "orderId" = ${order.id} AND "productId" = ${item.productId}
-        `;
-        }
-      }
-
-      // Determine payment status (may differ from order status for realism)
-      const paymentStatusProbabilities = [
-        { status: PaymentStatus.SUCCESS, weight: 0.8 }, // 80% success rate
-        { status: PaymentStatus.PENDING, weight: 0.1 }, // 10% pending
-        { status: PaymentStatus.FAILED, weight: 0.1 }, // 10% failed
-      ];
-
-      const paymentStatus = pickWeighted(paymentStatusProbabilities);
-
-      // Calculate payment dates relative to the order date
-      const paymentStartedAt = new Date(
-        orderDate.getTime() + faker.number.int({ min: 1000, max: 30000 }),
-      ); // 1-30 seconds after order
-      const paymentCompletedAt =
-        paymentStatus === PaymentStatus.SUCCESS
-          ? new Date(
-              paymentStartedAt.getTime() +
-                faker.number.int({ min: 1000, max: 60000 }),
-            ) // 1 sec to 1 min later
-          : null;
-
-      // Payment expires 24 hours after order for pending payments
-      const paymentExpiresAt = new Date(
-        orderDate.getTime() + 24 * 60 * 60 * 1000,
-      );
-
-      await prisma.payment.create({
-        data: {
-          userId: customer.id,
-          orderId: order.id,
-          amount: Math.round(totalPrice * 100), // Store in cents
-          reference: `SEED-${faker.string.alphanumeric(10).toUpperCase()}`,
-          status: paymentStatus,
-          startedAt: paymentStartedAt,
-          completedAt: paymentCompletedAt,
-          expiresAt: paymentExpiresAt,
-          channel: faker.helpers.arrayElement([
-            "card",
-            "bank",
-            "ussd",
-            "mobile_money",
-          ]),
-          ipAddress: faker.internet.ip(),
-          userAgent: faker.internet.userAgent(),
-          metadata: {
-            device: faker.helpers.arrayElement(["mobile", "desktop", "tablet"]),
-            browser: faker.internet.userAgent(),
-            os: faker.helpers.arrayElement([
-              "iOS",
-              "Android",
-              "Windows",
-              "macOS",
-            ]),
-          },
-          // Set timestamps to match order date
-          createdAt: orderDate,
-          updatedAt: orderDate,
-        },
-      });
-
-      // If order is cancelled, set cancellation time and reason
-      if (orderStatus === OrderStatus.CANCELLED) {
-        const cancellationTime = new Date(
-          orderDate.getTime() + faker.number.int({ min: 60000, max: 3600000 }),
-        ); // 1 min to 1 hour later
-
-        // Determine cancellation reason based on timing
-        let cancellationReason = "USER_CANCELLED";
-        if (cancellationTime > protectedUntil) {
-          cancellationReason = "PAYMENT_EXPIRED";
-        } else if (faker.number.float({ min: 0, max: 1 }) < 0.2) {
-          cancellationReason = "VENDOR_REJECTED";
-        }
-
-        await prisma.order.update({
-          where: { id: order.id },
-          data: {
-            cancelledAt: cancellationTime,
-            cancellationReason,
-            updatedAt: cancellationTime,
-          },
-        });
-      }
-
-      // For completed orders, create delivery assignment 30% of the time
-      if (
-        orderStatus === OrderStatus.COMPLETED &&
-        faker.number.float({ min: 0, max: 1 }) < 0.3
-      ) {
-        // First, check if there are delivery persons available
-        const deliveryPersons = await prisma.deliveryPerson.findMany({
-          take: 5,
-        });
-
-        if (deliveryPersons.length > 0) {
-          const deliveryPerson = faker.helpers.arrayElement(deliveryPersons);
-          const assignedAt = new Date(
-            orderDate.getTime() +
-              faker.number.int({ min: 300000, max: 1800000 }),
-          ); // 5-30 minutes after order
-
-          await prisma.deliveryAssignment.create({
-            data: {
-              orderId: order.id,
-              deliveryPersonId: deliveryPerson.id, // Use deliveryPersonId, not deliveryUserId
-              status: "ASSIGNED", // Use string value from your DeliveryStatus enum
-              assignedAt,
-              // estimatedDeliveryTime is not in your schema, remove it
-              createdAt: assignedAt,
-              updatedAt: assignedAt,
-            },
-          });
-        }
-      }
-
-      // Add a small delay to prevent database overload
-      if (i % 10 === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-    }
-
-    // Log progress
-    console.log(
-      `📦 Created ${ordersCount} orders for customer ${customer.email}`,
+  const customerAddresses = await prisma.address.findMany({
+    where: { userId: { in: customers.map((customer) => customer.id) } },
+  });
+  const orders: Prisma.OrderCreateManyInput[] = [];
+  const orderDates = new Map<string, Date>();
+  const orderCount = randomRange(SEED_CONFIG.orders);
+  for (let index = 0; index < orderCount; index++) {
+    const customer = pick(customers);
+    const vendor = pick(vendors);
+    if (!customer || !vendor) break;
+    const vendorProducts = savedProducts.filter(
+      (product) => product.vendorId === vendor.id,
     );
-  }
-
-  console.log("💳 Orders, order items, and payments seeded successfully!");
-
-  seederState.current = 95;
-  seederState.message = "Orders seeded";
-
-  console.log("💳 Orders, order items, and payments seeded successfully!");
-
-  // ==============================
-  // 6️⃣ Clear Redis Cache
-  // ==============================
-  try {
-    await clearRedisCaches();
-    console.log("🧹 Redis caches cleared\n");
-    seederState.current = 100;
-    seederState.message = "Redis cleared";
-  } catch (err) {
-    console.warn("⚠️ Failed to clear Redis caches:", err);
-  }
-
-  console.log("🎉 Seeding completed successfully!\n");
-}
-
-// Only run automatically if this file is executed directly (not when imported)
-if (require && require.main === module) {
-  main()
-    .catch((e) => {
-      console.error("❌ Seeding failed:", e);
-      process.exit(1);
-    })
-    .finally(async () => {
-      await prisma.$disconnect();
+    if (!vendorProducts.length) continue;
+    const chosen = take(
+      vendorProducts,
+      randomRange(SEED_CONFIG.orderItemsPerOrder),
+    );
+    const basePrice = chosen.reduce((sum, product) => sum + product.price, 0);
+    const orderDate = randomSeedDate();
+    const orderId = faker.string.uuid();
+    const paymentStartedAt = addMilliseconds(
+      orderDate,
+      faker.number.int({ min: 1_000, max: 30_000 }),
+    );
+    const paidAt = addMilliseconds(
+      paymentStartedAt,
+      faker.number.int({ min: 1_000, max: 60_000 }),
+    );
+    const isFutureOrder = orderDate.getTime() > Date.now();
+    const address = pick(
+      customerAddresses.filter((item) => item.userId === customer.id),
+    );
+    orderDates.set(orderId, orderDate);
+    orders.push({
+      id: orderId,
+      customerId: customer.id,
+      vendorId: vendor.id,
+      addressId: address?.id,
+      basePrice,
+      extraCharge: 250,
+      deliveryFee: 500,
+      totalPrice: basePrice + 750,
+      customerApproval: true,
+      status: isFutureOrder ? OrderStatus.PENDING : OrderStatus.COMPLETED,
+      paymentStatus: isFutureOrder
+        ? PaymentStatus.PENDING
+        : PaymentStatus.SUCCESS,
+      createdAt: orderDate,
+      updatedAt: orderDate,
+      paidAt: isFutureOrder ? undefined : paidAt,
+      paymentStartedAt,
+      protectedUntil: addMilliseconds(orderDate, 15 * 60000),
+      paymentGraceMinutes: 15,
     });
+  }
+  await createMany((data) => prisma.order.createMany({ data }), orders);
+  const savedOrders = await prisma.order.findMany({
+    orderBy: { createdAt: "desc" },
+    take: orders.length,
+  });
+  const orderItems: Prisma.OrderItemCreateManyInput[] = [];
+  const payments: Prisma.PaymentCreateManyInput[] = [];
+  for (const order of savedOrders) {
+    const orderDate = orderDates.get(order.id) || order.createdAt;
+    const paymentStartedAt = addMilliseconds(
+      orderDate,
+      faker.number.int({ min: 1_000, max: 30_000 }),
+    );
+    const paymentCompletedAt =
+      order.status === OrderStatus.COMPLETED
+        ? addMilliseconds(
+            paymentStartedAt,
+            faker.number.int({ min: 1_000, max: 60_000 }),
+          )
+        : null;
+    const productsForOrder = take(
+      savedProducts.filter((product) => product.vendorId === order.vendorId),
+      randomRange(SEED_CONFIG.orderItemsPerOrder),
+    );
+    for (const product of productsForOrder)
+      orderItems.push({
+        orderId: order.id,
+        productId: product.id,
+        quantity: 1,
+        unitPrice: product.price,
+        subtotal: product.price,
+      });
+    payments.push({
+      userId: order.customerId,
+      orderId: order.id,
+      amount: Math.round(order.totalPrice * 100),
+      reference: `SEED-${faker.string.alphanumeric(16).toUpperCase()}`,
+      status:
+        order.status === OrderStatus.COMPLETED
+          ? PaymentStatus.SUCCESS
+          : PaymentStatus.PENDING,
+      startedAt: paymentStartedAt,
+      completedAt: paymentCompletedAt,
+      expiresAt: addMilliseconds(orderDate, DAY_MS),
+      channel: "card",
+      ipAddress: "127.0.0.1",
+      userAgent: "seed-script",
+      createdAt: paymentStartedAt,
+      updatedAt: paymentCompletedAt || paymentStartedAt,
+    });
+  }
+  await createMany((data) => prisma.orderItem.createMany({ data }), orderItems);
+  await createMany((data) => prisma.payment.createMany({ data }), payments);
+  setProgress(
+    65,
+    `Created ${savedOrders.length} orders, ${orderItems.length} order items and ${payments.length} payments`,
+  );
+
+  const deliveryProfilesSaved = await prisma.deliveryPerson.findMany();
+  const assignments: Prisma.DeliveryAssignmentCreateManyInput[] = [];
+  for (const order of take(
+    savedOrders.filter((item) => item.status === OrderStatus.COMPLETED),
+    randomRange(SEED_CONFIG.assignments),
+  )) {
+    const deliveryPerson = pick(deliveryProfilesSaved);
+    if (deliveryPerson)
+      assignments.push({
+        orderId: order.id,
+        deliveryPersonId: deliveryPerson.id,
+        status: DeliveryStatus.DELIVERED,
+        assignedAt: order.createdAt,
+        completedAt: order.createdAt,
+      });
+  }
+  await createMany(
+    (data) => prisma.deliveryAssignment.createMany({ data }),
+    assignments,
+  );
+
+  const notifications: Prisma.NotificationCreateManyInput[] = [];
+  for (let index = 0; index < randomRange(SEED_CONFIG.notifications); index++) {
+    const customer = pick(customers);
+    if (customer)
+      notifications.push({
+        userId: customer.id,
+        title: "Seed notification",
+        message: faker.lorem.sentence(),
+        type: "GENERAL",
+        metadata: {},
+      });
+  }
+  await createMany(
+    (data) => prisma.notification.createMany({ data }),
+    notifications,
+  );
+  const followers: Prisma.VendorFollowerCreateManyInput[] = [];
+  for (let index = 0; index < randomRange(SEED_CONFIG.followers); index++) {
+    const vendor = pick(vendors);
+    const customer = pick(customers);
+    if (vendor && customer)
+      followers.push({ vendorId: vendor.id, customerId: customer.id });
+  }
+  await createMany(
+    (data) => prisma.vendorFollower.createMany({ data, skipDuplicates: true }),
+    followers,
+  );
+
+  const promotions: Prisma.PromotionCreateManyInput[] = [];
+  for (const vendor of vendors) {
+    const promotionCount = randomRange(SEED_CONFIG.promotions);
+    for (let index = 0; index < promotionCount; index++)
+      promotions.push({
+        vendorId: vendor.id,
+        code: `SEED_${vendor.id.slice(0, 6)}_${index + 1}_${faker.string.alphanumeric(5).toUpperCase()}`,
+        name: `Seed promotion ${index + 1}`,
+        description: "Promotion created by the development seeder",
+        type: "PERCENTAGE",
+        value: 10,
+        maxUsesPerUser: 1,
+      });
+  }
+  await createMany((data) => prisma.promotion.createMany({ data }), promotions);
+  const supportTickets: Prisma.VendorSupportTicketCreateManyInput[] = [];
+  for (const vendor of vendors)
+    for (
+      let index = 0;
+      index < randomRange(SEED_CONFIG.supportTickets);
+      index++
+    )
+      supportTickets.push({
+        vendorId: vendor.id,
+        category: "GENERAL",
+        subject: "Seed support ticket",
+        description: faker.lorem.sentence(),
+        status: SupportTicketStatus.OPEN,
+      });
+  await createMany(
+    (data) => prisma.vendorSupportTicket.createMany({ data }),
+    supportTickets,
+  );
+  const customerTickets: Prisma.CustomerSupportTicketCreateManyInput[] = [];
+  for (const customer of customers)
+    for (
+      let index = 0;
+      index < randomRange(SEED_CONFIG.supportTickets);
+      index++
+    )
+      customerTickets.push({
+        customerId: customer.id,
+        category: "GENERAL",
+        subject: "Seed customer ticket",
+        description: faker.lorem.sentence(),
+        status: SupportTicketStatus.OPEN,
+      });
+  await createMany(
+    (data) => prisma.customerSupportTicket.createMany({ data }),
+    customerTickets,
+  );
+
+  const specialRequests: Prisma.SpecialOrderRequestCreateManyInput[] = [];
+  for (
+    let index = 0;
+    index < randomRange(SEED_CONFIG.specialRequests);
+    index++
+  ) {
+    const customer = pick(customers);
+    const product = pick(savedProducts);
+    if (customer && product)
+      specialRequests.push({
+        customerId: customer.id,
+        vendorId: product.vendorId,
+        productId: product.id,
+        quantity: 1,
+        message: "Please prepare this with extra care.",
+        status: SpecialOrderRequestStatus.PENDING,
+      });
+  }
+  await createMany(
+    (data) => prisma.specialOrderRequest.createMany({ data }),
+    specialRequests,
+  );
+  const savedRequests = await prisma.specialOrderRequest.findMany({
+    orderBy: { createdAt: "desc" },
+    take: specialRequests.length,
+  });
+  const specialOffers: Prisma.SpecialOrderOfferCreateManyInput[] =
+    savedRequests.map((request) => ({
+      requestId: request.id,
+      vendorId: request.vendorId!,
+      price: money(),
+      message: "We can prepare this for you.",
+      status: SpecialOrderOfferStatus.PENDING,
+    }));
+  await createMany(
+    (data) => prisma.specialOrderOffer.createMany({ data }),
+    specialOffers,
+  );
+
+  const referralRewards: Prisma.ReferralRewardCreateManyInput[] = [];
+  const referralRewardCount = randomRange(SEED_CONFIG.referralRewards);
+  for (
+    let index = 0;
+    index < referralRewardCount && customers.length > 1;
+    index++
+  ) {
+    const referrer = customers[index % customers.length];
+    const referred = customers[(index + 1) % customers.length];
+    if (referrer.id !== referred.id)
+      referralRewards.push({
+        referrerId: referrer.id,
+        referredId: referred.id,
+        amount: 500,
+        status: "PENDING",
+      });
+  }
+  await createMany(
+    (data) => prisma.referralReward.createMany({ data, skipDuplicates: true }),
+    referralRewards,
+  );
+
+  const activities: Prisma.ActivityCreateManyInput[] = savedOrders
+    .slice(0, 10)
+    .map((order) => ({
+      orderId: order.id,
+      vendorId: order.vendorId,
+      customerId: order.customerId,
+      type: ActivityType.ORDER_CREATED,
+      title: "Order created",
+      message: "Seed order created for development data.",
+      meta: {},
+    }));
+  await createMany((data) => prisma.activity.createMany({ data }), activities);
+  setProgress(
+    85,
+    `Created ${assignments.length} assignments, ${notifications.length} notifications and supporting data`,
+  );
+
+  if (SEED_CONFIG.clearRedis)
+    console.warn(
+      "SEED_CLEAR_REDIS is enabled, but Redis clearing is left to the application cache job.",
+    );
+  setProgress(100, "Seed completed");
 }
 
-// When imported, caller (e.g., API) should call `runSeeder()` to start the process.
+if (require.main === module) {
+  seedDatabase()
+    .catch((error) => {
+      console.error("Seed failed:", error);
+      process.exitCode = 1;
+    })
+    .finally(() => prisma.$disconnect());
+}
