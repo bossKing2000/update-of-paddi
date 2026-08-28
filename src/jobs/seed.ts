@@ -15,6 +15,17 @@ import {
 } from "@prisma/client";
 import { faker } from "@faker-js/faker";
 
+// // npx ts-node src/jobs/seed.ts
+// // npx prisma db push --force-reset
+// // npx prisma db push
+// // to make the html live run this : live-server
+// // npx prisma migrate resolve --applied "20251004214831_full_migration"
+
+// // for locally
+// // npx prisma migrate reset
+// // npx prisma migrate dev --name init --create-only
+// // npx prisma migrate dev
+
 const prisma = new PrismaClient();
 
 function envInt(name: string, fallback: number): number {

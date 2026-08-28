@@ -136,6 +136,30 @@ model User {
 
   // Special Offers sent by this vendor
   specialOffersSent SpecialOrderOffer[] @relation("VendorSpecialOffers")
+
+  // Persistent refresh sessions — DB is source of truth, Redis is cache
+  sessions UserSession[]
+}
+
+model UserSession {
+  id        String   @id @default(uuid())
+  userId    String
+  sessionId String   @unique
+  ip        String?
+  userAgent String?
+  deviceId  String?
+  geoCity   String?
+  geoRegion String?
+  geoCountry String?
+  createdAt DateTime @default(now())
+  lastRefreshedAt DateTime @updatedAt
+  expiresAt DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([sessionId])
+  @@index([userId, sessionId])
 }
 
 // 

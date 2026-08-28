@@ -18,6 +18,11 @@ import {
   CATALOG_SORT_VALUES,
   type CatalogSortValue,
 } from "../services/product.service";
+import {
+  isVendorOperating,
+  resolveVendorTimezone,
+} from "../services/vendorAvailability.service";
+import { evaluateProductSchedule } from "../services/scheduleRules.service";
 import { CACHE_KEYS, CACHE_TTLS } from "../services/redisCacheTiming";
 import { productIndexQueue } from "../jobs/workers jobs/redis-baseQueue";
 import { sendSuccess, sendCreated } from "../utils/apiResponse";
@@ -364,10 +369,31 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
   const cached = await redisProducts.get(cacheKey);
   if (cached) {
     const productData = JSON.parse(cached);
+    // Recompute isLive from schedule on cache hit (mirror may be stale)
     productData.isLive = computeIsLive(
       productData.productSchedule,
       productData.isLive,
     );
+    // CRITICAL: Recompute dynamic availability fields on cache hit
+    if (productData.vendor) {
+      const vendorOperating = isVendorOperating({
+        isLive: productData.vendor.isLive ?? false,
+        deliveryPreferences: productData.vendor.deliveryPreferences,
+      });
+      productData.vendorOperating = vendorOperating;
+      productData.orderable =
+        productData.archived === false &&
+        vendorOperating &&
+        evaluateProductSchedule(
+          productData.productSchedule,
+          new Date(),
+          resolveVendorTimezone(
+            productData.vendor.timezone,
+            productData.vendor.operatingHours,
+          ),
+          productData.isLive,
+        );
+    }
     res.setHeader("X-Cache", "HIT");
     return sendSuccess(res, productData, "Product retrieved successfully.");
   }
@@ -389,6 +415,10 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
         isLive: true,
         liveUntil: true,
         popularityScore: true,
+        popularityPercent: true,
+        isNew: true,
+        archived: true,
+        vendorId: true,
         vendor: {
           select: {
             id: true,
@@ -398,14 +428,25 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
             avatarUrl: true,
             role: true,
             bio: true,
+            brandName: true,
+            brandLogo: true,
+            isLive: true,
+            deliveryPreferences: true,
+            timezone: true,
+            operatingHours: true,
           },
         },
         options: true,
         productSchedule: {
           select: {
+            type: true,
+            enabled: true,
             goLiveAt: true,
             takeDownAt: true,
             graceMinutes: true,
+            startDate: true,
+            endDate: true,
+            windows: true,
             isLive: true,
           },
         },
@@ -420,11 +461,38 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
 
   if (!product) throw new NotFoundError("Product");
 
+  // Fetch vendor review stats
+  const vendorReviewStats = await prisma.vendorReview.aggregate({
+    where: { vendorId: product.vendorId },
+    _avg: { rating: true },
+    _count: { rating: true },
+  });
+
+  const vendorOperating = isVendorOperating(product.vendor);
+  const orderable =
+    !product.archived &&
+    vendorOperating &&
+    evaluateProductSchedule(
+      product.productSchedule as any,
+      new Date(),
+      resolveVendorTimezone(
+        product.vendor.timezone,
+        product.vendor.operatingHours as unknown,
+      ),
+      product.isLive,
+    );
+
   const productData = {
     ...product,
     averageRating: reviewStats._avg.rating ?? 0,
     reviewCount: reviewStats._count._all ?? 0,
     isLive: computeIsLive(product.productSchedule, product.isLive),
+    vendorOperating,
+    orderable,
+    vendorRating: vendorReviewStats._avg.rating ?? null,
+    vendorReviewCount: vendorReviewStats._count.rating ?? 0,
+    // vendor fields (brandName, brandLogo, isLive, deliveryPreferences, timezone, operatingHours)
+    // are already included via spread from product.vendor select
   };
 
   await redisProducts.set(cacheKey, JSON.stringify(productData), {
