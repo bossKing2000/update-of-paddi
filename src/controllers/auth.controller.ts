@@ -492,15 +492,30 @@ export const refreshToken = async (req: Request, res: Response) => {
     );
 
     const existingSession = await getUserSession(user.id, decoded.sessionId);
-    if (!existingSession) {
-      return res
-        .status(401)
-        .json({ message: "Session no longer active. Please log in again." });
+    
+    // If session exists in Redis, refresh it normally
+    if (existingSession) {
+      await createUserSession(user.id, decoded.sessionId, {
+        ...existingSession,
+        lastRefreshedAt: new Date(),
+      });
+    } else {
+      // Session in Redis has expired, but refresh token is still valid.
+      // This can happen if user was away for longer than session TTL
+      // but within refresh token lifetime. Recreate session from the
+      // valid refresh token (grace period for session restoration).
+      // We create a fresh session with the same sessionId.
+      await createUserSession(user.id, decoded.sessionId, {
+        ip: undefined,
+        userAgent: undefined,
+        deviceId: undefined,
+        geoCity: undefined,
+        geoRegion: undefined,
+        geoCountry: undefined,
+        lastLoginAt: new Date(),
+        restoredAt: new Date(),
+      });
     }
-    await createUserSession(user.id, decoded.sessionId, {
-      ...existingSession,
-      lastRefreshedAt: new Date(),
-    });
 
     // Send refresh token as cookie (for web clients)
     res.cookie("refreshToken", newRefreshToken, {

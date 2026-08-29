@@ -49,6 +49,7 @@ async function clearAllCaches() {
       redisNotifications,
       redisSearch,
       redisTotalViews,
+      redisUsersSessions,
     ]) {
       if (client.isOpen) {
         await client.quit();

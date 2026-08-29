@@ -3,7 +3,7 @@ import { redisUsersSessions } from "./redis";
 import prisma from "./prisma";
 import { logger } from "./logger";
 
-const SESSION_TTL_SECONDS = 7 * 24 * 3600; // 7 days — matches refresh token lifetime
+const SESSION_TTL_SECONDS = 30 * 24 * 3600; // 30 days — longer than refresh token (7d) to allow grace period for session restoration
 
 export interface SessionMetadata {
   ip?: string;
