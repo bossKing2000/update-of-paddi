@@ -39,6 +39,11 @@ jest.mock("../../src/lib/prisma", () => ({
     order: { findMany: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     auditLog: { create: jest.fn() },
     payment: { create: jest.fn(), findFirst: jest.fn() },
+    $transaction: jest.fn(async (cb: any) => {
+      // Provide transaction client as the mocked prisma itself
+      const prismaMock = require("../../src/lib/prisma").default;
+      return cb(prismaMock);
+    }),
   },
 }));
 
@@ -382,16 +387,15 @@ describe("initiateOrderPayment — vendor live gate on every payment path", () =
     ]);
     db.user.findUnique.mockResolvedValue({ email: "c@test.com" });
     db.order.updateMany.mockResolvedValue({ count: 1 });
+    (initializePayment as jest.Mock).mockResolvedValue({
+      reference: "ref-123",
+      authorization_url: "https://paystack.com/pay/ref-123",
+    });
+    db.payment.create.mockResolvedValue({ id: "pay-1" });
 
-    // Deep Paystack flow is out of scope; stop right after the gates passed.
-    // initializePayment is mocked to reject with a marker so we can observe
-    // that execution reached it.
-    (initializePayment as jest.Mock).mockRejectedValue(new Error("GATE_PASSED_REACHED_PAYMENT"));
-
-    await expect(
-      initiateOrderPayment(req({ body: { idempotencyKey: "idem-2" } }), res()),
-    ).rejects.toThrow("GATE_PASSED_REACHED_PAYMENT");
+    await initiateOrderPayment(req({ body: { idempotencyKey: "idem-2" } }), res());
 
     expect(initializePayment).toHaveBeenCalled();
+    expect(db.payment.create).toHaveBeenCalled();
   });
 });

@@ -152,7 +152,13 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
     }, "Mobile payment initialized successfully");
   }
 
-  const paymentInit = await initializePayment(basePaymentData.amount, customer.email, { userId, idempotencyKey, platform: "web" });
+  let paymentInit: any;
+  try {
+    paymentInit = await initializePayment(basePaymentData.amount, customer.email, { userId, idempotencyKey, platform: "web" });
+  } catch (err: any) {
+    logger.error({ err: err?.response?.data || err.message, userId, idempotencyKey }, "initializePayment Paystack failed");
+    throw new UpstreamServiceError("Paystack", "Payment service is temporarily unavailable. Your order is saved and you can try payment again from Orders.");
+  }
   await prisma.payment.create({ data: { ...basePaymentData, reference: paymentInit.reference } });
 
   return sendCreated(res, {

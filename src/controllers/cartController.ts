@@ -40,9 +40,13 @@ export const getCart = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
   const cacheKey = `cart:user:${userId}`;
 
-  const cachedCart = await ShopCartRedis.get(cacheKey);
-  if (cachedCart) {
-    return sendSuccess(res, JSON.parse(cachedCart), "Cart retrieved successfully (cache)");
+  try {
+    const cachedCart = await ShopCartRedis.get(cacheKey);
+    if (cachedCart) {
+      return sendSuccess(res, JSON.parse(cachedCart), "Cart retrieved successfully (cache)");
+    }
+  } catch (err) {
+    logger.warn({ err, cacheKey }, "ShopCartRedis.get failed (best-effort, will load from DB)");
   }
 
   const cart = await prisma.cart.findFirst({
@@ -60,7 +64,11 @@ export const getCart = async (req: AuthRequest, res: Response) => {
   const enrichedCart = cart ? await getEnhancedCart(cart.id) : { id: null, items: [], basePrice: 0, totalPrice: 0 };
 
   if (enrichedCart && enrichedCart.items.length > 0) {
-    await ShopCartRedis.set(cacheKey, JSON.stringify(enrichedCart), { EX: CART_TTL_SECONDS });
+    try {
+      await ShopCartRedis.set(cacheKey, JSON.stringify(enrichedCart), { EX: CART_TTL_SECONDS });
+    } catch (err) {
+      logger.warn({ err, cacheKey }, "ShopCartRedis.set failed (best-effort)");
+    }
   }
 
   return sendSuccess(res, enrichedCart, "Cart retrieved successfully");
@@ -155,7 +163,11 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
   await prisma.cart.update({ where: { id: cart.id }, data: calculateCartTotals(updatedItems) });
 
   const enhancedCart = await getEnhancedCart(cart.id);
-  await ShopCartRedis.set(`cart:user:${req.user!.id}`, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
+  try {
+    await ShopCartRedis.set(`cart:user:${req.user!.id}`, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
+  } catch (err) {
+    logger.warn({ err, cacheKey: `cart:user:${req.user!.id}` }, "ShopCartRedis.set failed (best-effort)");
+  }
 
   return sendCreated(res, enhancedCart, "Item added to cart successfully");
 };
@@ -220,7 +232,11 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
   await prisma.cart.update({ where: { id: item.cart.id }, data: calculateCartTotals(updatedItems) });
 
   const enhancedCart = await getEnhancedCart(item.cart.id);
-  await ShopCartRedis.set(`cart:user:${req.user!.id}`, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
+  try {
+    await ShopCartRedis.set(`cart:user:${req.user!.id}`, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
+  } catch (err) {
+    logger.warn({ err, cacheKey: `cart:user:${req.user!.id}` }, "ShopCartRedis.set failed (best-effort)");
+  }
 
   return sendSuccess(res, enhancedCart, "Cart item updated successfully");
 };
@@ -244,7 +260,11 @@ export const removeCartItem = async (req: AuthRequest, res: Response) => {
 
   if (remainingItems === 0) {
     await prisma.cart.delete({ where: { id: cartId } });
-    await ShopCartRedis.del(cacheKey);
+    try {
+      await ShopCartRedis.del(cacheKey);
+    } catch (err) {
+      logger.warn({ err, cacheKey }, "ShopCartRedis.del failed (best-effort)");
+    }
     return sendSuccess(res, { id: null, items: [], basePrice: 0, totalPrice: 0 }, "Cart item removed and cart deleted");
   }
 
@@ -252,7 +272,11 @@ export const removeCartItem = async (req: AuthRequest, res: Response) => {
   await prisma.cart.update({ where: { id: cartId }, data: calculateCartTotals(updatedItems) });
 
   const enhancedCart = await getEnhancedCart(cartId);
-  await ShopCartRedis.set(cacheKey, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
+  try {
+    await ShopCartRedis.set(cacheKey, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
+  } catch (err) {
+    logger.warn({ err, cacheKey }, "ShopCartRedis.set failed (best-effort)");
+  }
 
   return sendSuccess(res, enhancedCart, "Cart item removed successfully");
 };
@@ -269,7 +293,11 @@ export const clearCart = async (req: AuthRequest, res: Response) => {
 
   await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
   await prisma.cart.delete({ where: { id: cart.id } });
-  await ShopCartRedis.del(cacheKey);
+  try {
+    await ShopCartRedis.del(cacheKey);
+  } catch (err) {
+    logger.warn({ err, cacheKey }, "ShopCartRedis.del failed (best-effort)");
+  }
 
   return sendSuccess(res, { id: null, items: [], basePrice: 0, totalPrice: 0 }, "Cart cleared successfully");
 };
@@ -364,7 +392,11 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     if (remainingItems === 0) await prisma.cart.delete({ where: { id: cart.id } });
 
     const updatedCart = remainingItems > 0 ? await getEnhancedCart(cart.id) : { id: null, items: [] };
-    await ShopCartRedis.set(cacheKey, JSON.stringify(updatedCart), { EX: CART_TTL_SECONDS });
+    try {
+      await ShopCartRedis.set(cacheKey, JSON.stringify(updatedCart), { EX: CART_TTL_SECONDS });
+    } catch (err) {
+      logger.warn({ err, cacheKey }, "ShopCartRedis.set failed after archived cleanup (best-effort)");
+    }
 
     throw new ValidationError("Some products in your cart were removed because they're no longer available.", { removedProductIds });
   }
@@ -438,50 +470,70 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
       groupedByVendor[vId].push(item);
     }
 
-    const createdOrders = [];
     const customer = await prisma.user.findUnique({ where: { id: userId } });
     const customerName = customer?.name || "Unknown Customer";
 
-    for (const [vendorId, vendorItems] of Object.entries(groupedByVendor)) {
-      // Final server-side revalidation immediately before order creation —
-      // the cart snapshot and even the availability filter above can be
-      // seconds stale; a vendor flipping offline in that window must not
-      // yield a new purchasable order.
+    // Pre-validate all vendors before opening transaction — external read, not in tx
+    for (const vendorId of Object.keys(groupedByVendor)) {
       const freshVendorState = await loadVendorOperatingState(vendorId);
       assertVendorAvailableForOrdering(freshVendorState);
+    }
 
-      const pricing = vendorPricing.get(vendorId);
-      const rawSubtotal = round(vendorItems.reduce((sum, i) => sum + i.subtotal, 0));
-      const discount = pricing?.discount ?? 0;
-      const basePrice = round(rawSubtotal - discount);
-      const deliveryFee = pricing?.deliveryFee ?? 0;
+    // Atomic DB section: all vendor orders + cart cleanup + snapshot delete
+    // If any vendor order fails, the whole batch rolls back — no partial checkout.
+    const createdOrders = await prisma.$transaction(async (tx) => {
+      const orders = [];
+      for (const [vendorId, vendorItems] of Object.entries(groupedByVendor)) {
+        const pricing = vendorPricing.get(vendorId);
+        const rawSubtotal = round(vendorItems.reduce((sum, i) => sum + i.subtotal, 0));
+        const discount = pricing?.discount ?? 0;
+        const basePrice = round(rawSubtotal - discount);
+        const deliveryFee = pricing?.deliveryFee ?? 0;
 
-      const orderItemsData = vendorItems.map((ci) => ({
-        productId: ci.productId,
-        quantity: ci.quantity,
-        unitPrice: ci.unitPrice,
-        subtotal: ci.subtotal,
-        options: { create: ci.options.map((opt) => ({ optionId: opt.productOptionId, name: opt.name, price: opt.price })) },
-      }));
+        const orderItemsData = vendorItems.map((ci) => ({
+          productId: ci.productId,
+          quantity: ci.quantity,
+          unitPrice: ci.unitPrice,
+          subtotal: ci.subtotal,
+          options: { create: ci.options.map((opt) => ({ optionId: opt.productOptionId, name: opt.name, price: opt.price })) },
+        }));
 
-      const order = await prisma.order.create({
-        data: {
-          customerId: userId,
-          vendorId,
-          addressId,
-          basePrice,
-          deliveryFee,
-          totalPrice: round(basePrice + deliveryFee),
-          status: OrderStatus.AWAITING_PAYMENT,
-          idempotencyKey,
-          protectedUntil: new Date(Date.now() + 15 * 60 * 1000),
-          items: { create: orderItemsData },
-        },
-        include: { items: { include: { options: true } } },
-      });
+        const order = await tx.order.create({
+          data: {
+            customerId: userId,
+            vendorId,
+            addressId,
+            basePrice,
+            deliveryFee,
+            totalPrice: round(basePrice + deliveryFee),
+            status: OrderStatus.AWAITING_PAYMENT,
+            idempotencyKey,
+            protectedUntil: new Date(Date.now() + 15 * 60 * 1000),
+            items: { create: orderItemsData },
+          },
+          include: { items: { include: { options: true } } },
+        });
+        orders.push(order);
+      }
 
-      createdOrders.push(order);
+      if (liveItems.length > 0) {
+        await tx.cartItemOption.deleteMany({ where: { cartItemId: { in: liveItems.map((i) => i.id) } } });
+        await tx.cartItem.deleteMany({ where: { id: { in: liveItems.map((i) => i.id) } } });
+      }
 
+      if (offlineItems.length === 0) {
+        await tx.cart.delete({ where: { id: cart.id } });
+      }
+
+      // Snapshot is single-use — once consumed by a successful checkout it
+      // can't be replayed to create a second set of orders.
+      await tx.cartSummarySnapshot.delete({ where: { id: summaryId } }).catch(() => {});
+
+      return orders;
+    });
+
+    // External side-effects AFTER transaction — not held open
+    for (const order of createdOrders) {
       await recordActivityBundle({
         actorId: userId,
         orderId: order.id,
@@ -490,7 +542,7 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
             type: ActivityType.GENERAL,
             title: "New Order Received",
             message: `You have a new order from ${customerName}`,
-            targetId: vendorId,
+            targetId: order.vendorId,
             socketEvent: "ORDER",
             metadata: {
               type: "ORDER_DETAIL",
@@ -498,15 +550,15 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
               target: { screen: "order_detail", id: order.id },
               orderId: order.id,
               customerId: userId,
-              vendorId,
+              vendorId: order.vendorId,
               frontendEvent: "NEW_ORDER",
             },
           },
         ],
-        audit: { action: "ORDER_CREATED", metadata: { orderId: order.id, customerId: userId, vendorId } },
+        audit: { action: "ORDER_CREATED", metadata: { orderId: order.id, customerId: userId, vendorId: order.vendorId } },
         notifyRealtime: true,
         notifyPush: true,
-      });
+      }).catch((err) => logger.warn({ err, orderId: order.id }, "Failed to record order activity (non-critical)"));
     }
 
     // Redeem the promo now that every order is actually created — this
@@ -523,21 +575,12 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
       );
     }
 
-    if (liveItems.length > 0) {
-      await prisma.cartItemOption.deleteMany({ where: { cartItemId: { in: liveItems.map((i) => i.id) } } });
-      await prisma.cartItem.deleteMany({ where: { id: { in: liveItems.map((i) => i.id) } } });
-    }
-
-    if (offlineItems.length === 0) {
-      await prisma.cart.delete({ where: { id: cart.id } });
-    }
-
-    // Snapshot is single-use — once consumed by a successful checkout it
-    // can't be replayed to create a second set of orders.
-    await prisma.cartSummarySnapshot.delete({ where: { id: summaryId } }).catch(() => {});
-
     const updatedCart = offlineItems.length > 0 ? await getEnhancedCart(cart.id) : { id: null, items: [], basePrice: 0, totalPrice: 0 };
-    await ShopCartRedis.set(cacheKey, JSON.stringify(updatedCart), { EX: CART_TTL_SECONDS });
+    try {
+      await ShopCartRedis.set(cacheKey, JSON.stringify(updatedCart), { EX: CART_TTL_SECONDS });
+    } catch (err) {
+      logger.warn({ err, cacheKey }, "ShopCartRedis.set failed after checkout (best-effort, non-critical)");
+    }
 
     return sendCreated(res, { orders: createdOrders, cart: updatedCart }, "Checkout successful");
   } finally {

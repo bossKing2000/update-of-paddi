@@ -1,12 +1,24 @@
 jest.mock("../../src/lib/redis", () => ({
   redisUsersSessions: {
-    set: jest.fn(),
-    get: jest.fn(),
-    del: jest.fn(),
-    sAdd: jest.fn(),
-    sRem: jest.fn(),
-    sMembers: jest.fn(),
-    expire: jest.fn(),
+    set: jest.fn().mockResolvedValue("OK"),
+    get: jest.fn().mockResolvedValue(null),
+    del: jest.fn().mockResolvedValue(1),
+    sAdd: jest.fn().mockResolvedValue(1),
+    sRem: jest.fn().mockResolvedValue(1),
+    sMembers: jest.fn().mockResolvedValue([]),
+    expire: jest.fn().mockResolvedValue(1),
+  },
+}));
+
+jest.mock("../../src/lib/prisma", () => ({
+  __esModule: true,
+  default: {
+    userSession: {
+      upsert: jest.fn().mockResolvedValue({}),
+      delete: jest.fn().mockResolvedValue({}),
+      deleteMany: jest.fn().mockResolvedValue({}),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
   },
 }));
 
@@ -57,8 +69,9 @@ describe("session.ts (multi-device sessions)", () => {
 
   it("listUserSessions returns metadata for every still-live session and prunes expired ones from the index", async () => {
     mockedRedis.sMembers.mockResolvedValue(["session-A", "session-B"]);
-    mockedRedis.get.mockImplementation((key: string) => {
-      if (key.endsWith("session-A")) return Promise.resolve(JSON.stringify({ ip: "1.1.1.1" }));
+    mockedRedis.get.mockImplementation((key: any) => {
+      const k = String(key);
+      if (k.endsWith("session-A")) return Promise.resolve(JSON.stringify({ ip: "1.1.1.1" }));
       return Promise.resolve(null); // session-B's TTL already expired
     });
 

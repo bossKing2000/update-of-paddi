@@ -116,10 +116,22 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
           ? isAfterUtc(now, latestPayment.expiresAt)
           : true;
 
+        // Protect against finalization race — skip if payment is actively being processed
+        const isProcessing = order.payments.some((p) => (p as any).isProcessing === true);
+        if (isProcessing) {
+          logger.info({ orderId: order.id }, "Skipping order cleanup — payment isProcessing=true");
+          continue;
+        }
+
         const offline = productOffline || vendorOffline;
         if (!latestPayment || (offline && paymentExpired)) {
-          await prisma.order.update({
-            where: { id: order.id },
+          // Atomic: only cancel if still AWAITING_PAYMENT and no SUCCESS payment inserted concurrently
+          const updated = await prisma.order.updateMany({
+            where: {
+              id: order.id,
+              status: OrderStatus.AWAITING_PAYMENT,
+              payments: { none: { status: "SUCCESS" as any } },
+            },
             data: {
               status: OrderStatus.CANCELLED,
               cancelledAt: now,
@@ -131,7 +143,7 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
               paymentStatus: "FAILED",
             },
           });
-          offlineUpdated++;
+          if (updated.count > 0) offlineUpdated++;
         }
       }
 

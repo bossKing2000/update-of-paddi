@@ -1,12 +1,13 @@
 import cron from "node-cron";
 import { runOrderCleanupJob } from "../workers jobs/orderCleanupJob";
+import { runExpireAwaitingPaymentJob } from "../workers jobs/expireAwaitingPaymentJob";
 import { verifyPendingPayments } from "../payment/worker/verifyPendingPayments";
 import { fixLiveStatusJob } from "../workers jobs/fixLiveStatusJob";
 import { DeliveryAssignmentService } from "../../services/deliveryAssignment";
 import { logger } from "../../lib/logger";
 
 /**
- * 🧹 Order Cleanup Job
+ * 🧹 Order Cleanup Job (offline vendor/product)
  * Runs every 3 minutes to cancel stale or unpaid orders.
  */
 cron.schedule("*/3 * * * *", async () => {
@@ -14,6 +15,19 @@ cron.schedule("*/3 * * * *", async () => {
     await runOrderCleanupJob();
   } catch (err) {
     logger.error({ err }, "[CRON] Order cleanup job failed");
+  }
+});
+
+/**
+ * 🧹 Expire Abandoned AWAITING_PAYMENT Orders
+ * Runs every 5 minutes to expire orders where payment window passed
+ * and no successful payment exists. Respects isProcessing lock.
+ */
+cron.schedule("*/5 * * * *", async () => {
+  try {
+    await runExpireAwaitingPaymentJob();
+  } catch (err) {
+    logger.error({ err }, "[CRON] Expire awaiting payment job failed");
   }
 });
 
