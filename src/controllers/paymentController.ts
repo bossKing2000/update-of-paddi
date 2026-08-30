@@ -17,9 +17,12 @@ import { ensureString } from "../utils/paramUtils";
 import { nowUtc, toUtc, addMinutesUtc } from "../utils/time";
 import { logger } from "../lib/logger";
 
+const ALLOWED_CHANNELS = ["card", "bank", "ussd", "mobile_money", "bank_transfer", "qr", "apple_pay"] as const;
+
 export const startPaymentSchema = z.object({
   idempotencyKey: z.string().min(1, "idempotencyKey is required"),
   mobileSdk: z.boolean().optional(),
+  channels: z.array(z.enum(ALLOWED_CHANNELS)).optional(),
 });
 
 /**
@@ -98,7 +101,7 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
   const parsed = startPaymentSchema.safeParse(req.body);
   if (!parsed.success) throw new ValidationError("Invalid request data", parsed.error.flatten().fieldErrors);
-  const { idempotencyKey, mobileSdk = false } = parsed.data;
+  const { idempotencyKey, mobileSdk = false, channels } = parsed.data;
 
   const orders = await getPayableOrderBatch(idempotencyKey, userId);
   assertProductsStillLive(orders);
@@ -109,13 +112,27 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
   const finalPaymentExpiresAt = addMinutesUtc(now, paymentWindowMinutes);
   const totalAmount = orders.reduce((sum, o) => sum + o.totalPrice, 0);
 
+  if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+    throw new ValidationError("Invalid order amount", { totalAmount });
+  }
+  if (totalAmount * 100 < 100) {
+    throw new ValidationError("Amount too small for Paystack (minimum ₦1.00)");
+  }
+
   const customer = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
   if (!customer) throw new NotFoundError("User");
+  if (!customer.email || !customer.email.includes("@")) {
+    throw new ValidationError("Customer email is required for Paystack", { email: customer.email });
+  }
+  if (!config.paystackSecret || !config.paystackSecret.startsWith("sk_")) {
+    logger.error({ userId, idempotencyKey }, "Paystack secret misconfigured");
+    throw new UpstreamServiceError("Paystack", "Payment service is temporarily unavailable. Your order is saved and you can try payment again from Orders.", { code: "PAYSTACK_INVALID_KEY" });
+  }
 
   const { ip, userAgent, deviceId } = getClientInfo(req);
   const channel = mobileSdk || req.headers["x-device-channel"]?.toString().toLowerCase() === "mobile" ? "mobile" : "web";
 
-  logger.info({ idempotencyKey, orderIds: orders.map((o) => o.id), amount: totalAmount, channel }, "Initiating payment");
+  logger.info({ idempotencyKey, orderIds: orders.map((o) => o.id), amount: totalAmount, channel, channels }, "Initiating payment");
 
   // Record that payment was actually attempted — this field existed in
   // the schema but was never set anywhere before.
@@ -126,7 +143,7 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
     status: PaymentStatus.PENDING,
     startedAt: now,
     expiresAt: finalPaymentExpiresAt,
-    channel,
+    channel: channels ? channels.join(",") : channel,
     ipAddress: ip || "unknown",
     deviceId,
     userAgent: userAgent || "unknown",
@@ -154,10 +171,48 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
 
   let paymentInit: any;
   try {
-    paymentInit = await initializePayment(basePaymentData.amount, customer.email, { userId, idempotencyKey, platform: "web" });
+    paymentInit = await initializePayment(basePaymentData.amount, customer.email, { userId, idempotencyKey, platform: "web" }, {
+      channels,
+      currency: "NGN",
+      callbackUrl: config.paystackCallbackUrl || undefined,
+    });
   } catch (err: any) {
-    logger.error({ err: err?.response?.data || err.message, userId, idempotencyKey }, "initializePayment Paystack failed");
-    throw new UpstreamServiceError("Paystack", "Payment service is temporarily unavailable. Your order is saved and you can try payment again from Orders.");
+    const paystackData = err?.response?.data;
+    const paystackMessage: string = paystackData?.message || err?.message || "Unknown Paystack error";
+    const paystackStatus: number | undefined = err?.response?.status;
+    // Structured logging without secrets
+    logger.error(
+      {
+        err: paystackData || err.message,
+        userId,
+        idempotencyKey,
+        amount: basePaymentData.amount,
+        hasEmail: !!customer.email,
+        channels,
+        paystackStatus,
+      },
+      "initializePayment Paystack failed"
+    );
+
+    // Map to customer-friendly but structured error
+    let code: string | undefined;
+    let clientMessage = "Payment service is temporarily unavailable. Your order is saved and you can try payment again from Orders.";
+    if (paystackStatus === 401 || paystackMessage.toLowerCase().includes("invalid key") || paystackMessage.toLowerCase().includes("api key")) {
+      code = "PAYSTACK_INVALID_KEY";
+      clientMessage = "Payment configuration error. Please contact support.";
+    } else if (paystackMessage.toLowerCase().includes("email")) {
+      code = "PAYSTACK_INVALID_EMAIL";
+      clientMessage = "Customer email is invalid. Please update your profile.";
+    } else if (paystackMessage.toLowerCase().includes("amount")) {
+      code = "PAYSTACK_INVALID_AMOUNT";
+    } else if (paystackStatus === 400 && paystackMessage.toLowerCase().includes("channel")) {
+      code = "PAYSTACK_INVALID_CHANNEL";
+      clientMessage = "Selected payment method is not available. Please try another method.";
+    } else if (!paystackStatus) {
+      code = "PAYSTACK_UNAVAILABLE";
+    }
+
+    throw new UpstreamServiceError("Paystack", clientMessage, { provider: "Paystack", paystackStatus, paystackMessage, code, channels } as any);
   }
   await prisma.payment.create({ data: { ...basePaymentData, reference: paymentInit.reference } });
 
@@ -286,6 +341,17 @@ export const requestRefund = async (req: AuthRequest, res: Response) => {
   });
 
   return sendSuccess(res, {}, "Refund request submitted successfully");
+};
+
+// GET /api/payments/refunds — customer's own refund requests (no schema change)
+export const getMyRefunds = async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.id;
+  const refunds = await prisma.refundRequest.findMany({
+    where: { userId },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, paymentRef: true, reason: true, status: true, createdAt: true, updatedAt: true },
+  });
+  return sendSuccess(res, { refunds }, "Refunds retrieved successfully");
 };
 
 // ───────────────────────────────────────────────

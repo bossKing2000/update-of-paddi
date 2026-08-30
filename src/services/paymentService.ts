@@ -11,8 +11,21 @@ import { nowUtc, toUtc, addMinutesUtc, isAfterUtc } from "../utils/time";
  * ----------------------------
  */
 
-export const initializePayment = async (amount: number, email: string, metadata: Record<string, any>) => {
-  const response = await paystack.post("/transaction/initialize", { email, amount, metadata });
+export const SUPPORTED_CHANNELS = ["card", "bank", "ussd", "mobile_money", "bank_transfer", "qr", "apple_pay"] as const;
+export type PaystackChannel = typeof SUPPORTED_CHANNELS[number];
+
+export const initializePayment = async (
+  amount: number,
+  email: string,
+  metadata: Record<string, any>,
+  opts?: { channels?: PaystackChannel[]; currency?: string; callbackUrl?: string }
+) => {
+  const payload: Record<string, any> = { email, amount, metadata };
+  if (opts?.channels && opts.channels.length > 0) payload.channels = opts.channels;
+  if (opts?.currency) payload.currency = opts.currency;
+  else payload.currency = "NGN";
+  if (opts?.callbackUrl) payload.callback_url = opts.callbackUrl;
+  const response = await paystack.post("/transaction/initialize", payload);
   return response.data.data;
 };
 
