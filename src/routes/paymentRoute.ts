@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate } from '../middlewares/auth.middleware';
+import { paymentRateLimiter, otpRateLimiter } from '../middlewares/rateLimiter.middleware';
 import {
   initiateOrderPayment,
   confirmPayment,
@@ -19,9 +20,9 @@ import { getReceipt } from '../controllers/receceipt';
 const router = Router();
 router.use(authenticate);
 
-// Payment endpoints
-router.post('/start', initiateOrderPayment);
-router.get('/confirm/:reference', confirmPayment);
+// Payment endpoints — rate-limited per audit H1
+router.post('/start', paymentRateLimiter, initiateOrderPayment);
+router.get('/confirm/:reference', paymentRateLimiter, confirmPayment);
 router.get('/user', getAllPaymentsForUser);
 router.post('/refund', requestRefund);
 router.get('/refunds', getMyRefunds);
@@ -29,15 +30,15 @@ router.get('/refunds', getMyRefunds);
 // Verification endpoint
 router.get('/orders/:orderId/verify-payment', verifyPaymentBeforeFulfillment);
 
-// Saved cards
+// Saved cards — stricter rate limit for OTP/brute-force protection
 router.post('/cards/save', saveCardToken);
-router.post('/cards/charge', chargeSavedCard); // was commented out — brought online, see paymentController.ts
-router.post('/cards/submit-otp', submitOtp); // was commented out — brought online alongside chargeSavedCard
+router.post('/cards/charge', otpRateLimiter, chargeSavedCard);
+router.post('/cards/submit-otp', otpRateLimiter, submitOtp);
 router.get('/cards', getSavedCards);
 router.put('/cards/default', setDefaultCard);
 router.delete('/cards/:cardId', deleteSavedCard);
 
-// Receipt — previously unauthenticated with no ownership check
+// Receipt — authenticated + ownership-checked (see receceipt.ts)
 router.get('/receipt/:paymentId', getReceipt);
 
 export default router;

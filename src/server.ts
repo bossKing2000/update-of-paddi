@@ -136,7 +136,7 @@ app.use(express.urlencoded({ extended: true }));
 // Static files
 app.use("/uploads", express.static("uploads"));
 app.use("/favicon.ico", express.static("public/favicon.ico"));
-app.use("/receipts", express.static(path.join(__dirname, "../receipts")));
+// /receipts static mount removed — receipts now served via authenticated GET /api/payments/receipt/:paymentId streaming with ownership check
 
 // Routes
 // API docs — on by default in dev, opt-in in production via ENABLE_API_DOCS=true

@@ -70,6 +70,12 @@ export const updateProfileValidator = [
     .isLength({ min: 2 })
     .withMessage('Name must be at least 2 characters'),
 
+  body('email')
+    .optional()
+    .isEmail()
+    .withMessage('Valid email is required')
+    .normalizeEmail(),
+
   body('phoneNumber')
     .optional()
     .isMobilePhone('any')

@@ -5,11 +5,11 @@ import prisma from "../lib/prisma";
 import { ActivityType, OrderStatus } from "@prisma/client";
 import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
 import { addToCartSchema, updateCartItemSchema } from "../validations/cartSchema";
+import { z } from "zod";
 import { ShopCartRedis } from "../lib/redis";
 import { sendSuccess, sendCreated } from "../utils/apiResponse";
-import { NotFoundError, ValidationError, ConflictError } from "../errors/AppError";
+import { AppError, NotFoundError, ValidationError, ConflictError } from "../errors/AppError";
 import { cartSummaryService } from "../services/cartSummary.service";
-import { redeemPromo } from "../services/promoService";
 import {
   isProductCurrentlyAvailable,
   isVendorOperating,
@@ -371,6 +371,12 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     throw new ValidationError("Invalid cart summary data");
   }
 
+  // B2: fail fast if email is invalid — before creating any orders.
+  const checkoutUser = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+  if (!checkoutUser?.email || !z.string().email().safeParse(checkoutUser.email).success) {
+    throw new AppError("Your profile email is invalid. Please update email before checkout.", 409, "PROFILE_EMAIL_INVALID", { code: "PROFILE_EMAIL_INVALID", nextStep: { action: "UPDATE_EMAIL" } });
+  }
+
   const cart = await prisma.cart.findFirst({
     where: { customerId: userId },
     include: { items: { include: { product: { include: { options: true, vendor: true, productSchedule: true } }, options: true } } },
@@ -481,7 +487,35 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
 
     // Atomic DB section: all vendor orders + cart cleanup + snapshot delete
     // If any vendor order fails, the whole batch rolls back — no partial checkout.
+    // Promo redemption is now inside the transaction to eliminate the
+    // post-commit race where two concurrent checkouts could both consume the
+    // last redemption while only one should succeed.
     const createdOrders = await prisma.$transaction(async (tx) => {
+      // Pre-claim promo atomically inside transaction — reserve usage slot before creating orders
+      let promoClaimed = false;
+      if (freshSummary.promo?.applied && freshSummary.promo.promoId) {
+        const promoId = freshSummary.promo.promoId;
+        const promo = await tx.promotion.findUnique({ where: { id: promoId }, select: { usageLimit: true, usedCount: true, maxUsesPerUser: true } });
+        if (promo && promo.usageLimit != null && promo.usedCount >= promo.usageLimit) {
+          throw new AppError("Promo code has been fully redeemed. Please remove it and try checkout again.", 409, "PROMO_EXHAUSTED", { code: "PROMO_EXHAUSTED", promoId });
+        }
+        const perUserCount = await tx.promotionUsage.count({ where: { promotionId: promoId, userId } });
+        if (promo && perUserCount >= promo.maxUsesPerUser) {
+          throw new AppError("You have already used this promo the maximum number of times.", 409, "PROMO_EXHAUSTED", { code: "PROMO_EXHAUSTED", promoId });
+        }
+        const claimed = await tx.promotion.updateMany({
+          where: {
+            id: promoId,
+            OR: [{ usageLimit: null }, { usedCount: { lt: promo?.usageLimit ?? undefined } }],
+          },
+          data: { usedCount: { increment: 1 } },
+        });
+        if (claimed.count === 0) {
+          throw new AppError("Promo code has been fully redeemed. Please remove it and try checkout again.", 409, "PROMO_EXHAUSTED", { code: "PROMO_EXHAUSTED", promoId });
+        }
+        promoClaimed = true;
+      }
+
       const orders = [];
       for (const [vendorId, vendorItems] of Object.entries(groupedByVendor)) {
         const pricing = vendorPricing.get(vendorId);
@@ -514,6 +548,19 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
           include: { items: { include: { options: true } } },
         });
         orders.push(order);
+      }
+
+      // Create promo usage with real orderIds after orders exist
+      if (promoClaimed && freshSummary.promo?.promoId && orders.length > 0) {
+        await tx.promotionUsage.create({
+          data: {
+            promotionId: freshSummary.promo.promoId,
+            userId,
+            orderIds: orders.map((o) => o.id),
+            promoCode: freshSummary.promo.code!,
+            discount: freshSummary.discount,
+          },
+        });
       }
 
       if (liveItems.length > 0) {
@@ -561,19 +608,7 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
       }).catch((err) => logger.warn({ err, orderId: order.id }, "Failed to record order activity (non-critical)"));
     }
 
-    // Redeem the promo now that every order is actually created — this
-    // is the atomic, race-safe increment (see promoService.redeemPromo).
-    // If the promo somehow got exhausted by a concurrent checkout between
-    // the price-match check above and this exact moment, the orders
-    // already created still stand at their (correctly discounted) price
-    // — redemption just silently doesn't record a second usage rather
-    // than unwinding an already-successful checkout over a bookkeeping
-    // race this unlikely.
-    if (freshSummary.promo.applied && freshSummary.promo.promoId) {
-      await redeemPromo(freshSummary.promo.promoId, userId, createdOrders.map((o) => o.id), freshSummary.promo.code!, freshSummary.discount).catch(
-        (err) => logger.warn({ err, promoId: freshSummary.promo.promoId }, "Failed to record promo redemption (orders already created successfully)")
-      );
-    }
+    // Promo was already claimed inside the transaction — no post-commit redeem needed
 
     const updatedCart = offlineItems.length > 0 ? await getEnhancedCart(cart.id) : { id: null, items: [], basePrice: 0, totalPrice: 0 };
     try {

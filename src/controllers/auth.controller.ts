@@ -26,6 +26,7 @@ import {
 } from "../validations/authSchema";
 import { generateResetToken } from "../utils/generateResetToken";
 import { ensureString } from "../utils/paramUtils";
+import { logger } from "../lib/logger";
 import {
   deleteUserSession,
   deleteAllUserSessions,
@@ -241,68 +242,7 @@ export const register = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// export const login = async (req: Request, res: Response) => {
-//   const parsed = loginSchema.safeParse(req.body);
-//   if (!parsed.success) return res.status(422).json({ errors: parsed.error.flatten().fieldErrors });
 
-//   const { email, password } = parsed.data;
-
-//   try {
-//     const user = await findUserByEmail(email);
-//     if (!user || !user.password || !(await comparePasswords(password, user.password))) {
-//       return res.status(401).json({ message: 'Invalid credentials' });
-//     }
-//     if (!user.isEmailVerified) return res.status(403).json({ message: 'Please verify your email before logging in.' });
-
-//     const updates: any = {
-//       lastLoginAt: new Date(),
-//       loginMethod: 'LOCAL',
-//       loginHistory: {
-//         create: {
-//           method: 'LOCAL',
-//           ip: req.ip || '',
-//           userAgent: req.headers['user-agent'] || '',
-//         },
-//       },
-//     };
-
-//     if (!user.authProviders.includes('LOCAL')) {
-//       updates.authProviders = { push: 'LOCAL' };
-//     }
-
-//   // inside login controller
-// const updatedUser = await prisma.user.update({
-//   where: { id: user.id },
-//   data: {
-//     lastLoginAt: new Date(),
-//     loginMethod: 'LOCAL',
-//     authProviders: user.authProviders.includes('LOCAL') ? undefined : { push: 'LOCAL' }
-//   }
-// });
-
-//     const accessToken = generateAccessToken(user.id, user.role);
-//     const refreshToken = generateRefreshToken(user.id, user.tokenVersion);
-
-//     res.cookie('refreshToken', refreshToken, {
-//       httpOnly: true,
-//       secure: process.env.NODE_ENV === 'production',
-//       sameSite: 'strict',
-//       maxAge: 7 * 24 * 60 * 60 * 1000,
-//       path: '/refresh-token',
-//     });
-
-//     res.status(200).json({
-//       message: 'Login successful',
-//       pendingRole: !user.role,
-//       ...buildAuthResponse(user, accessToken),
-//     });
-//   } catch (error) {
-//     console.error('Login error:', error);
-//     res.status(500).json({ message: 'Something went wrong during login' });
-//   }
-// };
-
-// Refresh Token
 
 export const login = async (req: Request, res: Response) => {
   const parsed = loginSchema.safeParse(req.body);
@@ -416,38 +356,7 @@ export const login = async (req: Request, res: Response) => {
   }
 };
 
-// export const refreshToken = async (req: Request, res: Response) => {
-//   const token = req.cookies.refreshToken;
-//   if (!token) return res.status(401).json({ message: 'No refresh token provided' });
-
-//   try {
-//     const decoded = jwt.verify(token, config.jwtSecret) as { id: string; tokenVersion: number };
-//     const user = await findUserById(decoded.id);
-//     if (!user || user.tokenVersion !== decoded.tokenVersion) {
-//       return res.status(401).json({ message: 'Invalid refresh token' });
-//     }
-
-//     const newAccessToken = generateAccessToken(user.id, user.role);
-//     const newRefreshToken = generateRefreshToken(user.id, user.tokenVersion);
-
-//     res.cookie('refreshToken', newRefreshToken, {
-//       httpOnly: true,
-//       secure: process.env.NODE_ENV === 'production',
-//       sameSite: 'strict',
-//       maxAge: 7 * 24 * 60 * 60 * 1000,
-//       path: '/refresh-token',
-//     });
-
-//     res.status(200).json({ accessToken: newAccessToken });
-//   } catch (error) {
-//     console.error('Refresh token error:', error);
-//     res.status(401).json({ message: 'Invalid or expired refresh token' });
-//   }
-// };
-
-// old refresh token
-
-// ✅ Handles refresh tokens from both cookie (web) and body (mobile)
+// Handles refresh tokens from both cookie (web) and body (mobile)
 export const refreshToken = async (req: Request, res: Response) => {
   // Get refresh token from either cookie or request body
   const token = req.cookies.refreshToken || req.body.refreshToken;
@@ -665,42 +574,6 @@ export const forgotPassword = async (req: Request, res: Response) => {
   }
 };
 
-// Reset Password
-// for this part it can reset password but i won't have to pass through verifcation it will just use the reset token gotten from the forgot password email
-// so i lock it because of the mobile app that have a verification page in the ui so we will use verify endpoint
-// so the code is working fine just not using it for
-
-// export const resetPassword = async (req: Request, res: Response) => {
-//   const parsed = resetSchema.safeParse(req.body);
-//   if (!parsed.success) {
-//     return res.status(422).json({ errors: parsed.error.flatten().fieldErrors });
-//   }
-
-//   const { email, code, newPassword } = parsed.data;
-
-//   try {
-//     const user = await findUserByEmail(email);
-//     if (!user) return res.status(404).json({ message: 'User not found' });
-
-//     const tokenEntry = await prisma.passwordResetToken.findUnique({
-//       where: { userId: user.id },
-//     });
-
-//     if (!tokenEntry || tokenEntry.token !== code || tokenEntry.expiresAt < new Date()) {
-//       return res.status(400).json({ message: 'Invalid or expired code' });
-//     }
-
-//     const hashedPassword = await bcrypt.hash(newPassword, 10);
-//     await prisma.user.update({ where: { id: user.id }, data: { password: hashedPassword } });
-//     await prisma.passwordResetToken.delete({ where: { userId: user.id } });
-
-//     res.status(200).json({ message: 'Password reset successful' });
-//   } catch (error) {
-//     console.error('Reset password error:', error);
-//     res.status(500).json({ message: 'Something went wrong during password reset' });
-//   }
-// };
-
 // Get Profile
 
 export const getProfile = async (req: AuthRequest, res: Response) => {
@@ -822,40 +695,6 @@ export const selectRole = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// to verify the token to reset new password
-// export const verifyResetCode = async (req: Request, res: Response) => {
-//   const { email, code } = req.body;
-
-//   if (!email || !code) {
-//     return res.status(422).json({ message: 'Email and code are required' });
-//   }
-
-//   try {
-//     const user = await findUserByEmail(email);
-//     if (!user) return res.status(404).json({ message: 'User not found' });
-
-//     const tokenEntry = await prisma.passwordResetToken.findUnique({
-//       where: { userId: user.id },
-//     });
-
-//     if (!tokenEntry || tokenEntry.token !== code || tokenEntry.expiresAt < new Date()) {
-//       return res.status(406).json({ message: 'Invalid or expired reset code' });
-//     }
-
-//     // Issue short-lived JWT
-//     const resetToken = jwt.sign(
-//       { id: user.id },
-//       config.jwtResetSecret, // 👈 Add this to config (a different secret from access/refresh)
-//       { expiresIn: '10m' } // valid for 10 minutes
-//     );
-
-//     return res.status(200).json({ resetToken });
-//   } catch (error) {
-//     console.error('Verify code error:', error);
-//     return res.status(500).json({ message: 'Failed to verify reset code' });
-//   }
-// };
-
 // Verify the reset code and issue a short-lived JWT
 export const verifyResetCode = async (req: Request, res: Response) => {
   const { email, code } = req.body;
@@ -906,42 +745,9 @@ export const verifyResetCode = async (req: Request, res: Response) => {
   }
 };
 
-// Secure Reset Password so this will change the password or user will be able to create new password
-// export const secureResetPassword = async (req: Request, res: Response) => {
-//   const parsed = secureResetSchema.safeParse(req.body);
-//   if (!parsed.success) {
-//     return res.status(422).json({ errors: parsed.error.flatten().fieldErrors });
-//   }
 
-//   const { resetToken, newPassword } = parsed.data;
 
-//   try {
-//     const decoded = jwt.verify(resetToken, config.jwtResetSecret) as { id: string };
 
-//     const user = await findUserById(decoded.id);
-//     if (!user) return res.status(404).json({ message: 'User not found' });
-
-//     const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-//     await prisma.user.update({
-//       where: { id: user.id },
-//       data: {
-//         password: hashedPassword ,
-//         authProviders: user.authProviders.includes('GOOGLE') ? user.authProviders: { push: 'LOCAL' }
-//       },
-//     });
-
-//     // Clean up the used/expired reset token(s)
-//     await prisma.passwordResetToken.deleteMany({
-//       where: { userId: user.id },
-//     });
-
-//     res.status(200).json({ message: 'Password has been reset successfully' });
-//   } catch (error) {
-//     console.error('Secure reset password error:', error);
-//     return res.status(407).json({ message: 'Invalid or expired reset token' });
-//   }
-// };
 
 export const secureResetPassword = async (req: Request, res: Response) => {
   const parsed = secureResetSchema.safeParse(req.body);
@@ -1312,6 +1118,23 @@ export const updateProfile = async (
     }
   };
 
+  // Email change — allow fixing invalid email blocking payments
+  if (Object.prototype.hasOwnProperty.call(rawData, "email") && rawData.email) {
+    const normalizedEmail = (rawData.email as string).toLowerCase().trim();
+    const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+    if (existing && existing.id !== userId) {
+      res.status(409).json({ success: false, code: "PROFILE_EMAIL_TAKEN", message: "Email already in use" });
+      return;
+    }
+    const currentUser = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+    if (currentUser && currentUser.email !== normalizedEmail) {
+      data.email = normalizedEmail;
+      data.isEmailVerified = false;
+      data.emailVerificationToken = uuidv4();
+      data.emailVerificationExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
+    }
+  }
+
   // Common fields for all roles
   includeField("name");
   includeField("phoneNumber");
@@ -1330,6 +1153,9 @@ export const updateProfile = async (
     data.avatarUrl = `/uploads/${req.file.filename}`;
   }
 
+  // If email changed, we already set isEmailVerified=false + token above
+  const emailChanged = !!data.email;
+
   try {
     const updated = await prisma.user.update({
       where: { id: userId },
@@ -1337,6 +1163,8 @@ export const updateProfile = async (
       select: {
         id: true,
         username: true,
+        email: true,
+        isEmailVerified: true,
         phoneNumber: true,
         avatarUrl: true,
         bio: true,
@@ -1347,6 +1175,7 @@ export const updateProfile = async (
         brandLogo: true,
         kycStatus: true,
         updatedAt: true,
+        emailVerificationToken: true,
         deliveryPerson: {
           select: {
             id: true,
@@ -1361,6 +1190,14 @@ export const updateProfile = async (
         },
       },
     });
+
+    if (emailChanged && updated.emailVerificationToken) {
+      try {
+        await sendVerificationEmail(req, updated.email, updated.emailVerificationToken);
+      } catch (e) {
+        logger.warn({ err: e, userId }, "Failed to send verification email after email change");
+      }
+    }
 
     // Delivery-specific updates
     if (userRole === "DELIVERY") {
@@ -1447,70 +1284,6 @@ export const getAllAddresses = async (
     res.status(500).json({ error: "Server error" });
   }
 };
-
-// ✅ Update an address (with ownership check)
-// export const updateAddress = async (req: AuthRequest, res: Response): Promise<void> => {
-//   const { id } = req.params;
-//   const userId = req.user?.id;
-
-//   if (!userId) {
-//     res.status(401).json({ message: "Unauthorized" });
-//     return;
-//   }
-
-//   const parsed = createAddressSchema.partial().safeParse(req.body);
-//   if (!parsed.success) {
-//     res.status(400).json({ errors: parsed.error.flatten().fieldErrors });
-//     return;
-//   }
-
-//   try {
-//     const updated = await prisma.address.updateMany({
-//       where: { id, userId }, // ✅ ensures only the owner's address can be updated
-//       data: parsed.data,
-//     });
-
-//     if (updated.count === 0) {
-//       res.status(404).json({ message: "Address not found or not owned by you" });
-//       return;
-//     }
-
-//     const address = await prisma.address.findUnique({ where: { id } });
-
-//     res.status(200).json({ message: "Address updated", address });
-//   } catch (err) {
-//     console.error("Update address error:", err);
-//     res.status(500).json({ error: "Server error" });
-//   }
-// };
-
-// // ✅ Delete an address (with ownership check)
-// export const deleteAddress = async (req: AuthRequest, res: Response): Promise<void> => {
-//   const userId = req.user?.id;
-
-//   if (!userId) {
-//      res.status(401).json({ message: "Unauthorized" });
-//      return;
-//   }
-
-//   const { id } = req.params;
-
-//   try {
-//     const deleted = await prisma.address.deleteMany({
-//       where: { id, userId }, // ✅ ensures only the owner's address can be deleted
-//     });
-
-//     if (deleted.count === 0) {
-//       res.status(404).json({ message: "Address not found or not owned by you" });
-//       return;
-//     }
-
-//     res.status(200).json({ message: "Address deleted" });
-//   } catch (err) {
-//     console.error("Delete address error:", err);
-//     res.status(500).json({ error: "Server error" });
-//   }
-// };
 
 // ✅ Update an address (with ownership check)
 export const updateAddress = async (

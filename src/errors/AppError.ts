@@ -35,8 +35,8 @@ export class AppError extends Error {
 
 /** 400 — the request itself is malformed / fails validation */
 export class ValidationError extends AppError {
-  constructor(message = "Validation failed", details?: unknown) {
-    super(message, 400, "VALIDATION_ERROR", details);
+  constructor(message = "Validation failed", details?: unknown, code = "VALIDATION_ERROR") {
+    super(message, 400, code, details);
   }
 }
 
@@ -49,8 +49,8 @@ export class UnauthorizedError extends AppError {
 
 /** 403 — authenticated, but not allowed to do this */
 export class ForbiddenError extends AppError {
-  constructor(message = "You don't have permission to do this") {
-    super(message, 403, "FORBIDDEN");
+  constructor(message = "You don't have permission to do this", code = "FORBIDDEN") {
+    super(message, 403, code);
   }
 }
 
@@ -63,8 +63,8 @@ export class NotFoundError extends AppError {
 
 /** 409 — conflicts with current state (duplicate email, already verified, etc.) */
 export class ConflictError extends AppError {
-  constructor(message = "Conflict with current state") {
-    super(message, 409, "CONFLICT");
+  constructor(message = "Conflict with current state", code = "CONFLICT", details?: unknown) {
+    super(message, 409, code, details);
   }
 }
 

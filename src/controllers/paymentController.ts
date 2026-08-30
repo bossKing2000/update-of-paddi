@@ -12,12 +12,16 @@ import { OrderStatus, PaymentStatus, ActivityType, RefundStatus } from "@prisma/
 import { recordActivityBundle } from "../utils/activityUtils";
 import { assertVendorAvailableForOrdering } from "../services/vendorAvailability.service";
 import { sendSuccess, sendCreated } from "../utils/apiResponse";
-import { NotFoundError, ValidationError, ConflictError, ForbiddenError, UpstreamServiceError } from "../errors/AppError";
+import { AppError, NotFoundError, ValidationError, ConflictError, ForbiddenError, UpstreamServiceError } from "../errors/AppError";
 import { ensureString } from "../utils/paramUtils";
 import { nowUtc, toUtc, addMinutesUtc } from "../utils/time";
 import { logger } from "../lib/logger";
+import { SUPPORTED_CHANNELS } from "../services/paymentService";
 
-const ALLOWED_CHANNELS = ["card", "bank", "ussd", "mobile_money", "bank_transfer", "qr", "apple_pay"] as const;
+// Single source — paymentService is authority for allowed channels.
+// For NGN marketplace: filter to relevant channels only (hide ZA/EFT etc by default)
+const NGN_ALLOWED_CHANNELS = ["card", "bank", "ussd", "bank_transfer"] as const;
+const ALLOWED_CHANNELS = NGN_ALLOWED_CHANNELS;
 
 export const startPaymentSchema = z.object({
   idempotencyKey: z.string().min(1, "idempotencyKey is required"),
@@ -121,16 +125,28 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
 
   const customer = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
   if (!customer) throw new NotFoundError("User");
-  if (!customer.email || !customer.email.includes("@")) {
-    throw new ValidationError("Customer email is required for Paystack", { email: customer.email });
+  if (!customer.email || !z.string().email().safeParse(customer.email).success) {
+    throw new AppError("Customer email is invalid. Please update your profile.", 409, "PROFILE_EMAIL_INVALID", { code: "PROFILE_EMAIL_INVALID", email: customer.email });
   }
   if (!config.paystackSecret || !config.paystackSecret.startsWith("sk_")) {
     logger.error({ userId, idempotencyKey }, "Paystack secret misconfigured");
     throw new UpstreamServiceError("Paystack", "Payment service is temporarily unavailable. Your order is saved and you can try payment again from Orders.", { code: "PAYSTACK_INVALID_KEY" });
   }
 
+  // Validate channels against canonical allowlist
+  if (channels && channels.length > 0) {
+    const invalid = channels.filter((c) => !(ALLOWED_CHANNELS as readonly string[]).includes(c));
+    if (invalid.length > 0) {
+      throw new ValidationError("Invalid payment channel", { invalidChannels: invalid, allowedChannels: ALLOWED_CHANNELS }, "INVALID_PAYMENT_METHOD");
+    }
+  }
+
   const { ip, userAgent, deviceId } = getClientInfo(req);
-  const channel = mobileSdk || req.headers["x-device-channel"]?.toString().toLowerCase() === "mobile" ? "mobile" : "web";
+  // mobileSdk flag no longer creates unverifiable local reference — all flows use hosted Paystack checkout
+  if (mobileSdk) {
+    logger.warn({ userId, idempotencyKey, mobileSdk }, "mobileSdk flag deprecated — routing through hosted checkout");
+  }
+  const channel = req.headers["x-device-channel"]?.toString().toLowerCase() === "mobile" ? "mobile" : "web";
 
   logger.info({ idempotencyKey, orderIds: orders.map((o) => o.id), amount: totalAmount, channel, channels }, "Initiating payment");
 
@@ -151,23 +167,6 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
     order: { connect: { id: orders[0].id } }, // primary order — full batch resolved via idempotencyKey
     idempotencyKey,
   };
-
-  if (mobileSdk) {
-    const reference = `order_${orders[0].id}_${Date.now()}`;
-    await prisma.payment.create({ data: { ...basePaymentData, reference } });
-
-    return sendSuccess(res, {
-      paymentData: {
-        reference,
-        amount: basePaymentData.amount,
-        email: customer.email,
-        publicKey: config.paystackPublicKey,
-        metadata: { userId, idempotencyKey, platform: "mobile" },
-      },
-      startedAt: now.toISOString(),
-      expiresAt: finalPaymentExpiresAt.toISOString(),
-    }, "Mobile payment initialized successfully");
-  }
 
   let paymentInit: any;
   try {
@@ -230,6 +229,10 @@ export const confirmPayment = async (req: AuthRequest, res: Response) => {
 
   const existing = await prisma.payment.findUnique({ where: { reference } });
   if (!existing) throw new NotFoundError("Payment");
+  // BOLA fix: ensure caller owns the payment before triggering verification/finalize
+  if (existing.userId !== req.user!.id) {
+    throw new ForbiddenError("You don't have permission to confirm this payment", "FORBIDDEN");
+  }
 
   if (existing.status === PaymentStatus.SUCCESS) {
     return sendSuccess(res, { payment: existing }, "Payment already confirmed");

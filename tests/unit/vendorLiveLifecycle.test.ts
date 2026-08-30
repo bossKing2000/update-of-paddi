@@ -246,6 +246,8 @@ const checkoutBase = (cartItems: any[]) => {
     customerId: "cust-1",
     items: cartItems,
   });
+  // Default email validation mock — required before vendor gates (B2)
+  db.user.findUnique.mockResolvedValue({ email: "c@test.com", name: "Test Customer" } as any);
 };
 
 const cartItemFrom = (vendor: Record<string, unknown>) => ({
@@ -298,7 +300,7 @@ describe("checkoutCart — vendor live invariant", () => {
     db.user.findUnique.mockImplementation((args: any) =>
       Promise.resolve(
         args?.where?.id === "cust-1"
-          ? { name: "Test Customer" }
+          ? { email: "c@test.com", name: "Test Customer" }
           : { id: "vendor-1", isLive: false, deliveryPreferences: {} },
       ),
     );
@@ -324,7 +326,7 @@ describe("checkoutCart — vendor live invariant", () => {
     db.user.findUnique.mockImplementation((args: any) =>
       Promise.resolve(
         args?.where?.id === "cust-1"
-          ? { name: "Test Customer" }
+          ? { email: "c@test.com", name: "Test Customer" }
           : { id: "vendor-1", isLive: true, deliveryPreferences: { acceptingOrders: true } },
       ),
     );

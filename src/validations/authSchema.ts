@@ -15,6 +15,7 @@ export const registerSchema = z.object({
 
 export const updateUserSchema = z.object({
   name: z.string().min(2).optional(),
+  email: z.string().email().transform((v) => v.toLowerCase().trim()).optional(),
   phoneNumber: z.string().min(10).optional(),
   avatarUrl: z.string().nullable().optional(), // allow null
   bio: z.string().max(300).nullable().optional(),

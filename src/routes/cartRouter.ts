@@ -9,6 +9,7 @@ import {
   getCartSummary,
 } from "../controllers/cartController";
 import { authenticate, authorizeCustomer } from "../middlewares/auth.middleware";
+import { checkoutRateLimiter, cartSummaryRateLimiter } from "../middlewares/rateLimiter.middleware";
 
 const router = express.Router();
 
@@ -21,8 +22,8 @@ router.get("/", getCart);
 router.post("/add", addToCart);
 router.patch("/items/:itemId", updateCartItem); // was PUT — PATCH is the correct verb for a partial update
 router.delete("/items/:itemId", removeCartItem);
-router.get("/summary", getCartSummary); // NEW — priced, vendor-grouped preview with delivery fee, used before checkout
-router.post("/checkout", checkoutCart);
+router.get("/summary", cartSummaryRateLimiter, getCartSummary); // rate-limited to prevent deliveryFee calc abuse
+router.post("/checkout", checkoutRateLimiter, checkoutCart);
 router.delete("/", clearCart);
 
 export default router;

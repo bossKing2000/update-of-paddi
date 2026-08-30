@@ -11,7 +11,7 @@ import { nowUtc, toUtc, addMinutesUtc, isAfterUtc } from "../utils/time";
  * ----------------------------
  */
 
-export const SUPPORTED_CHANNELS = ["card", "bank", "ussd", "mobile_money", "bank_transfer", "qr", "apple_pay"] as const;
+export const SUPPORTED_CHANNELS = ["card", "bank", "ussd", "bank_transfer"] as const;
 export type PaystackChannel = typeof SUPPORTED_CHANNELS[number];
 
 export const initializePayment = async (
