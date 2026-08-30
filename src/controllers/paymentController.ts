@@ -283,7 +283,7 @@ export const getAllPaymentsForUser = async (req: AuthRequest, res: Response) => 
   // query rather than N+1 queries.
   const keysNeedingLookup = [...new Set(payments.filter((p) => p.idempotencyKey).map((p) => p.idempotencyKey!))];
   const ordersByKey = keysNeedingLookup.length
-    ? await prisma.order.findMany({ where: { idempotencyKey: { in: keysNeedingLookup } }, select: { id: true, idempotencyKey: true, status: true, totalPrice: true, vendorId: true } })
+    ? await prisma.order.findMany({ where: { idempotencyKey: { in: keysNeedingLookup }, customerId: req.user!.id }, select: { id: true, idempotencyKey: true, status: true, totalPrice: true, vendorId: true } })
     : [];
 
   const mappedPayments = payments.map((p) => {
@@ -400,6 +400,11 @@ export const saveCardToken = async (req: AuthRequest, res: Response) => {
 
   const existingCard = await prisma.userPaymentMethod.findFirst({ where: { cardToken, userId } });
   if (existingCard) throw new ConflictError("This card is already saved");
+  // Global uniqueness guard — prevent stealing another user's reusable authorization_code
+  const globalExisting = await prisma.userPaymentMethod.findUnique({ where: { cardToken } });
+  if (globalExisting && globalExisting.userId !== userId) {
+    throw new ConflictError("This card is already saved to another account");
+  }
 
   await prisma.userPaymentMethod.create({ data: { userId, cardToken, last4, brand, isDefault: false } });
   await createAuditLog({ userId, action: "CARD_TOKEN_SAVED", req, metadata: { maskedToken: "****" + last4, brand } });

@@ -131,6 +131,10 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
 
   if (existingItem) {
     const newQty = existingItem.quantity + quantity;
+    const MAX_QTY = Number(process.env.MAX_CART_ITEM_QTY) || 99;
+    if (newQty > MAX_QTY) {
+      throw new ValidationError(`Quantity exceeds maximum allowed (${MAX_QTY})`, { maxQty: MAX_QTY, requested: newQty }, "VALIDATION_ERROR");
+    }
     await prisma.cartItem.update({
       where: { id: existingItem.id },
       data: {
@@ -492,9 +496,11 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     // last redemption while only one should succeed.
     const createdOrders = await prisma.$transaction(async (tx) => {
       // Pre-claim promo atomically inside transaction — reserve usage slot before creating orders
+      // Row-level lock serializes concurrent redemptions for same promo (prevents per-user race)
       let promoClaimed = false;
       if (freshSummary.promo?.applied && freshSummary.promo.promoId) {
         const promoId = freshSummary.promo.promoId;
+        await tx.$queryRaw`SELECT id FROM "Promotion" WHERE id = ${promoId} FOR UPDATE`;
         const promo = await tx.promotion.findUnique({ where: { id: promoId }, select: { usageLimit: true, usedCount: true, maxUsesPerUser: true } });
         if (promo && promo.usageLimit != null && promo.usedCount >= promo.usageLimit) {
           throw new AppError("Promo code has been fully redeemed. Please remove it and try checkout again.", 409, "PROMO_EXHAUSTED", { code: "PROMO_EXHAUSTED", promoId });
