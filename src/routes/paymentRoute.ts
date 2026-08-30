@@ -5,6 +5,7 @@ import {
   confirmPayment,
   getAllPaymentsForUser,
   requestRefund,
+  getMyRefunds,
   verifyPaymentBeforeFulfillment,
   saveCardToken,
   getSavedCards,
@@ -23,6 +24,7 @@ router.post('/start', initiateOrderPayment);
 router.get('/confirm/:reference', confirmPayment);
 router.get('/user', getAllPaymentsForUser);
 router.post('/refund', requestRefund);
+router.get('/refunds', getMyRefunds);
 
 // Verification endpoint
 router.get('/orders/:orderId/verify-payment', verifyPaymentBeforeFulfillment);
