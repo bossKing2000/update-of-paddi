@@ -1,4 +1,5 @@
 import jwt, { SignOptions } from 'jsonwebtoken';
+import { v4 as uuidv4 } from 'uuid';
 import config from '../config/config';
 
 const accessTokenOptions: SignOptions = {
@@ -32,6 +33,15 @@ export const generateAccessToken = (userId: string, role: string | null | undefi
   return jwt.sign(payload, config.jwtSecret, accessTokenOptions);
 };
 
-export const generateRefreshToken = (userId: string, tokenVersion: number, sessionId: string): string => {
-  return jwt.sign({ id: userId, tokenVersion, sessionId }, config.jwtSecret, refreshTokenOptions);
+export const generateRefreshToken = (userId: string, tokenVersion: number, sessionId: string, jti?: string): string => {
+  const tokenId = jti || uuidv4();
+  return jwt.sign({ id: userId, tokenVersion, sessionId, jti: tokenId }, config.jwtSecret, refreshTokenOptions);
+};
+
+export const decodeRefreshToken = (token: string): { id: string; tokenVersion: number; sessionId?: string; jti?: string } | null => {
+  try {
+    return jwt.verify(token, config.jwtSecret) as any;
+  } catch {
+    return null;
+  }
 };

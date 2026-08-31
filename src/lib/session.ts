@@ -36,6 +36,11 @@ export interface SessionMetadata {
 const sessionKey = (userId: string, sessionId: string) => `session:user:${userId}:${sessionId}`;
 const indexKey = (userId: string) => `session:user:${userId}:index`;
 
+const REFRESH_JTI_TTL_SECONDS = 7 * 24 * 3600; // 7 days — matches refresh token expiry
+const REFRESH_GRACE_SECONDS = 10; // grace window for concurrent refresh requests
+const refreshJtiKey = (userId: string, sessionId: string) => `refresh:jti:${userId}:${sessionId}`;
+const refreshPrevJtiKey = (userId: string, sessionId: string) => `refresh:jti:prev:${userId}:${sessionId}`;
+
 export async function createUserSession(userId: string, sessionId: string, metadata: SessionMetadata) {
   const expiresAt = new Date(Date.now() + SESSION_TTL_SECONDS * 1000);
   const redisPayload = JSON.stringify(metadata);
@@ -122,11 +127,60 @@ export async function getUserSession(userId: string, sessionId: string): Promise
   }
 }
 
+/** Refresh-token rotation helpers — single-use jti per session. */
+export async function setRefreshJti(userId: string, sessionId: string, jti: string) {
+  try {
+    await redisUsersSessions.set(refreshJtiKey(userId, sessionId), jti, { EX: REFRESH_JTI_TTL_SECONDS });
+  } catch (e) {
+    logger.warn({ err: e, userId, sessionId }, "Failed to set refresh jti");
+  }
+}
+
+export async function getRefreshJti(userId: string, sessionId: string): Promise<string | null> {
+  try {
+    return await redisUsersSessions.get(refreshJtiKey(userId, sessionId));
+  } catch {
+    return null;
+  }
+}
+
+export async function rotateRefreshJti(userId: string, sessionId: string, oldJti: string, newJti: string) {
+  try {
+    // Keep old jti briefly for concurrent refresh grace window
+    await redisUsersSessions.set(refreshPrevJtiKey(userId, sessionId), oldJti, { EX: REFRESH_GRACE_SECONDS });
+    await redisUsersSessions.set(refreshJtiKey(userId, sessionId), newJti, { EX: REFRESH_JTI_TTL_SECONDS });
+  } catch (e) {
+    logger.warn({ err: e, userId, sessionId }, "Failed to rotate refresh jti");
+  }
+}
+
+export async function isRefreshJtiReplay(userId: string, sessionId: string, incomingJti: string): Promise<boolean> {
+  try {
+    const current = await redisUsersSessions.get(refreshJtiKey(userId, sessionId));
+    if (current && current === incomingJti) return false; // valid current
+    const prev = await redisUsersSessions.get(refreshPrevJtiKey(userId, sessionId));
+    if (prev && prev === incomingJti) return false; // within grace window
+    // No stored jti yet (legacy token) — allow once but not replay
+    if (!current && !prev) return false;
+    return true; // mismatch => replay / stolen token
+  } catch {
+    return false;
+  }
+}
+
+export async function deleteRefreshJti(userId: string, sessionId: string) {
+  await Promise.all([
+    redisUsersSessions.del(refreshJtiKey(userId, sessionId)).catch(() => {}),
+    redisUsersSessions.del(refreshPrevJtiKey(userId, sessionId)).catch(() => {}),
+  ]);
+}
+
 /** Revokes one specific session (e.g. logging out from just this device). */
 export async function deleteUserSession(userId: string, sessionId: string) {
   await Promise.all([
     redisUsersSessions.del(sessionKey(userId, sessionId)).catch(() => {}),
     redisUsersSessions.sRem(indexKey(userId), sessionId).catch(() => {}),
+    deleteRefreshJti(userId, sessionId),
     prisma.userSession.delete({ where: { sessionId } }).catch(() => {}),
   ]);
 }
@@ -135,8 +189,27 @@ export async function deleteUserSession(userId: string, sessionId: string) {
 export async function deleteAllUserSessions(userId: string) {
   const sessionIds = await redisUsersSessions.sMembers(indexKey(userId)).catch(() => [] as string[]);
   if (sessionIds.length > 0) {
-    await Promise.all(sessionIds.map((id) => redisUsersSessions.del(sessionKey(userId, id)).catch(() => {})));
+    await Promise.all(
+      sessionIds.flatMap((id) => [
+        redisUsersSessions.del(sessionKey(userId, id)).catch(() => {}),
+        deleteRefreshJti(userId, id),
+      ])
+    );
   }
+  // Sweep any remaining refresh jti keys (in case index was stale — use scan)
+  try {
+    for (const pat of [`refresh:jti:${userId}:*`, `refresh:jti:prev:${userId}:*`]) {
+      // @ts-ignore — redis client supports scan
+      let cursor = 0;
+      do {
+        const res: any = await (redisUsersSessions as any).scan(cursor, { MATCH: pat, COUNT: 100 });
+        cursor = res.cursor ?? res[0] ?? 0;
+        const keys: string[] = res.keys ?? res[1] ?? [];
+        if (keys.length) await Promise.all(keys.map((k) => redisUsersSessions.del(k).catch(() => {})));
+        if (typeof cursor === 'string') cursor = Number(cursor);
+      } while (cursor !== 0);
+    }
+  } catch {}
   await redisUsersSessions.del(indexKey(userId)).catch(() => {});
   // DB is authoritative — ensure all DB sessions are removed even if Redis was flushed
   await prisma.userSession.deleteMany({ where: { userId } }).catch((e) => {

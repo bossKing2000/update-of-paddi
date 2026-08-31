@@ -33,6 +33,11 @@ import {
   createUserSession,
   listUserSessions,
   getUserSession,
+  setRefreshJti,
+  getRefreshJti,
+  rotateRefreshJti,
+  isRefreshJtiReplay,
+  deleteRefreshJti,
 } from "../lib/session";
 
 const schema = z.object({ email: z.string().email() });
@@ -196,11 +201,13 @@ export const register = async (req: AuthRequest, res: Response) => {
     // after signing up), forcing an unexpected extra login. Same
     // multi-device session design as login (see lib/session.ts).
     const sessionId = uuidv4();
+    const refreshJti = uuidv4();
     const accessToken = generateAccessToken(user.id, user.role, sessionId);
     const refreshToken = generateRefreshToken(
       user.id,
       user.tokenVersion,
       sessionId,
+      refreshJti,
     );
 
     const regClientInfo = (req as any).clientInfo || {};
@@ -214,6 +221,7 @@ export const register = async (req: AuthRequest, res: Response) => {
       geoCountry: regClientInfo.country,
       lastLoginAt: new Date(),
     });
+    await setRefreshJti(user.id, sessionId, refreshJti);
 
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
@@ -306,11 +314,13 @@ export const login = async (req: Request, res: Response) => {
     // Redis session, so logging in on another device doesn't silently
     // kick this one out.
     const sessionId = uuidv4();
+    const refreshJti = uuidv4();
     const accessToken = generateAccessToken(user.id, user.role, sessionId);
     const refreshToken = generateRefreshToken(
       user.id,
       user.tokenVersion,
       sessionId,
+      refreshJti,
     );
 
     // Store session in Redis
@@ -323,6 +333,7 @@ export const login = async (req: Request, res: Response) => {
       geoRegion: region,
       geoCountry: country,
     });
+    await setRefreshJti(user.id, sessionId, refreshJti);
 
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
@@ -356,7 +367,7 @@ export const login = async (req: Request, res: Response) => {
   }
 };
 
-// Handles refresh tokens from both cookie (web) and body (mobile)
+// Handles refresh tokens from both cookie (web) and body (mobile) — with rotation & reuse detection
 export const refreshToken = async (req: Request, res: Response) => {
   // Get refresh token from either cookie or request body
   const token = req.cookies.refreshToken || req.body.refreshToken;
@@ -371,6 +382,7 @@ export const refreshToken = async (req: Request, res: Response) => {
       id: string;
       tokenVersion: number;
       sessionId?: string;
+      jti?: string;
     };
 
     // Find user in DB
@@ -386,9 +398,59 @@ export const refreshToken = async (req: Request, res: Response) => {
       return res.status(401).json({ message: "Please log in again" });
     }
 
-    // Generate new tokens, re-using the SAME sessionId — this refreshes
-    // the existing session's TTL rather than creating an orphaned new
-    // one every time a client refreshes near expiry.
+    const incomingJti = decoded.jti;
+
+    // --- Refresh-token rotation & reuse detection (transparent to normal users) ---
+    // New tokens carry jti; legacy tokens (no jti) are grandfathered once then rotated.
+    if (incomingJti) {
+      const storedJti = await getRefreshJti(user.id, decoded.sessionId);
+      // First refresh after deployment: no stored jti yet — adopt incoming as current
+      if (!storedJti) {
+        await setRefreshJti(user.id, decoded.sessionId, incomingJti);
+      } else if (storedJti !== incomingJti) {
+        const isReplay = await isRefreshJtiReplay(user.id, decoded.sessionId, incomingJti);
+        if (isReplay) {
+          // Possible stolen token reuse — revoke all sessions for this user
+          logger.warn({ userId: user.id, sessionId: decoded.sessionId, incomingJti, storedJti }, "Refresh token reuse detected — revoking all sessions");
+          await deleteAllUserSessions(user.id);
+          await prisma.user.update({ where: { id: user.id }, data: { tokenVersion: { increment: 1 } } }).catch(() => {});
+          return res.status(401).json({ message: "Session compromised. Please log in again." });
+        }
+        // Within grace window — reuse of previous jti from concurrent request (isReplay false but not current).
+        // Issue new access token but reuse current refresh jti (do not rotate again) to keep clients converged.
+        const prevJti = await (async () => {
+          try {
+            const { redisUsersSessions } = await import("../lib/redis");
+            return await redisUsersSessions.get(`refresh:jti:prev:${user.id}:${decoded.sessionId}`);
+          } catch { return null; }
+        })();
+        if (prevJti === incomingJti) {
+          const currentJti = storedJti;
+          const newAccessTokenGrace = generateAccessToken(user.id, user.role, decoded.sessionId);
+          const graceRefreshToken = generateRefreshToken(user.id, user.tokenVersion, decoded.sessionId, currentJti);
+          const existingSession = await getUserSession(user.id, decoded.sessionId);
+          if (existingSession) {
+            await createUserSession(user.id, decoded.sessionId, { ...existingSession, lastRefreshedAt: new Date() });
+          } else {
+            await createUserSession(user.id, decoded.sessionId, {
+              ip: undefined, userAgent: undefined, deviceId: undefined, geoCity: undefined, geoRegion: undefined, geoCountry: undefined,
+              lastLoginAt: new Date(), restoredAt: new Date(),
+            });
+          }
+          res.cookie("refreshToken", graceRefreshToken, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "strict",
+            maxAge: 7 * 24 * 60 * 60 * 1000,
+            path: "/refresh-token",
+          });
+          return res.status(200).json({ accessToken: newAccessTokenGrace, refreshToken: graceRefreshToken });
+        }
+      }
+    }
+
+    // Valid refresh — rotate to new jti
+    const newJti = uuidv4();
     const newAccessToken = generateAccessToken(
       user.id,
       user.role,
@@ -398,7 +460,16 @@ export const refreshToken = async (req: Request, res: Response) => {
       user.id,
       user.tokenVersion,
       decoded.sessionId,
+      newJti,
     );
+
+    // Persist new jti, keep old as prev for grace window if we had an incoming jti
+    if (incomingJti) {
+      await rotateRefreshJti(user.id, decoded.sessionId, incomingJti, newJti);
+    } else {
+      // Legacy token without jti — simply set new
+      await setRefreshJti(user.id, decoded.sessionId, newJti);
+    }
 
     const existingSession = await getUserSession(user.id, decoded.sessionId);
     
@@ -1040,11 +1111,13 @@ export const googleLogin = async (req: Request, res: Response) => {
     });
 
     const sessionId = uuidv4();
+    const refreshJti = uuidv4();
     const accessToken = generateAccessToken(user.id, user.role, sessionId);
     const refreshToken = generateRefreshToken(
       user.id,
       user.tokenVersion,
       sessionId,
+      refreshJti,
     );
 
     // Previously missing entirely — the accessToken returned here would
@@ -1057,6 +1130,7 @@ export const googleLogin = async (req: Request, res: Response) => {
       userAgent: (req.headers["user-agent"] as string) || "unknown",
       deviceId: null,
     });
+    await setRefreshJti(user.id, sessionId, refreshJti);
 
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,

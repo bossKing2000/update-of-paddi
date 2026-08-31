@@ -158,9 +158,9 @@ router.post(
 );
 
 //  POST /refresh-token
-//  Issues new access token using refresh token
+//  Issues new access token using refresh token — rate-limited per IP to prevent brute-force / credential stuffing amplification
 //  access Public
-router.post("/refresh-token", async (req: Request, res: Response) => {
+router.post("/refresh-token", authRateLimiter, async (req: Request, res: Response) => {
   await refreshToken(req, res);
 });
 

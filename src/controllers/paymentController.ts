@@ -14,8 +14,9 @@ import { assertVendorAvailableForOrdering } from "../services/vendorAvailability
 import { sendSuccess, sendCreated } from "../utils/apiResponse";
 import { AppError, NotFoundError, ValidationError, ConflictError, ForbiddenError, UpstreamServiceError } from "../errors/AppError";
 import { ensureString } from "../utils/paramUtils";
-import { nowUtc, toUtc, addMinutesUtc } from "../utils/time";
+import { nowUtc, toUtc, addMinutesUtc, isBeforeUtc } from "../utils/time";
 import { logger } from "../lib/logger";
+import { redisPayments } from "../lib/redis";
 import { SUPPORTED_CHANNELS } from "../services/paymentService";
 
 // Single source — paymentService is authority for allowed channels.
@@ -150,6 +151,27 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
 
   logger.info({ idempotencyKey, orderIds: orders.map((o) => o.id), amount: totalAmount, channel, channels }, "Initiating payment");
 
+  // Idempotency: reuse existing valid PENDING payment for same checkout batch instead of creating a second Paystack transaction.
+  // Prevents double-click / retry / concurrent duplicate initialization. Respects existing 15-minute payment window.
+  const existingPending = await prisma.payment.findFirst({
+    where: {
+      idempotencyKey,
+      userId,
+      status: { in: [PaymentStatus.PENDING, PaymentStatus.INITIATED] },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (existingPending && existingPending.expiresAt && isBeforeUtc(now, toUtc(existingPending.expiresAt))) {
+    const existingUrl = (existingPending.paystackData as any)?.authorization_url as string | undefined;
+    logger.info({ idempotencyKey, existingReference: existingPending.reference }, "Reusing existing PENDING payment");
+    return sendCreated(res, {
+      paymentUrl: existingUrl || `https://checkout.paystack.com/${existingPending.reference}`,
+      reference: existingPending.reference,
+      startedAt: (existingPending.startedAt || existingPending.createdAt).toISOString(),
+      expiresAt: existingPending.expiresAt.toISOString(),
+    }, "Payment already initialized");
+  }
+
   // Record that payment was actually attempted — this field existed in
   // the schema but was never set anywhere before.
   await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentInitiatedAt: now } });
@@ -213,7 +235,16 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
 
     throw new UpstreamServiceError("Paystack", clientMessage, { provider: "Paystack", paystackStatus, paystackMessage, code, channels } as any);
   }
-  await prisma.payment.create({ data: { ...basePaymentData, reference: paymentInit.reference } });
+  await prisma.payment.create({
+    data: {
+      ...basePaymentData,
+      reference: paymentInit.reference,
+      paystackData: {
+        authorization_url: paymentInit.authorization_url,
+        access_code: (paymentInit as any).access_code,
+      } as any,
+    },
+  });
 
   return sendCreated(res, {
     paymentUrl: paymentInit.authorization_url,

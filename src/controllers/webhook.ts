@@ -8,7 +8,9 @@ import { createAuditLog } from "../utils/auditLog.service";
 import { finalizePaymentSuccess } from "../services/paymentFinalizer.service";
 
 // ==================== CONSTANTS ====================
-const REPLAY_TTL_SECONDS = 24 * 60 * 60; // 24 hours
+// Paystack retries live webhooks: every 3 mins for 4 tries, then hourly for 72h (https://paystack.com/docs/payments/webhooks/#go-live-checklist).
+// Previously 24h meant legitimate retries after day 1 were incorrectly rejected as replays.
+const REPLAY_TTL_SECONDS = 72 * 60 * 60; // 72 hours — matches Paystack's full retry window
 const RATE_LIMIT_WINDOW_SECONDS = 15 * 60;
 const MAX_REQUESTS_PER_WINDOW = 100;
 

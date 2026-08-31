@@ -53,7 +53,23 @@ export default {
 
   paystackSecret: process.env.PAYSTACK_SECRET_KEY!,
   paystackPublicKey: process.env.PAYSTACK_PUBLIC_KEY!,
-  paystackCallbackUrl: process.env.PAYSTACK_CALLBACK_URL || "",
+  paystackCallbackUrl: (() => {
+    const url = process.env.PAYSTACK_CALLBACK_URL || "";
+    if (!url) return "";
+    try {
+      const parsed = new URL(url);
+      if (process.env.NODE_ENV === "production" && parsed.protocol !== "https:") {
+        throw new Error("PAYSTACK_CALLBACK_URL must be https in production");
+      }
+      if (!["https:", "http:"].includes(parsed.protocol)) {
+        throw new Error("PAYSTACK_CALLBACK_URL must be http or https");
+      }
+      return url;
+    } catch (e: any) {
+      if (e.message?.includes("PAYSTACK_CALLBACK_URL")) throw e;
+      throw new Error(`Invalid PAYSTACK_CALLBACK_URL: ${e.message}`);
+    }
+  })(),
 
   cloudinaryUrl: process.env.CLOUDINARY_URL!, // full URL
 
