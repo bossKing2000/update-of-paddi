@@ -151,107 +151,130 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
 
   logger.info({ idempotencyKey, orderIds: orders.map((o) => o.id), amount: totalAmount, channel, channels }, "Initiating payment");
 
-  // Idempotency: reuse existing valid PENDING payment for same checkout batch instead of creating a second Paystack transaction.
-  // Prevents double-click / retry / concurrent duplicate initialization. Respects existing 15-minute payment window.
-  const existingPending = await prisma.payment.findFirst({
-    where: {
-      idempotencyKey,
-      userId,
-      status: { in: [PaymentStatus.PENDING, PaymentStatus.INITIATED] },
-    },
-    orderBy: { createdAt: 'desc' },
-  });
-  if (existingPending && existingPending.expiresAt && isBeforeUtc(now, toUtc(existingPending.expiresAt))) {
-    const existingUrl = (existingPending.paystackData as any)?.authorization_url as string | undefined;
-    logger.info({ idempotencyKey, existingReference: existingPending.reference }, "Reusing existing PENDING payment");
-    return sendCreated(res, {
-      paymentUrl: existingUrl || `https://checkout.paystack.com/${existingPending.reference}`,
-      reference: existingPending.reference,
-      startedAt: (existingPending.startedAt || existingPending.createdAt).toISOString(),
-      expiresAt: existingPending.expiresAt.toISOString(),
-    }, "Payment already initialized");
+  // Concurrency lock: two simultaneous POST /payments/start for the same
+  // batch (double-click, two tabs/WebViews, a client retry racing the
+  // original) can both pass the "any existing PENDING?" check below
+  // before either has written its Payment row, producing two separate
+  // Paystack transactions for one order batch. SET NX EX makes claiming
+  // this idempotencyKey atomic across all instances; only the request
+  // holding the lock may create/reuse a Payment for it. 20s comfortably
+  // covers a Paystack initialize round-trip; the lock is always released
+  // in `finally`, and NX means a crash before release just costs the
+  // next request a short wait for the TTL rather than corrupting state.
+  const initLockKey = `payment:init:${userId}:${idempotencyKey}`;
+  const gotLock = await redisPayments.set(initLockKey, "1", { NX: true, EX: 20 });
+  if (gotLock === null) {
+    // Someone else is mid-initialization for this exact batch right now.
+    // Don't create a competing Paystack transaction — surface a
+    // retry-friendly conflict instead.
+    throw new ConflictError("Payment is already being initialized for this order — please wait a moment and retry.");
   }
 
-  // Record that payment was actually attempted — this field existed in
-  // the schema but was never set anywhere before.
-  await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentInitiatedAt: now } });
-
-  const basePaymentData = {
-    amount: Math.round(totalAmount * 100), // kobo
-    status: PaymentStatus.PENDING,
-    startedAt: now,
-    expiresAt: finalPaymentExpiresAt,
-    channel: channels ? channels.join(",") : channel,
-    ipAddress: ip || "unknown",
-    deviceId,
-    userAgent: userAgent || "unknown",
-    user: { connect: { id: userId } },
-    order: { connect: { id: orders[0].id } }, // primary order — full batch resolved via idempotencyKey
-    idempotencyKey,
-  };
-
-  let paymentInit: any;
   try {
-    paymentInit = await initializePayment(basePaymentData.amount, customer.email, { userId, idempotencyKey, platform: "web" }, {
-      channels,
-      currency: "NGN",
-      callbackUrl: config.paystackCallbackUrl || undefined,
-    });
-  } catch (err: any) {
-    const paystackData = err?.response?.data;
-    const paystackMessage: string = paystackData?.message || err?.message || "Unknown Paystack error";
-    const paystackStatus: number | undefined = err?.response?.status;
-    // Structured logging without secrets
-    logger.error(
-      {
-        err: paystackData || err.message,
-        userId,
+    // Idempotency: reuse existing valid PENDING payment for same checkout batch instead of creating a second Paystack transaction.
+    // Prevents double-click / retry / concurrent duplicate initialization. Respects existing 15-minute payment window.
+    const existingPending = await prisma.payment.findFirst({
+      where: {
         idempotencyKey,
-        amount: basePaymentData.amount,
-        hasEmail: !!customer.email,
-        channels,
-        paystackStatus,
+        userId,
+        status: { in: [PaymentStatus.PENDING, PaymentStatus.INITIATED] },
       },
-      "initializePayment Paystack failed"
-    );
-
-    // Map to customer-friendly but structured error
-    let code: string | undefined;
-    let clientMessage = "Payment service is temporarily unavailable. Your order is saved and you can try payment again from Orders.";
-    if (paystackStatus === 401 || paystackMessage.toLowerCase().includes("invalid key") || paystackMessage.toLowerCase().includes("api key")) {
-      code = "PAYSTACK_INVALID_KEY";
-      clientMessage = "Payment configuration error. Please contact support.";
-    } else if (paystackMessage.toLowerCase().includes("email")) {
-      code = "PAYSTACK_INVALID_EMAIL";
-      clientMessage = "Customer email is invalid. Please update your profile.";
-    } else if (paystackMessage.toLowerCase().includes("amount")) {
-      code = "PAYSTACK_INVALID_AMOUNT";
-    } else if (paystackStatus === 400 && paystackMessage.toLowerCase().includes("channel")) {
-      code = "PAYSTACK_INVALID_CHANNEL";
-      clientMessage = "Selected payment method is not available. Please try another method.";
-    } else if (!paystackStatus) {
-      code = "PAYSTACK_UNAVAILABLE";
+      orderBy: { createdAt: 'desc' },
+    });
+    if (existingPending && existingPending.expiresAt && isBeforeUtc(now, toUtc(existingPending.expiresAt))) {
+      const existingUrl = (existingPending.paystackData as any)?.authorization_url as string | undefined;
+      logger.info({ idempotencyKey, existingReference: existingPending.reference }, "Reusing existing PENDING payment");
+      return sendCreated(res, {
+        paymentUrl: existingUrl || `https://checkout.paystack.com/${existingPending.reference}`,
+        reference: existingPending.reference,
+        startedAt: (existingPending.startedAt || existingPending.createdAt).toISOString(),
+        expiresAt: existingPending.expiresAt.toISOString(),
+      }, "Payment already initialized");
     }
 
-    throw new UpstreamServiceError("Paystack", clientMessage, { provider: "Paystack", paystackStatus, paystackMessage, code, channels } as any);
-  }
-  await prisma.payment.create({
-    data: {
-      ...basePaymentData,
-      reference: paymentInit.reference,
-      paystackData: {
-        authorization_url: paymentInit.authorization_url,
-        access_code: (paymentInit as any).access_code,
-      } as any,
-    },
-  });
+    // Record that payment was actually attempted — this field existed in
+    // the schema but was never set anywhere before.
+    await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentInitiatedAt: now } });
 
-  return sendCreated(res, {
-    paymentUrl: paymentInit.authorization_url,
-    reference: paymentInit.reference,
-    startedAt: now.toISOString(),
-    expiresAt: finalPaymentExpiresAt.toISOString(),
-  }, "Payment initialized successfully");
+    const basePaymentData = {
+      amount: Math.round(totalAmount * 100), // kobo
+      status: PaymentStatus.PENDING,
+      startedAt: now,
+      expiresAt: finalPaymentExpiresAt,
+      channel: channels ? channels.join(",") : channel,
+      ipAddress: ip || "unknown",
+      deviceId,
+      userAgent: userAgent || "unknown",
+      user: { connect: { id: userId } },
+      order: { connect: { id: orders[0].id } }, // primary order — full batch resolved via idempotencyKey
+      idempotencyKey,
+    };
+
+    let paymentInit: any;
+    try {
+      paymentInit = await initializePayment(basePaymentData.amount, customer.email, { userId, idempotencyKey, platform: "web" }, {
+        channels,
+        currency: "NGN",
+        callbackUrl: config.paystackCallbackUrl || undefined,
+      });
+    } catch (err: any) {
+      const paystackData = err?.response?.data;
+      const paystackMessage: string = paystackData?.message || err?.message || "Unknown Paystack error";
+      const paystackStatus: number | undefined = err?.response?.status;
+      // Structured logging without secrets
+      logger.error(
+        {
+          err: paystackData || err.message,
+          userId,
+          idempotencyKey,
+          amount: basePaymentData.amount,
+          hasEmail: !!customer.email,
+          channels,
+          paystackStatus,
+        },
+        "initializePayment Paystack failed"
+      );
+
+      // Map to customer-friendly but structured error
+      let code: string | undefined;
+      let clientMessage = "Payment service is temporarily unavailable. Your order is saved and you can try payment again from Orders.";
+      if (paystackStatus === 401 || paystackMessage.toLowerCase().includes("invalid key") || paystackMessage.toLowerCase().includes("api key")) {
+        code = "PAYSTACK_INVALID_KEY";
+        clientMessage = "Payment configuration error. Please contact support.";
+      } else if (paystackMessage.toLowerCase().includes("email")) {
+        code = "PAYSTACK_INVALID_EMAIL";
+        clientMessage = "Customer email is invalid. Please update your profile.";
+      } else if (paystackMessage.toLowerCase().includes("amount")) {
+        code = "PAYSTACK_INVALID_AMOUNT";
+      } else if (paystackStatus === 400 && paystackMessage.toLowerCase().includes("channel")) {
+        code = "PAYSTACK_INVALID_CHANNEL";
+        clientMessage = "Selected payment method is not available. Please try another method.";
+      } else if (!paystackStatus) {
+        code = "PAYSTACK_UNAVAILABLE";
+      }
+
+      throw new UpstreamServiceError("Paystack", clientMessage, { provider: "Paystack", paystackStatus, paystackMessage, code, channels } as any);
+    }
+    await prisma.payment.create({
+      data: {
+        ...basePaymentData,
+        reference: paymentInit.reference,
+        paystackData: {
+          authorization_url: paymentInit.authorization_url,
+          access_code: (paymentInit as any).access_code,
+        } as any,
+      },
+    });
+
+    return sendCreated(res, {
+      paymentUrl: paymentInit.authorization_url,
+      reference: paymentInit.reference,
+      startedAt: now.toISOString(),
+      expiresAt: finalPaymentExpiresAt.toISOString(),
+    }, "Payment initialized successfully");
+  } finally {
+    await redisPayments.del(initLockKey).catch((err) => logger.warn({ err, initLockKey }, "Failed to release payment init lock"));
+  }
 };
 
 // GET /api/payments/confirm/:reference — post-redirect fallback confirmation
@@ -479,59 +502,72 @@ export const chargeSavedCard = async (req: AuthRequest, res: Response) => {
   const totalAmount = orders.reduce((sum, o) => sum + o.totalPrice, 0);
   const now = nowUtc();
 
-  await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentInitiatedAt: now } });
-
-  let response;
-  try {
-    response = await axios.post(
-      "https://api.paystack.co/transaction/charge_authorization",
-      { authorization_code: card.cardToken, email: userEmail, amount: Math.round(totalAmount * 100) },
-      { headers: { Authorization: `Bearer ${config.paystackSecret}` } }
-    );
-  } catch (err: any) {
-    logger.error({ err: err?.response?.data || err.message, userId, idempotencyKey }, "chargeSavedCard: Paystack request failed");
-    throw new UpstreamServiceError("Paystack", "Failed to charge saved card");
+  // Same concurrent-double-charge race as initiateOrderPayment — see the
+  // comment there. A double-tap on "pay with saved card" can otherwise
+  // fire two charge_authorization calls for the same batch.
+  const initLockKey = `payment:init:${userId}:${idempotencyKey}`;
+  const gotLock = await redisPayments.set(initLockKey, "1", { NX: true, EX: 20 });
+  if (gotLock === null) {
+    throw new ConflictError("Payment is already being initialized for this order — please wait a moment and retry.");
   }
 
-  const data = response.data.data;
+  try {
+    await prisma.order.updateMany({ where: { id: { in: orders.map((o) => o.id) } }, data: { paymentInitiatedAt: now } });
 
-  // Some cards require an OTP even when charging a saved token — the
-  // client needs to collect it and call submitOtp with this reference.
-  if (data.status === "send_otp") {
+    let response;
+    try {
+      response = await axios.post(
+        "https://api.paystack.co/transaction/charge_authorization",
+        { authorization_code: card.cardToken, email: userEmail, amount: Math.round(totalAmount * 100) },
+        { headers: { Authorization: `Bearer ${config.paystackSecret}` } }
+      );
+    } catch (err: any) {
+      logger.error({ err: err?.response?.data || err.message, userId, idempotencyKey }, "chargeSavedCard: Paystack request failed");
+      throw new UpstreamServiceError("Paystack", "Failed to charge saved card");
+    }
+
+    const data = response.data.data;
+
+    // Some cards require an OTP even when charging a saved token — the
+    // client needs to collect it and call submitOtp with this reference.
+    if (data.status === "send_otp") {
+      await prisma.payment.create({
+        data: {
+          userId, orderId: orders[0].id, idempotencyKey, reference: data.reference,
+          amount: Math.round(totalAmount * 100), status: PaymentStatus.INITIATED, channel: "saved_card",
+          expiresAt: addMinutesUtc(now, 15),
+        },
+      });
+      return sendSuccess(res, { requiresOtp: true, reference: data.reference }, "OTP required to complete this charge");
+    }
+
+    if (data.status !== "success") {
+      await createAuditLog({ userId, action: "CHARGE_SAVED_CARD_FAILED", req, metadata: { idempotencyKey, paystackResponse: data } });
+      throw new ValidationError(data.gateway_response || "Charge failed", { paystackStatus: data.status });
+    }
+
     await prisma.payment.create({
       data: {
         userId, orderId: orders[0].id, idempotencyKey, reference: data.reference,
-        amount: Math.round(totalAmount * 100), status: PaymentStatus.INITIATED, channel: "saved_card",
+        amount: Math.round(totalAmount * 100), status: PaymentStatus.PENDING, channel: "saved_card",
         expiresAt: addMinutesUtc(now, 15),
       },
     });
-    return sendSuccess(res, { requiresOtp: true, reference: data.reference }, "OTP required to complete this charge");
+
+    const result = await finalizePaymentSuccess({
+      reference: data.reference,
+      amountInNaira: data.amount / 100,
+      customerIdFromGateway: userId,
+      channel: "saved_card",
+      paystackData: data,
+    });
+
+    await createAuditLog({ userId, action: "CHARGE_SAVED_CARD_SUCCESS", req, metadata: { idempotencyKey, reference: data.reference, outcome: result.outcome } });
+
+    return sendSuccess(res, { reference: data.reference, orders: result.orders }, "Payment successful");
+  } finally {
+    await redisPayments.del(initLockKey).catch((err) => logger.warn({ err, initLockKey }, "Failed to release payment init lock"));
   }
-
-  if (data.status !== "success") {
-    await createAuditLog({ userId, action: "CHARGE_SAVED_CARD_FAILED", req, metadata: { idempotencyKey, paystackResponse: data } });
-    throw new ValidationError(data.gateway_response || "Charge failed", { paystackStatus: data.status });
-  }
-
-  await prisma.payment.create({
-    data: {
-      userId, orderId: orders[0].id, idempotencyKey, reference: data.reference,
-      amount: Math.round(totalAmount * 100), status: PaymentStatus.PENDING, channel: "saved_card",
-      expiresAt: addMinutesUtc(now, 15),
-    },
-  });
-
-  const result = await finalizePaymentSuccess({
-    reference: data.reference,
-    amountInNaira: data.amount / 100,
-    customerIdFromGateway: userId,
-    channel: "saved_card",
-    paystackData: data,
-  });
-
-  await createAuditLog({ userId, action: "CHARGE_SAVED_CARD_SUCCESS", req, metadata: { idempotencyKey, reference: data.reference, outcome: result.outcome } });
-
-  return sendSuccess(res, { reference: data.reference, orders: result.orders }, "Payment successful");
 };
 
 // POST /api/payments/cards/submit-otp

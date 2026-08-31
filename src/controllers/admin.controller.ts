@@ -583,10 +583,18 @@ export const updateRefundStatus = async (req: AuthRequest, res: Response) => {
     );
   }
 
-  if (status === RefundStatus.COMPLETED) {
+  // Submitting a refund to Paystack. Kept on the `status === COMPLETED`
+  // input for API backward-compatibility (that's what admin tooling
+  // already sends), but the refund is NOT actually complete yet — a
+  // POST /refund only means Paystack accepted the request and is
+  // processing it ("pending"/"processing"). Money hasn't moved. The
+  // request is stored as PROCESSING; only the refund.processed webhook
+  // (see webhook.ts) promotes it to COMPLETED, or refund.failed to
+  // FAILED. See https://paystack.com/docs/payments/refunds/#refund-status.
+  if (status === RefundStatus.COMPLETED || status === RefundStatus.PROCESSING) {
     if (refundRequest.status !== RefundStatus.APPROVED) {
       throw new ConflictError(
-        "Refund must be APPROVED before it can be completed",
+        "Refund must be APPROVED before it can be submitted for processing",
       );
     }
 
@@ -595,25 +603,7 @@ export const updateRefundStatus = async (req: AuthRequest, res: Response) => {
     });
     if (!payment) throw new NotFoundError("Payment for this refund request");
 
-    // Idempotency: don't call Paystack a second time if this payment was
-    // somehow already refunded (a retried request, two admins acting on
-    // the same refund, etc.)
-    if (payment.status === PaymentStatus.REFUNDED) {
-      const already = await prisma.refundRequest.update({
-        where: { id },
-        data: {
-          status: RefundStatus.COMPLETED,
-          resolvedByAdminId: req.user!.id,
-          resolvedAt: new Date(),
-        },
-      });
-      return sendSuccess(
-        res,
-        { already },
-        "Payment was already refunded — request marked completed",
-      );
-    }
-    if (payment.status !== PaymentStatus.SUCCESS) {
+    if (payment.status !== PaymentStatus.SUCCESS && payment.status !== PaymentStatus.REFUNDED) {
       throw new ConflictError(
         `Cannot refund a payment with status ${payment.status}`,
       );
@@ -622,75 +612,89 @@ export const updateRefundStatus = async (req: AuthRequest, res: Response) => {
     const refundAmountNaira = amount ? Number(amount) : undefined;
     if (
       refundAmountNaira !== undefined &&
-      (isNaN(refundAmountNaira) ||
-        refundAmountNaira <= 0 ||
-        refundAmountNaira * 100 > payment.amount)
+      (isNaN(refundAmountNaira) || refundAmountNaira <= 0)
     ) {
       throw new ValidationError("Invalid refund amount");
     }
+    const requestedKobo = refundAmountNaira ? Math.round(refundAmountNaira * 100) : undefined;
+
+    // Reserve the amount under a row lock: this is the ledger check that
+    // stops two concurrent partial refunds (two admins, or a retried
+    // request) from both passing an "amount <= remaining" check against
+    // the same stale `refundedAmount` and jointly exceeding what Paystack
+    // will actually let us refund. FOR UPDATE serializes any concurrent
+    // attempt on this exact payment row; the increment happens inside the
+    // same transaction as the read, so there's no window between them.
+    let reservedKobo = 0;
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Payment" WHERE id = ${payment.id} FOR UPDATE`;
+      const fresh = await tx.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      const remaining = fresh.amount - fresh.refundedAmount;
+      if (remaining <= 0) {
+        throw new ConflictError("This payment has already been fully refunded");
+      }
+      reservedKobo = requestedKobo ?? remaining;
+      if (reservedKobo > remaining) {
+        throw new ValidationError(
+          `Refund amount exceeds remaining refundable balance (₦${(remaining / 100).toFixed(2)})`,
+        );
+      }
+      const claimed = await tx.payment.updateMany({
+        where: { id: payment.id, refundedAmount: fresh.refundedAmount },
+        data: { refundedAmount: { increment: reservedKobo } },
+      });
+      if (claimed.count === 0) {
+        // Someone else's transaction committed between our read and
+        // write despite the row lock (shouldn't happen under FOR UPDATE,
+        // but fail loudly rather than silently proceed if it ever does).
+        throw new ConflictError("Refund balance changed concurrently — please retry");
+      }
+    });
 
     let paystackResult;
     try {
-      paystackResult = await refundPaymentViaPaystack(
-        refundRequest.paymentRef,
-        refundAmountNaira ? Math.round(refundAmountNaira * 100) : undefined,
-      );
+      paystackResult = await refundPaymentViaPaystack(refundRequest.paymentRef, requestedKobo);
     } catch (err: any) {
       logger.error(
         { err: err?.response?.data || err.message, refundRequestId: id },
         "Paystack refund failed",
       );
-      // Deliberately don't change any status here — the request stays
-      // APPROVED so an admin can retry, instead of silently drifting into
-      // a state that claims money moved when it didn't.
+      // The reservation above didn't move any real money — release it so
+      // the admin can retry (or a different amount can be attempted)
+      // without the ledger permanently overstating what's been refunded.
+      await prisma.payment.update({
+        where: { id: payment.id },
+        data: { refundedAmount: { decrement: reservedKobo } },
+      });
       throw new UpstreamServiceError(
         "Paystack",
         "Refund failed — no records were changed. You can retry.",
       );
     }
 
-    // Money actually moved — now update our records to match. Covers
-    // every order sharing this payment's idempotencyKey (a multi-vendor
-    // checkout batch), not just a single order.
-    await prisma.$transaction(async (tx) => {
-      await tx.payment.update({
-        where: { id: payment.id },
-        data: { status: PaymentStatus.REFUNDED },
-      });
-
-      const affectedOrders = payment.idempotencyKey
-        ? await tx.order.findMany({
-            where: { idempotencyKey: payment.idempotencyKey },
-          })
-        : [{ id: payment.orderId }];
-
-      await tx.order.updateMany({
-        where: { id: { in: affectedOrders.map((o) => o.id) } },
-        data: {
-          paymentStatus: PaymentStatus.REFUNDED,
-          status: OrderStatus.CANCELLED,
-          cancellationReason: "REFUNDED",
-          cancelledAt: new Date(),
-        },
-      });
-
-      await tx.refundRequest.update({
-        where: { id },
-        data: {
-          status: RefundStatus.COMPLETED,
-          resolvedByAdminId: req.user!.id,
-          resolvedAt: new Date(),
-        },
-      });
+    const updated = await prisma.refundRequest.update({
+      where: { id },
+      data: {
+        status: RefundStatus.PROCESSING,
+        resolvedByAdminId: req.user!.id,
+        resolvedAt: new Date(),
+        requestedAmountKobo: reservedKobo,
+        paystackRefundId: paystackResult?.id != null ? String(paystackResult.id) : null,
+      },
     });
 
-    await auditAdmin(req, "ADMIN_REFUND_COMPLETED", {
+    await auditAdmin(req, "ADMIN_REFUND_SUBMITTED", {
       refundRequestId: id,
       paystackReference: refundRequest.paymentRef,
+      reservedKobo,
       paystackResult,
     });
 
-    return sendSuccess(res, {}, "Refund completed successfully");
+    return sendSuccess(
+      res,
+      { refundRequest: updated },
+      "Refund submitted to Paystack — it will be marked complete once Paystack confirms the transfer.",
+    );
   }
 
   throw new ValidationError("Unsupported status transition");

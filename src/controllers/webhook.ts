@@ -6,6 +6,17 @@ import { redisPayments } from "../lib/redis";
 import { logger } from "../lib/logger";
 import { createAuditLog } from "../utils/auditLog.service";
 import { finalizePaymentSuccess } from "../services/paymentFinalizer.service";
+import { RefundStatus, PaymentStatus, OrderStatus } from "@prisma/client";
+
+// Events that only report Paystack's own transaction/refund lifecycle,
+// not a charge. Handled separately from the charge.success finalize path.
+const REFUND_EVENTS = [
+  "refund.pending",
+  "refund.processing",
+  "refund.needs-attention",
+  "refund.failed",
+  "refund.processed",
+] as const;
 
 // ==================== CONSTANTS ====================
 // Paystack retries live webhooks: every 3 mins for 4 tries, then hourly for 72h (https://paystack.com/docs/payments/webhooks/#go-live-checklist).
@@ -48,9 +59,14 @@ async function checkRateLimit(
 // webhook every time — replay protection that could never actually fire.
 // The key here is derived only from the event's own stable fields.
 function computeWebhookId(eventPayload: any): string {
+  // Refund events key off transaction_reference/refund_reference instead
+  // of `reference` (charge/transfer events). Falling back to `reference`
+  // only would make every refund event for a given amount collide on the
+  // same replay-dedup key regardless of which transaction it belongs to.
   const stable = {
     event: eventPayload?.event,
-    reference: eventPayload?.data?.reference,
+    reference: eventPayload?.data?.reference ?? eventPayload?.data?.transaction_reference,
+    refundReference: eventPayload?.data?.refund_reference,
     amount: eventPayload?.data?.amount,
   };
   return crypto
@@ -86,18 +102,34 @@ function validatePaystackWebhook(payload: any): {
         reusable: boolean;
         channel?: string;
       };
+      // refund.* events only
+      status?: string;
+      transaction_reference?: string;
+      refund_reference?: string | null;
     };
   };
   error?: string;
 } {
   if (!payload || typeof payload !== "object")
     return { valid: false, error: "Invalid payload format" };
+
+  const isRefundEvent = (REFUND_EVENTS as readonly string[]).includes(payload.event);
   if (
+    !isRefundEvent &&
     !["charge.success", "transfer.success", "transfer.failed"].includes(
       payload.event,
     )
   )
     return { valid: false, error: "Unsupported event type" };
+
+  if (isRefundEvent) {
+    // Refund events identify the transaction via transaction_reference,
+    // not `reference` — see https://paystack.com/docs/payments/refunds/#listen-to-notifications
+    if (!payload.data?.transaction_reference)
+      return { valid: false, error: "Missing transaction_reference" };
+    return { valid: true, data: payload };
+  }
+
   if (!payload.data?.reference)
     return { valid: false, error: "Missing reference" };
   if (!payload.data?.amount) return { valid: false, error: "Missing amount" };
@@ -185,8 +217,119 @@ export const paystackWebhookHandler = async (req: Request, res: Response) => {
     await createAuditLog({
       userId: metadata?.userId || null,
       action: "WEBHOOK_RECEIVED",
-      metadata: { requestId, webhookId, reference, amount, ip: req.ip },
+      metadata: {
+        requestId,
+        webhookId,
+        reference: reference || data.transaction_reference,
+        amount,
+        ip: req.ip,
+      },
     });
+
+    // 5a) REFUND LIFECYCLE. The admin's POST /refund only tells Paystack
+    // to start a refund — it responds "pending"/"queued", not "done".
+    // These events are the actual confirmation. Only refund.processed
+    // and refund.failed change any record; the others (pending,
+    // processing, needs-attention) are logged for visibility only.
+    if ((REFUND_EVENTS as readonly string[]).includes(event)) {
+      const transactionReference = data.transaction_reference!;
+      const refundReference = data.refund_reference ?? undefined;
+      const amountKobo = data.amount != null ? Number(data.amount) : undefined;
+
+      if (event !== "refund.processed" && event !== "refund.failed") {
+        log.info({ event, transactionReference, refundReference }, "Refund status update (non-terminal)");
+        return res.status(200).send("Refund webhook acknowledged");
+      }
+
+      // Multiple partial refunds can be PROCESSING for the same payment
+      // at once, so narrow by amount (and Paystack's own refund id, once
+      // we've seen it) to find the specific request this event confirms.
+      const refundRequest = await prisma.refundRequest.findFirst({
+        where: {
+          paymentRef: transactionReference,
+          status: RefundStatus.PROCESSING,
+          ...(refundReference ? { OR: [{ paystackRefundId: refundReference }, { paystackRefundId: null }] } : {}),
+          ...(amountKobo != null ? { requestedAmountKobo: amountKobo } : {}),
+        },
+        orderBy: { resolvedAt: "asc" },
+      });
+
+      if (!refundRequest) {
+        log.warn(
+          { event, transactionReference, refundReference, amountKobo },
+          "Refund webhook: no matching PROCESSING refund request found (already resolved, or amount/reference mismatch)",
+        );
+        return res.status(200).send("Refund webhook ignored — no matching request");
+      }
+
+      const payment = await prisma.payment.findUnique({ where: { reference: transactionReference } });
+      if (!payment) {
+        log.warn({ transactionReference, refundRequestId: refundRequest.id }, "Refund webhook: payment not found");
+        return res.status(200).send("Refund webhook ignored — payment not found");
+      }
+
+      if (event === "refund.processed") {
+        await prisma.$transaction(async (tx) => {
+          await tx.refundRequest.update({
+            where: { id: refundRequest.id },
+            data: {
+              status: RefundStatus.COMPLETED,
+              paystackRefundId: refundReference ?? refundRequest.paystackRefundId,
+            },
+          });
+
+          // Only flip the payment/orders to REFUNDED once the ledger
+          // shows the full amount has actually gone back — a partial
+          // refund shouldn't cancel an order that's still partly paid.
+          const fresh = await tx.payment.findUniqueOrThrow({ where: { id: payment.id } });
+          if (fresh.refundedAmount >= fresh.amount && fresh.status !== PaymentStatus.REFUNDED) {
+            await tx.payment.update({ where: { id: payment.id }, data: { status: PaymentStatus.REFUNDED } });
+            const affectedOrders = fresh.idempotencyKey
+              ? await tx.order.findMany({ where: { idempotencyKey: fresh.idempotencyKey } })
+              : [{ id: fresh.orderId }];
+            await tx.order.updateMany({
+              where: { id: { in: affectedOrders.map((o) => o.id) } },
+              data: {
+                paymentStatus: PaymentStatus.REFUNDED,
+                status: OrderStatus.CANCELLED,
+                cancellationReason: "REFUNDED",
+                cancelledAt: new Date(),
+              },
+            });
+          }
+        });
+
+        await createAuditLog({
+          userId: null,
+          action: "REFUND_PROCESSED",
+          metadata: { refundRequestId: refundRequest.id, transactionReference, amountKobo },
+        });
+        log.info({ refundRequestId: refundRequest.id, transactionReference }, "Refund processed");
+      } else {
+        // refund.failed — Paystack couldn't move the money; release the
+        // reservation we placed on the ledger when the admin submitted it,
+        // so the balance is refundable again (retry, or a different amount).
+        await prisma.$transaction([
+          prisma.payment.update({
+            where: { id: payment.id },
+            data: { refundedAmount: { decrement: refundRequest.requestedAmountKobo ?? amountKobo ?? 0 } },
+          }),
+          prisma.refundRequest.update({
+            where: { id: refundRequest.id },
+            data: { status: RefundStatus.FAILED, paystackRefundId: refundReference ?? refundRequest.paystackRefundId },
+          }),
+        ]);
+
+        await createAuditLog({
+          userId: null,
+          action: "REFUND_FAILED",
+          metadata: { refundRequestId: refundRequest.id, transactionReference, amountKobo },
+        });
+        log.warn({ refundRequestId: refundRequest.id, transactionReference }, "Refund failed");
+      }
+
+      return res.status(200).send("Refund webhook processed");
+    }
 
     // 5) SETTLE RIDER TRANSFERS. Wallets are debited only once a signed
     // transfer-success webhook arrives; a transfer failure releases the

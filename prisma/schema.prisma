@@ -540,6 +540,12 @@ model Payment {
   isProcessing        Boolean   @default(false)
   processingStartedAt DateTime?
 
+  // Ledger of how much of this payment has been refunded so far, in kobo.
+  // Reserved (incremented) inside a locked transaction before calling
+  // Paystack's refund endpoint, so two concurrent partial refunds can't
+  // both pass an "amount <= remaining" check against a stale read.
+  refundedAmount Int @default(0)
+
   user  User  @relation("UserPayments", fields: [userId], references: [id])
   order Order @relation("OrderPayments", fields: [orderId], references: [id])
 
@@ -778,6 +784,18 @@ model RefundRequest {
   resolvedAt         DateTime?
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt
+
+  // Set when the admin submits the refund to Paystack (APPROVED -> PROCESSING).
+  // Paystack's own refund id/reference — used to match the async
+  // refund.processed / refund.failed webhook back to this request,
+  // since Paystack can be refunding one of several partial requests
+  // against the same paymentRef.
+  paystackRefundId    String?
+  // The amount (kobo) actually submitted to Paystack for this request;
+  // null means a full refund of whatever remained on the payment.
+  requestedAmountKobo Int?
+
+  @@index([paystackRefundId])
 }
 
 enum PayoutStatus {
@@ -791,7 +809,15 @@ enum RefundStatus {
   PENDING
   APPROVED
   REJECTED
+  // Paystack has accepted the refund request and is processing it —
+  // money has not moved to the customer yet. Set after the POST /refund
+  // call succeeds; only refund.processed webhook promotes to COMPLETED.
+  PROCESSING
   COMPLETED
+  // Paystack could not complete the refund (refund.failed webhook) —
+  // the reserved amount is released back onto the payment so it can be
+  // retried or a different amount refunded.
+  FAILED
 }
 
 model Cart {
