@@ -14,6 +14,9 @@ import { setupSearch } from "./lib/setupSearch";
 import { errorHandler, notFoundHandler } from "./middlewares/error.middleware";
 import { requestIdMiddleware } from "./middlewares/requestId.middleware";
 import { authenticate, authorizeAdmin } from "./middlewares/auth.middleware";
+import pino from "pino";
+import morgan from "morgan";
+import chalk from "chalk";
 import { logger } from "./lib/logger";
 import pinoHttp from "pino-http";
 import swaggerUi from "swagger-ui-express";
@@ -96,24 +99,79 @@ if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 // log below) is tagged with it, so a single request is traceable end to end.
 app.use(requestIdMiddleware);
 
-// Structured HTTP access logging (replaces morgan+chalk). JSON in
-// production for log aggregators, pretty-printed in dev via the same
-// pino instance used everywhere else in the app.
-app.use(
-  pinoHttp({
-    logger,
-    genReqId: (req) => (req as any).id,
-    customLogLevel: (_req, res, err) => {
-      if (err || res.statusCode >= 500) return "error";
-      if (res.statusCode >= 400) return "warn";
-      return "info";
-    },
-    // Don't spam logs with successful health-check pings.
-    autoLogging: {
-      ignore: (req) => req.url === "/healthz",
-    },
-  }),
-);
+// HTTP access logging: human-readable + colored in development (morgan+chalk style),
+// structured JSON in production (pino-http for Render log aggregators).
+if (config.isProduction) {
+  // Production: concise JSON, no headers/query/remotePort spam
+  app.use(
+    pinoHttp({
+      logger,
+      genReqId: (req) => (req as any).id,
+      customLogLevel: (_req, res, err) => {
+        if (err || res.statusCode >= 500) return "error";
+        if (res.statusCode >= 400) return "warn";
+        return "info";
+      },
+      autoLogging: {
+        ignore: (req) =>
+          req.url === "/healthz" ||
+          req.url === "/readyz" ||
+          req.url === "/favicon.ico" ||
+          req.url.startsWith("/favicon.ico"),
+      },
+      serializers: {
+        req: (req) => ({ method: req.method, url: req.url }),
+        res: (res) => ({ statusCode: res.statusCode }),
+        err: pino.stdSerializers.err,
+      },
+    }),
+  );
+} else {
+  // Development: Morgan + Chalk — e.g. 🟢 GET  /api/product/       200   120ms
+  // Restores previous morgan style but via same method/status colors described in spec.
+  const devFormat = (tokens: any, req: any, res: any) => {
+    const method = tokens.method(req, res);
+    const url = tokens.url(req, res);
+    const status = Number(tokens.status(req, res) || 0);
+    const time = tokens["response-time"](req, res);
+
+    let emoji = "🟢";
+    let statusColor: any = chalk.green;
+    if (status >= 500) {
+      statusColor = chalk.red;
+      emoji = "🔴";
+    } else if (status >= 400) {
+      statusColor = chalk.yellow;
+      emoji = "🔴";
+    } else if (status >= 300) {
+      statusColor = chalk.cyan;
+      emoji = "🟡";
+    }
+
+    let methodColor: any = chalk.white;
+    if (method === "GET") methodColor = chalk.green;
+    else if (method === "POST") methodColor = chalk.yellow;
+    else if (method === "PUT" || method === "PATCH") methodColor = chalk.blue;
+    else if (method === "DELETE") methodColor = chalk.red;
+
+    // Keep method 6 chars, url 30, status 3, time ~6 — no headers/query noise
+    const m = methodColor(method.padEnd(6));
+    const u = url.padEnd(30);
+    const s = statusColor(String(status).padStart(3));
+    const t = chalk.gray(`${time}ms`.padStart(7));
+    return `${emoji} ${m} ${u} ${s}  ${t}`;
+  };
+
+  app.use(
+    morgan(devFormat, {
+      skip: (req: any) =>
+        req.url === "/healthz" ||
+        req.url === "/readyz" ||
+        req.url === "/favicon.ico" ||
+        req.url.startsWith("/favicon.ico"),
+    }),
+  );
+}
 
 app.use(helmet());
 
