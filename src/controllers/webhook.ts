@@ -6,7 +6,7 @@ import { redisPayments } from "../lib/redis";
 import { logger } from "../lib/logger";
 import { createAuditLog } from "../utils/auditLog.service";
 import { finalizePaymentSuccess } from "../services/paymentFinalizer.service";
-import { RefundStatus, PaymentStatus, OrderStatus } from "@prisma/client";
+import { matchRefundRequest, completeRefund, failRefund } from "../services/refundFinalizer.service";
 
 // Events that only report Paystack's own transaction/refund lifecycle,
 // not a charge. Handled separately from the charge.success finalize path.
@@ -241,91 +241,91 @@ export const paystackWebhookHandler = async (req: Request, res: Response) => {
         return res.status(200).send("Refund webhook acknowledged");
       }
 
-      // Multiple partial refunds can be PROCESSING for the same payment
-      // at once, so narrow by amount (and Paystack's own refund id, once
-      // we've seen it) to find the specific request this event confirms.
-      const refundRequest = await prisma.refundRequest.findFirst({
-        where: {
-          paymentRef: transactionReference,
-          status: RefundStatus.PROCESSING,
-          ...(refundReference ? { OR: [{ paystackRefundId: refundReference }, { paystackRefundId: null }] } : {}),
-          ...(amountKobo != null ? { requestedAmountKobo: amountKobo } : {}),
-        },
-        orderBy: { resolvedAt: "asc" },
-      });
+      const match = await matchRefundRequest({ transactionReference, refundReference, amountKobo });
 
-      if (!refundRequest) {
-        log.warn(
+      if (match.kind === "amount_mismatch") {
+        // A PROCESSING refund exists for this payment, but none of the
+        // candidates requested the amount this webhook reports. Refusing
+        // to complete an unexpected amount is the existing (correct)
+        // safety behavior — what was missing was making it observable
+        // instead of a silent 200.
+        logger.error(
+          {
+            event,
+            paymentRef: transactionReference,
+            transactionReference,
+            refundReference,
+            expectedAmountsKobo: match.candidates.map((c) => c.requestedAmountKobo),
+            receivedAmountKobo: amountKobo,
+            candidateRefundRequestIds: match.candidates.map((c) => c.id),
+          },
+          "Refund webhook amount mismatch — refusing to complete",
+        );
+        await createAuditLog({
+          userId: null,
+          action: "REFUND_WEBHOOK_AMOUNT_MISMATCH",
+          metadata: {
+            event,
+            transactionReference,
+            refundReference,
+            expectedAmountsKobo: match.candidates.map((c) => c.requestedAmountKobo),
+            receivedAmountKobo: amountKobo,
+            candidateRefundRequestIds: match.candidates.map((c) => c.id),
+          },
+        });
+        // 200 so Paystack doesn't retry-storm us over something a retry
+        // can't fix — the mismatch is now logged/audited for a human to
+        // investigate, but the ledger and every RefundRequest are untouched.
+        return res.status(200).send("Refund webhook received — amount did not match any pending refund, left unresolved");
+      }
+
+      if (match.kind === "ambiguous") {
+        // Two or more same-amount partial refunds are PROCESSING with no
+        // recorded Paystack id yet — we cannot tell which one this event
+        // confirms. Guessing risks completing the wrong RefundRequest.
+        logger.error(
+          {
+            event,
+            transactionReference,
+            refundReference,
+            amountKobo,
+            candidateRefundRequestIds: match.candidates.map((c) => c.id),
+          },
+          "Refund webhook matched multiple ambiguous PROCESSING refund requests — refusing to guess",
+        );
+        await createAuditLog({
+          userId: null,
+          action: "REFUND_WEBHOOK_AMBIGUOUS_MATCH",
+          metadata: {
+            event,
+            transactionReference,
+            refundReference,
+            amountKobo,
+            candidateRefundRequestIds: match.candidates.map((c) => c.id),
+          },
+        });
+        return res.status(200).send("Refund webhook received — ambiguous match, left unresolved for reconciliation");
+      }
+
+      if (match.kind === "not_found") {
+        // Not necessarily a problem — could be a refund from before this
+        // matching logic existed, or a duplicate delivery for a request
+        // that's already resolved and had its id cleared. Informational.
+        log.info(
           { event, transactionReference, refundReference, amountKobo },
-          "Refund webhook: no matching PROCESSING refund request found (already resolved, or amount/reference mismatch)",
+          "Refund webhook: no matching request found (already resolved, or not ours)",
         );
         return res.status(200).send("Refund webhook ignored — no matching request");
       }
 
-      const payment = await prisma.payment.findUnique({ where: { reference: transactionReference } });
-      if (!payment) {
-        log.warn({ transactionReference, refundRequestId: refundRequest.id }, "Refund webhook: payment not found");
-        return res.status(200).send("Refund webhook ignored — payment not found");
-      }
+      const refundRequest = match.request;
 
       if (event === "refund.processed") {
-        await prisma.$transaction(async (tx) => {
-          await tx.refundRequest.update({
-            where: { id: refundRequest.id },
-            data: {
-              status: RefundStatus.COMPLETED,
-              paystackRefundId: refundReference ?? refundRequest.paystackRefundId,
-            },
-          });
-
-          // Only flip the payment/orders to REFUNDED once the ledger
-          // shows the full amount has actually gone back — a partial
-          // refund shouldn't cancel an order that's still partly paid.
-          const fresh = await tx.payment.findUniqueOrThrow({ where: { id: payment.id } });
-          if (fresh.refundedAmount >= fresh.amount && fresh.status !== PaymentStatus.REFUNDED) {
-            await tx.payment.update({ where: { id: payment.id }, data: { status: PaymentStatus.REFUNDED } });
-            const affectedOrders = fresh.idempotencyKey
-              ? await tx.order.findMany({ where: { idempotencyKey: fresh.idempotencyKey } })
-              : [{ id: fresh.orderId }];
-            await tx.order.updateMany({
-              where: { id: { in: affectedOrders.map((o) => o.id) } },
-              data: {
-                paymentStatus: PaymentStatus.REFUNDED,
-                status: OrderStatus.CANCELLED,
-                cancellationReason: "REFUNDED",
-                cancelledAt: new Date(),
-              },
-            });
-          }
-        });
-
-        await createAuditLog({
-          userId: null,
-          action: "REFUND_PROCESSED",
-          metadata: { refundRequestId: refundRequest.id, transactionReference, amountKobo },
-        });
-        log.info({ refundRequestId: refundRequest.id, transactionReference }, "Refund processed");
+        const result = await completeRefund(refundRequest.id, { paystackRefundId: refundReference ?? null, source: "webhook" });
+        log.info({ refundRequestId: refundRequest.id, transactionReference, result }, "Refund processed");
       } else {
-        // refund.failed — Paystack couldn't move the money; release the
-        // reservation we placed on the ledger when the admin submitted it,
-        // so the balance is refundable again (retry, or a different amount).
-        await prisma.$transaction([
-          prisma.payment.update({
-            where: { id: payment.id },
-            data: { refundedAmount: { decrement: refundRequest.requestedAmountKobo ?? amountKobo ?? 0 } },
-          }),
-          prisma.refundRequest.update({
-            where: { id: refundRequest.id },
-            data: { status: RefundStatus.FAILED, paystackRefundId: refundReference ?? refundRequest.paystackRefundId },
-          }),
-        ]);
-
-        await createAuditLog({
-          userId: null,
-          action: "REFUND_FAILED",
-          metadata: { refundRequestId: refundRequest.id, transactionReference, amountKobo },
-        });
-        log.warn({ refundRequestId: refundRequest.id, transactionReference }, "Refund failed");
+        const result = await failRefund(refundRequest.id, { source: "webhook" });
+        log.warn({ refundRequestId: refundRequest.id, transactionReference, result }, "Refund failed");
       }
 
       return res.status(200).send("Refund webhook processed");

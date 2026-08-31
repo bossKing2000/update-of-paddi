@@ -47,12 +47,41 @@ jest.mock("../../src/lib/prisma", () => ({
   },
 }));
 
-jest.mock("../../src/lib/redis", () => ({
-  __esModule: true,
-  redisProducts: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
-  redisSearch: { get: jest.fn(), set: jest.fn() },
-  ShopCartRedis: { get: jest.fn(), set: jest.fn() },
-}));
+jest.mock("../../src/lib/redis", () => {
+  // Minimal in-memory stand-in for the redis@5 client surface that
+  // src/lib/redisLock.ts actually calls (`set` with NX/EX, and `eval`
+  // for the ownership-checked release). This mirrors real Redis
+  // semantics closely enough to exercise the real acquireLock/
+  // releaseLock code paths, rather than stubbing them out.
+  const store = new Map<string, string>();
+  const redisPayments = {
+    set: jest.fn(async (key: string, value: string, opts?: { NX?: boolean; EX?: number }) => {
+      if (opts?.NX && store.has(key)) return null;
+      store.set(key, value);
+      return "OK";
+    }),
+    eval: jest.fn(async (_script: string, options: { keys: string[]; arguments: string[] }) => {
+      const [key] = options.keys;
+      const [token] = options.arguments;
+      if (store.get(key) === token) {
+        store.delete(key);
+        return 1;
+      }
+      return 0;
+    }),
+    del: jest.fn(async (key: string) => {
+      const existed = store.delete(key);
+      return existed ? 1 : 0;
+    }),
+  };
+  return {
+    __esModule: true,
+    redisProducts: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+    redisSearch: { get: jest.fn(), set: jest.fn() },
+    ShopCartRedis: { get: jest.fn(), set: jest.fn() },
+    redisPayments,
+  };
+});
 
 jest.mock("../../src/lib/redisScan", () => ({
   __esModule: true,

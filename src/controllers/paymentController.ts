@@ -17,6 +17,7 @@ import { ensureString } from "../utils/paramUtils";
 import { nowUtc, toUtc, addMinutesUtc, isBeforeUtc } from "../utils/time";
 import { logger } from "../lib/logger";
 import { redisPayments } from "../lib/redis";
+import { acquireLock, releaseLock } from "../lib/redisLock";
 import { SUPPORTED_CHANNELS } from "../services/paymentService";
 
 // Single source — paymentService is authority for allowed channels.
@@ -162,8 +163,8 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
   // in `finally`, and NX means a crash before release just costs the
   // next request a short wait for the TTL rather than corrupting state.
   const initLockKey = `payment:init:${userId}:${idempotencyKey}`;
-  const gotLock = await redisPayments.set(initLockKey, "1", { NX: true, EX: 20 });
-  if (gotLock === null) {
+  const lock = await acquireLock(redisPayments, initLockKey, 20);
+  if (lock === null) {
     // Someone else is mid-initialization for this exact batch right now.
     // Don't create a competing Paystack transaction — surface a
     // retry-friendly conflict instead.
@@ -273,7 +274,10 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
       expiresAt: finalPaymentExpiresAt.toISOString(),
     }, "Payment initialized successfully");
   } finally {
-    await redisPayments.del(initLockKey).catch((err) => logger.warn({ err, initLockKey }, "Failed to release payment init lock"));
+    const released = await releaseLock(redisPayments, lock);
+    if (!released) {
+      logger.warn({ initLockKey }, "Payment init lock had already expired/been reassigned by release time");
+    }
   }
 };
 
@@ -506,8 +510,8 @@ export const chargeSavedCard = async (req: AuthRequest, res: Response) => {
   // comment there. A double-tap on "pay with saved card" can otherwise
   // fire two charge_authorization calls for the same batch.
   const initLockKey = `payment:init:${userId}:${idempotencyKey}`;
-  const gotLock = await redisPayments.set(initLockKey, "1", { NX: true, EX: 20 });
-  if (gotLock === null) {
+  const lock = await acquireLock(redisPayments, initLockKey, 20);
+  if (lock === null) {
     throw new ConflictError("Payment is already being initialized for this order — please wait a moment and retry.");
   }
 
@@ -566,7 +570,10 @@ export const chargeSavedCard = async (req: AuthRequest, res: Response) => {
 
     return sendSuccess(res, { reference: data.reference, orders: result.orders }, "Payment successful");
   } finally {
-    await redisPayments.del(initLockKey).catch((err) => logger.warn({ err, initLockKey }, "Failed to release payment init lock"));
+    const released = await releaseLock(redisPayments, lock);
+    if (!released) {
+      logger.warn({ initLockKey }, "Payment init lock had already expired/been reassigned by release time");
+    }
   }
 };
 

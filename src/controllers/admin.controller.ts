@@ -25,7 +25,8 @@ import {
 import { createAuditLog } from "../utils/auditLog.service";
 import { deleteAllUserSessions } from "../lib/session";
 import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
-import { refundPaymentViaPaystack } from "../services/refundService";
+import { refundPaymentViaPaystack, classifyRefundSubmitError } from "../services/refundService";
+import { failRefund } from "../services/refundFinalizer.service";
 import {
   createTransferRecipient,
   initiateTransfer,
@@ -618,13 +619,23 @@ export const updateRefundStatus = async (req: AuthRequest, res: Response) => {
     }
     const requestedKobo = refundAmountNaira ? Math.round(refundAmountNaira * 100) : undefined;
 
-    // Reserve the amount under a row lock: this is the ledger check that
-    // stops two concurrent partial refunds (two admins, or a retried
-    // request) from both passing an "amount <= remaining" check against
-    // the same stale `refundedAmount` and jointly exceeding what Paystack
-    // will actually let us refund. FOR UPDATE serializes any concurrent
-    // attempt on this exact payment row; the increment happens inside the
-    // same transaction as the read, so there's no window between them.
+    // Reserve the amount AND persist a durable PROCESSING record in the
+    // SAME transaction, BEFORE ever calling Paystack. This closes the
+    // crash gap the previous version had: if the process died between
+    // "Paystack accepted the refund" and "we recorded that here", the
+    // refund.processed webhook would arrive to find this request still
+    // APPROVED with no paystackRefundId/requestedAmountKobo to match
+    // against, and reconciliation would have nothing to look for either.
+    // Now the PROCESSING row (and the amount it's for) exists before we
+    // ever leave the building — a crash after this point still leaves
+    // something for the webhook or verifyPendingRefunds to find.
+    //
+    // The row lock (FOR UPDATE) is what stops two concurrent partial
+    // refunds (two admins, or a retried request) from both passing an
+    // "amount <= remaining" check against the same stale `refundedAmount`
+    // and jointly exceeding what Paystack will actually let us refund —
+    // the read and the reservation increment happen inside one
+    // transaction, so there's no window between them.
     let reservedKobo = 0;
     await prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Payment" WHERE id = ${payment.id} FOR UPDATE`;
@@ -649,36 +660,58 @@ export const updateRefundStatus = async (req: AuthRequest, res: Response) => {
         // but fail loudly rather than silently proceed if it ever does).
         throw new ConflictError("Refund balance changed concurrently — please retry");
       }
+
+      // Durable BEFORE Paystack is ever called. paystackRefundId stays
+      // null until Paystack tells us its id — that's fine, matching can
+      // still find this row by paymentRef + PROCESSING + no id yet.
+      await tx.refundRequest.update({
+        where: { id },
+        data: {
+          status: RefundStatus.PROCESSING,
+          adminNote: adminNote ?? refundRequest.adminNote,
+          resolvedByAdminId: req.user!.id,
+          resolvedAt: new Date(),
+          requestedAmountKobo: reservedKobo,
+        },
+      });
     });
 
     let paystackResult;
     try {
       paystackResult = await refundPaymentViaPaystack(refundRequest.paymentRef, requestedKobo);
     } catch (err: any) {
+      const classification = classifyRefundSubmitError(err);
       logger.error(
-        { err: err?.response?.data || err.message, refundRequestId: id },
-        "Paystack refund failed",
+        { err: err?.response?.data || err.message, refundRequestId: id, classification },
+        "Paystack refund submission errored",
       );
-      // The reservation above didn't move any real money — release it so
-      // the admin can retry (or a different amount can be attempted)
-      // without the ledger permanently overstating what's been refunded.
-      await prisma.payment.update({
-        where: { id: payment.id },
-        data: { refundedAmount: { decrement: reservedKobo } },
-      });
+
+      if (classification === "definite_failure") {
+        // Paystack received our request and told us, definitively, that
+        // no refund was created — safe to release the reservation.
+        await failRefund(id, { source: "admin_sync" });
+        throw new UpstreamServiceError(
+          "Paystack",
+          "Refund failed — no records were changed. You can retry.",
+        );
+      }
+
+      // UNKNOWN outcome: a timeout or dropped connection means we
+      // genuinely don't know whether Paystack created the refund before
+      // we lost the response. Do NOT release the reservation and do NOT
+      // let the admin blindly retry from here — the PROCESSING record
+      // stays as-is and verifyPendingRefunds will reconcile it against
+      // Paystack's own records shortly.
       throw new UpstreamServiceError(
         "Paystack",
-        "Refund failed — no records were changed. You can retry.",
+        "Paystack didn't confirm whether this refund was created — the outcome is unknown, not failed. It's marked PROCESSING and will be reconciled automatically; do not resubmit.",
+        { code: "REFUND_OUTCOME_UNKNOWN" } as any,
       );
     }
 
     const updated = await prisma.refundRequest.update({
       where: { id },
       data: {
-        status: RefundStatus.PROCESSING,
-        resolvedByAdminId: req.user!.id,
-        resolvedAt: new Date(),
-        requestedAmountKobo: reservedKobo,
         paystackRefundId: paystackResult?.id != null ? String(paystackResult.id) : null,
       },
     });

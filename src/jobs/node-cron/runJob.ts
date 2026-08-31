@@ -2,6 +2,7 @@ import cron from "node-cron";
 import { runOrderCleanupJob } from "../workers jobs/orderCleanupJob";
 import { runExpireAwaitingPaymentJob } from "../workers jobs/expireAwaitingPaymentJob";
 import { verifyPendingPayments } from "../payment/worker/verifyPendingPayments";
+import { verifyPendingRefunds } from "../payment/worker/verifyPendingRefunds";
 import { fixLiveStatusJob } from "../workers jobs/fixLiveStatusJob";
 import { DeliveryAssignmentService } from "../../services/deliveryAssignment";
 import { logger } from "../../lib/logger";
@@ -40,6 +41,22 @@ cron.schedule("*/1 * * * *", async () => {
     await verifyPendingPayments();
   } catch (err) {
     logger.error({ err }, "[CRON] Verify pending payments failed");
+  }
+});
+
+/**
+ * 💸 Reconcile PROCESSING Refunds
+ * Runs every 10 minutes. Catches refunds whose Paystack outcome is
+ * unknown — a webhook that never arrived, or a crash between reserving
+ * the amount and recording Paystack's refund id. Never resubmits a
+ * refund; only reads Paystack's existing records and reconciles local
+ * state to match. See verifyPendingRefunds.ts.
+ */
+cron.schedule("*/10 * * * *", async () => {
+  try {
+    await verifyPendingRefunds();
+  } catch (err) {
+    logger.error({ err }, "[CRON] Verify pending refunds failed");
   }
 });
 
