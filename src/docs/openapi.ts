@@ -269,7 +269,7 @@ export const openApiDocument = {
     "/order/batch/{idempotencyKey}": {
       get: {
         tags: ["Orders"],
-        summary: "Retrieve all orders belonging to a checkout batch by idempotencyKey",
+        summary: "Retrieve the complete checkout batch by idempotencyKey",
         parameters: [
           { name: "idempotencyKey", in: "path", required: true, schema: { type: "string" }, description: "The idempotency key shared by all orders in the checkout batch" },
         ],

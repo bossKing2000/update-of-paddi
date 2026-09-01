@@ -207,7 +207,39 @@ export const getOrderBatch = async (req: AuthRequest, res: Response) => {
     throw new NotFoundError("Order batch");
   }
 
-  return sendSuccess(res, { orders }, "Order batch retrieved successfully");
+  // Calculate batch aggregates
+  const orderCount = orders.length;
+  const total = orders.reduce((sum, o) => sum + o.totalPrice, 0);
+
+  // Determine batch payment status from individual order payment statuses
+  const paymentStatuses = orders.map((o) => o.paymentStatus);
+  const allSucceeded = paymentStatuses.every((s) => s === "SUCCESS");
+  const allFailed = paymentStatuses.every((s) => s !== "PENDING" && s !== "INITIATED" && s !== "SUCCESS");
+  const someSucceeded = paymentStatuses.some((s) => s === "SUCCESS");
+  const hasPending = paymentStatuses.some((s) => s === "PENDING" || s === "INITIATED");
+
+  let paymentStatus: string;
+  if (allSucceeded) {
+    paymentStatus = "SUCCESS";
+  } else if (allFailed) {
+    paymentStatus = "FAILED";
+  } else if (someSucceeded && hasPending) {
+    paymentStatus = "PARTIAL";
+  } else if (hasPending) {
+    paymentStatus = "PENDING";
+  } else {
+    paymentStatus = "FAILED";
+  }
+
+  const batch = {
+    idempotencyKey,
+    orderCount,
+    total,
+    paymentStatus,
+    orders,
+  };
+
+  return sendSuccess(res, { batch }, "Order batch retrieved successfully");
 };
 
 // GET /orders/:orderId - single order detail
