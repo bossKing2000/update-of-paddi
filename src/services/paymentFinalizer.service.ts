@@ -151,10 +151,26 @@ async function runFinalizer(
         const outOfSync = orders.filter(
           (o) => o.paymentStatus !== PaymentStatus.SUCCESS,
         );
-        if (outOfSync.length > 0) {
-          await prisma.order.updateMany({
-            where: { id: { in: outOfSync.map((o) => o.id) } },
-            data: { paymentStatus: PaymentStatus.SUCCESS },
+        const statusOutOfSync = orders.filter(
+          (o) => o.status === OrderStatus.AWAITING_PAYMENT || o.status === OrderStatus.PENDING,
+        );
+        if (outOfSync.length > 0 || statusOutOfSync.length > 0) {
+          await prisma.$transaction(async (tx) => {
+            if (outOfSync.length > 0) {
+              await tx.order.updateMany({
+                where: { id: { in: outOfSync.map((o) => o.id) } },
+                data: { paymentStatus: PaymentStatus.SUCCESS },
+              });
+            }
+            if (statusOutOfSync.length > 0) {
+              await tx.order.updateMany({
+                where: { id: { in: statusOutOfSync.map((o) => o.id) } },
+                data: {
+                  status: OrderStatus.PAYMENT_CONFIRMED,
+                  paidAt: orders[0].paidAt ?? new Date(),
+                },
+              });
+            }
           });
         }
         return { outcome: "ALREADY_PROCESSED", orders };
