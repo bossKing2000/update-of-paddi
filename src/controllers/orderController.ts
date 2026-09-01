@@ -134,6 +134,82 @@ export const getMyOrders = async (req: AuthRequest, res: Response) => {
   });
 };
 
+// GET /orders/batch/:idempotencyKey - retrieve all orders sharing an idempotencyKey (checkout batch)
+export const getOrderBatch = async (req: AuthRequest, res: Response) => {
+  const idempotencyKey = ensureString(req.params.idempotencyKey);
+  if (!idempotencyKey) {
+    throw new ValidationError("idempotencyKey is required");
+  }
+  const userId = req.user!.id;
+
+  const orders = await prisma.order.findMany({
+    where: { idempotencyKey, customerId: userId },
+    orderBy: { createdAt: "asc" },
+    include: {
+      items: {
+        include: {
+          product: {
+            select: {
+              id: true,
+              name: true,
+              images: true,
+              price: true,
+              isLive: true,
+            },
+          },
+          options: {
+            include: {
+              productOption: {
+                select: { id: true, name: true, price: true },
+              },
+            },
+          },
+        },
+      },
+      customer: { select: { id: true, name: true, avatarUrl: true } },
+      vendor: {
+        select: { id: true, name: true, brandName: true, brandLogo: true },
+      },
+      address: { select: { label: true, street: true, city: true } },
+      assignments: {
+        include: {
+          deliveryPerson: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  phoneNumber: true,
+                  avatarUrl: true,
+                  brandName: true,
+                  brandLogo: true,
+                },
+              },
+            },
+          },
+        },
+      },
+      payments: {
+        select: {
+          id: true,
+          reference: true,
+          amount: true,
+          status: true,
+          channel: true,
+          createdAt: true,
+          completedAt: true,
+        },
+      },
+    },
+  });
+
+  if (orders.length === 0) {
+    throw new NotFoundError("Order batch");
+  }
+
+  return sendSuccess(res, { orders }, "Order batch retrieved successfully");
+};
+
 // GET /orders/:orderId - single order detail
 export const getSingleOrder = async (req: AuthRequest, res: Response) => {
   const orderId = ensureString(req.params.orderId);

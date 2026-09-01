@@ -266,6 +266,21 @@ export const openApiDocument = {
         responses: { "200": { description: "Orders", content: { "application/json": { schema: { type: "object" } } } } },
       },
     },
+    "/order/batch/{idempotencyKey}": {
+      get: {
+        tags: ["Orders"],
+        summary: "Retrieve all orders belonging to a checkout batch by idempotencyKey",
+        parameters: [
+          { name: "idempotencyKey", in: "path", required: true, schema: { type: "string" }, description: "The idempotency key shared by all orders in the checkout batch" },
+        ],
+        responses: {
+          "200": { description: "Order batch retrieved", content: { "application/json": { schema: { type: "object" } } } },
+          "401": { description: "Unauthorized", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+          "403": { description: "Forbidden - not the batch owner", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+          "404": { description: "No batch found for this idempotencyKey", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+        },
+      },
+    },
     "/order/{orderId}": {
       get: {
         tags: ["Orders"],

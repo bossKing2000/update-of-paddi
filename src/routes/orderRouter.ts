@@ -3,6 +3,7 @@ import { authenticate, authorizeVendor, authorizeCustomer } from "../middlewares
 import {
   getMyOrders,
   getSingleOrder,
+  getOrderBatch,
   updateOrderStatus,
   getVendorOrderStats,
   getCustomerOrderStats,
@@ -32,9 +33,9 @@ router.use(authenticate);
 // gets all of this for free.
 router.get("/", getMyOrders);
 
-// This static path must be registered before /:orderId so "special-requests"
-// is not interpreted as an order ID by Express.
-router.get("/special-requests", authorizeCustomer, getMySpecialRequests);
+// Batch endpoint - must be registered before /:orderId so "batch" is not interpreted as an order ID
+router.get("/batch/:idempotencyKey", getOrderBatch);
+
 router.get("/:orderId", getSingleOrder);
 
 // Unified status-transition endpoint for cancel/cooking/ready/delivering/completed
