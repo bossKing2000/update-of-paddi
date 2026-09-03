@@ -97,7 +97,6 @@ jest.mock("../../src/services/paymentService", () => ({
   __esModule: true,
   initializePayment: jest.fn(),
   verifyPayment: jest.fn(),
-  cancelOrdersForOfflineProduct: jest.fn(),
 }));
 
 jest.mock("../../src/services/paymentFinalizer.service", () => ({
@@ -202,8 +201,6 @@ describe("addToCart — vendor live gate", () => {
   const product = {
     id: PRODUCT_UUID,
     archived: false,
-    isLive: true,
-    productSchedule: null,
     price: 1000,
     vendorId: "vendor-1",
     options: [],
@@ -290,10 +287,8 @@ const cartItemFrom = (vendor: Record<string, unknown>) => ({
     id: "prod-1",
     name: "Jollof",
     archived: false,
-    isLive: true, // mirror says live…
     vendorId: "vendor-1",
-    vendor, // …but THIS is what the rule reads
-    productSchedule: null,
+    vendor, // THIS is what the rule reads
     options: [],
   },
 });
@@ -388,8 +383,7 @@ const payableOrder = (vendorIsLive: boolean | null) => ({
       product: {
         id: "prod-1",
         name: "Jollof",
-        isLive: true,
-        productSchedule: { takeDownAt: new Date(Date.now() + 60 * 60_000), graceMinutes: 0 },
+        archived: false,
       },
     },
   ],

@@ -259,11 +259,12 @@ async getOrdersToday(): Promise<number> {
   }
 
   // ==================== PRODUCT METHODS ====================
+  // Stage 1: a vendor's product is "online" (orderable) while it is not
+  // archived. Vendor-level live/accepting-orders state is separate.
   async getOnlineProductsCount(): Promise<number> {
     return prisma.product.count({
       where: {
         vendorId: this.vendorId,
-        isLive: true,
         archived: false,
       },
     });
@@ -452,7 +453,6 @@ async getOrdersToday(): Promise<number> {
           images: true,
           archived: true,
           popularityPercent: true,
-          productSchedule: { select: { goLiveAt: true, takeDownAt: true, graceMinutes: true } },
           reviews: { select: { rating: true } },
         },
       });
@@ -468,7 +468,6 @@ async getOrdersToday(): Promise<number> {
         averageRating:
           p.reviews.length > 0 ? p.reviews.reduce((sum, r) => sum + r.rating, 0) / p.reviews.length : null,
         reviewCount: p.reviews.length,
-        productSchedule: p.productSchedule || null,
       }));
 
       await redisProducts.set(cacheKey, JSON.stringify({ products: productsData, total: totalCount }), {
@@ -476,23 +475,13 @@ async getOrdersToday(): Promise<number> {
       });
     }
 
-    const computeIsLive = (goLiveAt: Date | null, liveUntil: Date | null, graceMinutes: number | null) => {
-      if (!goLiveAt || !liveUntil) return false;
-      const now = Date.now();
-      const grace = (graceMinutes ?? 0) * 60_000;
-      return now >= new Date(goLiveAt).getTime() && now <= new Date(liveUntil).getTime() + grace;
-    };
-
-    const formattedProducts = productsData
-      .map((p) => ({
-        ...p,
-        isLive: computeIsLive(
-          p.productSchedule?.goLiveAt || null,
-          p.productSchedule?.takeDownAt || null,
-          p.productSchedule?.graceMinutes || 0
-        ),
-      }))
-      .sort((a, b) => Number(b.isLive) - Number(a.isLive));
+    // Stage 1: without scheduling, a product is orderable while not
+    // archived. Keep the `orderable` flag (replaces the old `isLive`
+    // mirror) so vendor clients keep a stable availability field.
+    const formattedProducts = productsData.map((p) => ({
+      ...p,
+      orderable: p.archived === false,
+    }));
 
     const pagination = {
       total: totalCount,
@@ -709,13 +698,13 @@ async getOrdersToday(): Promise<number> {
 
 
   // ==================== PRODUCT LIVE CONTROL (✅ insights revenue now Payment-based) ====================
+  // Stage 1: without scheduling, "live control" lists the vendor's active
+  // (non-archived) products. Status reflects archived state only; the
+  // vendor-level live/accepting-orders toggle lives in vendor settings.
   async getProductLiveControl() {
     const products = await prisma.product.findMany({
       where: { vendorId: this.vendorId, archived: false },
-      include: {
-        productSchedule: true,
-      },
-      orderBy: { isLive: "desc" },
+      orderBy: { createdAt: "desc" },
       take: 3,
     });
 
@@ -733,8 +722,8 @@ async getOrdersToday(): Promise<number> {
           id: product.id,
           name: product.name,
           price,
-          status: product.isLive ? "LIVE" : "OFFLINE",
-          statusColor: product.isLive ? "green" : "red",
+          status: product.archived ? "OFFLINE" : "LIVE",
+          statusColor: product.archived ? "red" : "green",
         };
       }),
       totalInsights: `N${Number(totalInsightsValue).toLocaleString("en-US", {
@@ -838,7 +827,8 @@ async getOrdersToday(): Promise<number> {
     });
 
     const totalProducts = products.length;
-    const liveProducts = products.filter((p) => p.isLive).length;
+    // Stage 1: every product in this query is non-archived, i.e. live.
+    const liveProducts = products.filter((p) => p.archived === false).length;
     const productsWithReviews = products.filter((p) => p.reviews.length > 0).length;
 
     const totalRevenue = products.reduce(

@@ -1,24 +1,19 @@
 /**
- * Tests for fetchLiveProducts — the schedule-aware live listing behind the
- * home feed's LIVE NOW section.
+ * Tests for fetchLiveProducts / fetchMostPopularProducts (Stage 1).
  *
- * The SQL predicate itself runs against Postgres; here we mock prisma and
- * verify (a) the generated predicate is correct, and (b) the JS-side
- * liveness recheck (computeIsLiveFromSchedule semantics) keeps/drops rows
- * according to the project's existing live rules:
- *
- *   Test 1  stored isLive=false + active window          → returned as live
- *   Test 2  expired window + stored isLive=true (stale)  → dropped
- *           no schedule at all + stored isLive=true      → kept (existing rule)
- *   Test 3  archived product                             → excluded by SQL
- *   Test 4  popularProducts path unchanged               → fetchMostPopularProducts
- *           still uses the stored-column-only filter (separate test below)
+ * Both listings now return currently-orderable marketplace products:
+ * not archived + vendor live + accepting orders. There is no scheduling,
+ * no stored isLive mirror, and no raw-SQL schedule predicate — both use
+ * the Prisma query builder, verified here with mocked prisma.
  */
 
 jest.mock("../../src/lib/prisma", () => ({
   __esModule: true,
   default: {
-    $queryRawUnsafe: jest.fn(),
+    product: {
+      findMany: jest.fn(),
+      count: jest.fn(),
+    },
   },
 }));
 
@@ -36,143 +31,90 @@ import {
   fetchMostPopularProducts,
 } from "../../src/services/product.service";
 
-const mockedQuery = prisma.$queryRawUnsafe as unknown as jest.Mock;
+const mockedFindMany = (prisma as any).product.findMany as jest.Mock;
+const mockedCount = (prisma as any).product.count as jest.Mock;
 
-const now = new Date();
-const minutes = (n: number) => new Date(now.getTime() + n * 60_000);
+const vendorRow = (overrides: Record<string, unknown> = {}) => ({
+  id: "vendor-1",
+  name: "Mama Put",
+  brandName: "Mama Put",
+  avatarUrl: null,
+  isLive: true,
+  deliveryPreferences: { acceptingOrders: true },
+  ...overrides,
+});
 
 const row = (overrides: Record<string, unknown> = {}) => ({
   id: "p1",
   name: "Palm Nut Soup",
   price: 1200,
+  category: "DINNER",
+  thumbnail: null,
   images: [],
+  popularityPercent: 40,
+  popularityScore: 10,
   averageRating: 4.5,
   reviewCount: 3,
-  popularityScore: 10,
-  popularityPercent: 40,
   totalViews: 12,
-  category: "DINNER",
-  isLive: false,
   archived: false,
-  goLiveAt: minutes(-30), // went live 30 min ago
-  takeDownAt: minutes(60), // takes down in 60 min
-  graceMinutes: 0,
+  vendor: vendorRow(),
   ...overrides,
 });
 
 beforeEach(() => {
-  mockedQuery.mockReset();
-  // First call = page query, second = COUNT query.
-  mockedQuery.mockImplementation((sql: string) =>
-    /COUNT\(\*\)/i.test(sql) ? Promise.resolve([{ count: 0 }]) : Promise.resolve([]),
-  );
+  jest.clearAllMocks();
+  mockedFindMany.mockResolvedValue([]);
+  mockedCount.mockResolvedValue(0);
 });
 
-describe("fetchLiveProducts (schedule-aware)", () => {
-  it("Test 1: returns a product whose stored flag is false but whose schedule window is active", async () => {
-    mockedQuery.mockImplementation((sql: string) =>
-      /COUNT\(\*\)/i.test(sql)
-        ? Promise.resolve([{ count: 1 }])
-        : Promise.resolve([row()]),
-    );
+describe("fetchLiveProducts (Stage 1: orderable marketplace products)", () => {
+  it("returns orderable products with vendorOperating/orderable flags set", async () => {
+    mockedFindMany.mockResolvedValue([row()]);
+    mockedCount.mockResolvedValue(1);
 
     const { products, total } = await fetchLiveProducts({ take: 12 });
 
     expect(total).toBe(1);
     expect(products).toHaveLength(1);
-    expect(products[0].isLive).toBe(true); // computed from the active window
-    expect(products[0].goLiveAt).toEqual(minutes(-30));
-    expect((products[0] as any).takeDownAt).toEqual(minutes(60));
+    expect(products[0].vendorOperating).toBe(true);
+    expect(products[0].orderable).toBe(true);
   });
 
-  it("Test 2a: drops a row whose window has fully expired even if the stored flag is stale-true", async () => {
-    mockedQuery.mockImplementation((sql: string) =>
-      /COUNT\(\*\)/i.test(sql)
-        ? Promise.resolve([{ count: 0 }])
-        : Promise.resolve([
-            row({ id: "stale", isLive: true, goLiveAt: minutes(-120), takeDownAt: minutes(-90), graceMinutes: 5 }),
-          ]),
-    );
-
-    const { products } = await fetchLiveProducts({ take: 12 });
-    expect(products).toHaveLength(0); // grace (5min) < elapsed (90min) → not live
-  });
-
-  it("Test 2b: keeps a stored-live row with NO schedule (existing stored-flag rule)", async () => {
-    mockedQuery.mockImplementation((sql: string) =>
-      /COUNT\(\*\)/i.test(sql)
-        ? Promise.resolve([{ count: 1 }])
-        : Promise.resolve([row({ id: "noschedule", isLive: true, goLiveAt: null, takeDownAt: null, graceMinutes: null })]),
-    );
-
-    const { products } = await fetchLiveProducts({ take: 12 });
-    expect(products).toHaveLength(1);
-    expect(products[0].isLive).toBe(true); // computeIsLive falls back to stored flag
-  });
-
-  it("Test 3: never includes archived products — the SQL excludes them before mapping", async () => {
-    let capturedSql = "";
-    mockedQuery.mockImplementation((sql: string) => {
-      if (!/COUNT\(\*\)/i.test(sql)) capturedSql = sql;
-      return /COUNT\(\*\)/i.test(sql) ? Promise.resolve([{ count: 0 }]) : Promise.resolve([]);
-    });
-
+  it("filters to non-archived products at query level", async () => {
     await fetchLiveProducts({ take: 12 });
-
-    expect(capturedSql).toMatch(/p\."archived" = false/);
+    expect(mockedFindMany.mock.calls[0][0].where.archived).toBe(false);
   });
 
-  it("uses an OR of the stored flag and the grace-extended schedule window in its predicate", async () => {
-    let capturedSql = "";
-    mockedQuery.mockImplementation((sql: string) => {
-      if (!/COUNT\(\*\)/i.test(sql)) capturedSql = sql;
-      return /COUNT\(\*\)/i.test(sql) ? Promise.resolve([{ count: 0 }]) : Promise.resolve([]);
-    });
-
+  it("filters to operating vendors at query level", async () => {
     await fetchLiveProducts({ take: 12 });
-
-    expect(capturedSql).toMatch(/p\."isLive" = true\s+OR/s);
-    expect(capturedSql).toMatch(/s\."goLiveAt" <= NOW\(\)/);
-    expect(capturedSql).toMatch(
-      /s\."takeDownAt" \+ \(COALESCE\(s\."graceMinutes", 0\) \* INTERVAL '1 minute'\) >= NOW\(\)/,
-    );
+    const where = mockedFindMany.mock.calls[0][0].where;
+    expect(where.vendor).toBeDefined();
+    expect(where.vendor.isLive).toBe(true);
   });
 
-  it("applies an optional category filter to both page and count queries", async () => {
-    const calls: string[] = [];
-    mockedQuery.mockImplementation((sql: string) => {
-      calls.push(sql);
-      return /COUNT\(\*\)/i.test(sql) ? Promise.resolve([{ count: 0 }]) : Promise.resolve([]);
-    });
-
+  it("applies an optional category filter", async () => {
     await fetchLiveProducts({ take: 12, category: "DINNER" });
-
-    const pageSql = calls.find((s) => !/COUNT\(\*\)/i.test(s))!;
-    const countSql = calls.find((s) => /COUNT\(\*\)/i.test(s))!;
-    expect(pageSql).toContain('$2');
-    expect(countSql).toContain('$1');
+    expect(mockedFindMany.mock.calls[0][0].where.category).toBe("DINNER");
   });
 });
 
-describe("fetchMostPopularProducts (popularity ranking)", () => {
-  it("Test 4: legacy mirror branch retained AND weekly branch evaluated live", async () => {
-    let capturedSql = "";
-    mockedQuery.mockImplementation((sql: string) => {
-      if (!/COUNT\(\*\)/i.test(sql)) capturedSql = sql;
-      return /COUNT\(\*\)/i.test(sql) ? Promise.resolve([{ count: 7 }]) : Promise.resolve([]);
-    });
+describe("fetchMostPopularProducts (popularity ranking, Stage 1)", () => {
+  it("ranks by popularityScore and returns the total", async () => {
+    mockedFindMany.mockResolvedValue([row()]);
+    mockedCount.mockResolvedValue(7);
 
     const result = await fetchMostPopularProducts({ skip: 0, take: 50 });
 
     expect(result.total).toBe(7);
-    expect(capturedSql).toMatch(/ORDER BY p\."popularityScore" DESC/);
-    // legacy: unscheduled / ONE_TIME products still come from the stored mirror
-    expect(capturedSql).toMatch(
-      /\(s\."id" IS NULL OR s\."type" = 'ONE_TIME'\)\s*AND p\."isLive" = true/,
-    );
-    // recurring: WEEKLY schedules are evaluated time-driven in SQL
-    expect(capturedSql).toMatch(/s\."type" = 'WEEKLY'/);
-    expect(capturedSql).toMatch(/NOW\(\)/);
-    expect(capturedSql).toMatch(/ProductScheduleWindow/);
+    expect(mockedFindMany.mock.calls[0][0].orderBy).toEqual({
+      popularityScore: "desc",
+    });
+  });
+
+  it("only lists non-archived products from operating vendors", async () => {
+    await fetchMostPopularProducts({ skip: 0, take: 50 });
+    const where = mockedFindMany.mock.calls[0][0].where;
+    expect(where.archived).toBe(false);
+    expect(where.vendor.isLive).toBe(true);
   });
 });

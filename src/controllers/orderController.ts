@@ -82,7 +82,7 @@ export const getMyOrders = async (req: AuthRequest, res: Response) => {
                 name: true,
                 images: true,
                 price: true,
-                isLive: true,
+                archived: true,
               },
             },
             options: {
@@ -154,7 +154,7 @@ export const getOrderBatch = async (req: AuthRequest, res: Response) => {
               name: true,
               images: true,
               price: true,
-              isLive: true,
+              archived: true,
             },
           },
           options: {

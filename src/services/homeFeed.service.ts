@@ -173,10 +173,9 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
       { products: [], total: 0 },
     ),
 
-    // Schedule-aware: treats the active ProductSchedule window as the
-    // source of truth so the LIVE section stays correct even while the
-    // stored Product.isLive mirror is temporarily stale. Popular section
-    // above intentionally keeps the existing /product/p/most semantics.
+    // Currently-orderable marketplace dishes (not archived + vendor live
+    // + accepting orders). Popular section above keeps the existing
+    // /product/p/most semantics.
     safeSection(
       "liveProducts",
       () =>
@@ -238,9 +237,8 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
       : Promise.resolve(0),
   ]);
 
-  // Live products come from the schedule-aware listing above (stored flag
-  // OR active schedule window), so the section survives a stale
-  // Product.isLive mirror. Popular products intentionally keep the exact
+  // Live products are the currently-orderable marketplace dishes
+  // (Stage 1: no scheduling). Popular products keep the exact
   // GET /product/p/most semantics.
 
   const payload = {

@@ -24,9 +24,6 @@ import { fetchProductPage } from "../../src/services/product.service";
 const mockedFindMany = (prismaClient as any).product.findMany as jest.Mock;
 const mockedCount = (prismaClient as any).product.count as jest.Mock;
 
-const NOW = new Date();
-const minutesFromNow = (n: number) => new Date(NOW.getTime() + n * 60_000);
-
 const vendorRow = (overrides: Record<string, unknown> = {}) => ({
   id: "vendor-1",
   name: "Mama Put",
@@ -34,43 +31,7 @@ const vendorRow = (overrides: Record<string, unknown> = {}) => ({
   avatarUrl: null,
   isLive: true,
   deliveryPreferences: { acceptingOrders: true },
-  timezone: null,
-  operatingHours: null,
   ...overrides,
-});
-
-/** One-time schedule currently inside its window. */
-const activeOneTimeSchedule = () => ({
-  type: "ONE_TIME" as const,
-  enabled: true,
-  goLiveAt: minutesFromNow(-30),
-  takeDownAt: minutesFromNow(60),
-  graceMinutes: 0,
-  startDate: null,
-  endDate: null,
-  windows: [],
-});
-
-/** WEEKLY schedule whose window covers right now (UTC). */
-const activeWeeklySchedule = () => ({
-  type: "WEEKLY" as const,
-  enabled: true,
-  goLiveAt: null,
-  takeDownAt: null,
-  graceMinutes: null,
-  startDate: null,
-  endDate: null,
-  windows: [
-    {
-      id: "w1",
-      scheduleId: "s1",
-      // Today in UTC, spanning ±60 minutes around now.
-      dayOfWeek: NOW.getUTCDay(),
-      startMinute: NOW.getUTCHours() * 60 + NOW.getUTCMinutes() - 60,
-      endMinute: NOW.getUTCHours() * 60 + NOW.getUTCMinutes() + 60,
-      enabled: true,
-    },
-  ],
 });
 
 const productRow = (overrides: Record<string, unknown> = {}) => ({
@@ -81,9 +42,7 @@ const productRow = (overrides: Record<string, unknown> = {}) => ({
   thumbnail: "img.jpg",
   images: ["img.jpg"],
   popularityPercent: 42,
-  isLive: true,
   archived: false,
-  productSchedule: activeOneTimeSchedule(),
   vendor: vendorRow(),
   ...overrides,
 });
@@ -94,8 +53,8 @@ beforeEach(() => {
   mockedCount.mockResolvedValue(0);
 });
 
-describe("discovery availability contract (fetchProductPage)", () => {
-  it("vendor online + active one-time schedule → vendorOperating=true, orderable=true", async () => {
+describe("discovery availability contract (fetchProductPage, Stage 1)", () => {
+  it("vendor online + unarchived product → vendorOperating=true, orderable=true", async () => {
     mockedFindMany.mockResolvedValue([productRow()]);
     mockedCount.mockResolvedValue(1);
 
@@ -104,7 +63,7 @@ describe("discovery availability contract (fetchProductPage)", () => {
     expect(products[0].orderable).toBe(true);
   });
 
-  it("vendor OFFLINE → vendorOperating=false and NOT orderable (even with an active schedule)", async () => {
+  it("vendor OFFLINE → vendorOperating=false and NOT orderable", async () => {
     mockedFindMany.mockResolvedValue([
       productRow({ vendor: vendorRow({ isLive: false }) }),
     ]);
@@ -126,59 +85,8 @@ describe("discovery availability contract (fetchProductPage)", () => {
     expect(products[0].orderable).toBe(false);
   });
 
-  it("inactive WEEKLY schedule → NOT orderable even though the stored mirror says live", async () => {
-    mockedFindMany.mockResolvedValue([
-      productRow({
-        isLive: true, // stale mirror
-        productSchedule: activeWeeklySchedule(),
-        vendor: vendorRow(),
-      }),
-    ]);
-    // Re-run with a window far from now by shifting the day to tomorrow:
-    const tomorrow = (NOW.getUTCDay() + 1) % 7;
-    mockedFindMany.mockResolvedValue([
-      productRow({
-        isLive: true,
-        productSchedule: {
-          ...activeWeeklySchedule(),
-          windows: [
-            {
-              ...activeWeeklySchedule().windows[0],
-              dayOfWeek: tomorrow,
-            },
-          ],
-        },
-      }),
-    ]);
-
-    const { products } = await fetchProductPage({ skip: 0, take: 20 });
-    expect(products[0].isLive).toBe(true); // mirror untouched — display only
-    expect(products[0].orderable).toBe(false); // authoritative evaluator disagrees
-  });
-
-  it("active WEEKLY schedule → orderable, evaluated through the authoritative evaluator", async () => {
-    mockedFindMany.mockResolvedValue([
-      productRow({
-        isLive: false, // stale mirror in the other direction
-        productSchedule: activeWeeklySchedule(),
-      }),
-    ]);
-
-    const { products } = await fetchProductPage({ skip: 0, take: 20 });
-    expect(products[0].orderable).toBe(true);
-  });
-
-  it("expired ONE_TIME window → NOT orderable despite stored-live mirror", async () => {
-    mockedFindMany.mockResolvedValue([
-      productRow({
-        isLive: true,
-        productSchedule: {
-          ...activeOneTimeSchedule(),
-          goLiveAt: minutesFromNow(-120),
-          takeDownAt: minutesFromNow(-90),
-        },
-      }),
-    ]);
+  it("archived product → NOT orderable even with an operating vendor", async () => {
+    mockedFindMany.mockResolvedValue([productRow({ archived: true })]);
 
     const { products } = await fetchProductPage({ skip: 0, take: 20 });
     expect(products[0].orderable).toBe(false);
@@ -189,9 +97,17 @@ describe("discovery availability contract (fetchProductPage)", () => {
     expect(mockedFindMany.mock.calls[0][0].where.archived).toBe(false);
   });
 
+  it("availableOnly=true adds the vendor-operating filter", async () => {
+    await fetchProductPage({ skip: 0, take: 20, availableOnly: true });
+    const where = mockedFindMany.mock.calls[0][0].where;
+    expect(where.archived).toBe(false);
+    expect(where.vendor).toBeDefined();
+    expect(where.vendor.isLive).toBe(true);
+  });
+
   it("vendor + product combination decides the final state together", async () => {
     mockedFindMany.mockResolvedValue([
-      productRow(), // operating vendor + active schedule
+      productRow(), // operating vendor + unarchived
       productRow({
         id: "prod-2",
         vendor: vendorRow({ isLive: false }),

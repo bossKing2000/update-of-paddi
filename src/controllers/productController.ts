@@ -20,9 +20,7 @@ import {
 } from "../services/product.service";
 import {
   isVendorOperating,
-  resolveVendorTimezone,
 } from "../services/vendorAvailability.service";
-import { evaluateProductSchedule } from "../services/scheduleRules.service";
 import { CACHE_KEYS, CACHE_TTLS } from "../services/redisCacheTiming";
 import { productIndexQueue } from "../jobs/workers jobs/redis-baseQueue";
 import { sendSuccess, sendCreated } from "../utils/apiResponse";
@@ -85,38 +83,11 @@ function extractVideoPaths(files: any): string[] {
   return videoFiles.map((file) => file.path);
 }
 
-/**
- * Single source of truth for computing whether a product is currently
- * purchasable, given its schedule. Previously this exact logic was
- * copy-pasted three separate times across this file (here, inside
- * getAllProducts, and inside getProductById) with slightly different
- * signatures each time — a maintenance risk, since a future change to the
- * grace-period rules would need to be remembered in three places to stay
- * consistent. Every function below now calls this one.
- */
-export const computeIsLive = (
-  schedule:
-    | {
-        goLiveAt?: Date | string | null;
-        takeDownAt?: Date | string | null;
-        graceMinutes?: number | null;
-      }
-    | null
-    | undefined,
-  defaultIsLive: boolean,
-): boolean => {
-  if (!schedule) return defaultIsLive;
-
-  const now = Date.now();
-  const goLive = schedule.goLiveAt ? new Date(schedule.goLiveAt).getTime() : 0;
-  const takeDown = schedule.takeDownAt
-    ? new Date(schedule.takeDownAt).getTime()
-    : 0;
-  const grace = (schedule.graceMinutes ?? 0) * 60 * 1000;
-
-  if (!goLive || !takeDown) return defaultIsLive;
-  return now >= goLive && now <= takeDown + grace;
-};
+// Stage 1 availability: a product is orderable while its vendor is live +
+// accepting orders and the product itself is not archived. There is no
+// product scheduling anymore (no ProductSchedule, no isLive/liveUntil
+// mirrors), so listings and detail endpoints expose `vendorOperating` and
+// `orderable` computed from those two signals only.
 
 // GET /product/categories
 // Previously didn't exist at all — the cache key/TTL for it (CACHE_KEYS.
@@ -199,10 +170,10 @@ export const createProduct = async (req: AuthRequest, res: Response) => {
 
   // Broad invalidation (SCAN-based, safe at scale — see clearProductCache)
   // instead of trying to precisely rebuild just the pages a new product
-  // might land on. A new product's rank among "isLive first, then
-  // newest" could put it on any page depending on catalog size, so
-  // guessing which single page to pre-warm isn't reliable anyway — next
-  // read just repopulates whichever page is actually requested.
+  // might land on. A new product's rank among newest-first could put it on
+  // any page depending on catalog size, so guessing which single page to
+  // pre-warm isn't reliable anyway — next read just repopulates whichever
+  // page is actually requested.
   await clearProductCache(product.id, req.user.id);
   const suggestionKeys = await scanKeys(redisSearch, "suggestions:*");
   if (suggestionKeys.length) await redisSearch.del(suggestionKeys);
@@ -216,10 +187,9 @@ interface ProductResponse {
   price: number;
   images: string[];
   category: Category;
-  isLive: boolean;
-  goLiveAt: Date | null;
-  liveUntil: Date | null;
   popularityPercent?: number | null;
+  vendorOperating?: boolean;
+  orderable?: boolean;
   vendor?: {
     id: string;
     name: string;
@@ -369,12 +339,8 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
   const cached = await redisProducts.get(cacheKey);
   if (cached) {
     const productData = JSON.parse(cached);
-    // Recompute isLive from schedule on cache hit (mirror may be stale)
-    productData.isLive = computeIsLive(
-      productData.productSchedule,
-      productData.isLive,
-    );
     // CRITICAL: Recompute dynamic availability fields on cache hit
+    // (Stage 1: vendor live + accepting orders AND product not archived).
     if (productData.vendor) {
       const vendorOperating = isVendorOperating({
         isLive: productData.vendor.isLive ?? false,
@@ -382,17 +348,7 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
       });
       productData.vendorOperating = vendorOperating;
       productData.orderable =
-        productData.archived === false &&
-        vendorOperating &&
-        evaluateProductSchedule(
-          productData.productSchedule,
-          new Date(),
-          resolveVendorTimezone(
-            productData.vendor.timezone,
-            productData.vendor.operatingHours,
-          ),
-          productData.isLive,
-        );
+        productData.archived === false && vendorOperating;
     }
     res.setHeader("X-Cache", "HIT");
     return sendSuccess(res, productData, "Product retrieved successfully.");
@@ -412,8 +368,6 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
         updatedAt: true,
         totalViews: true,
         category: true,
-        isLive: true,
-        liveUntil: true,
         popularityScore: true,
         popularityPercent: true,
         isNew: true,
@@ -432,24 +386,9 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
             brandLogo: true,
             isLive: true,
             deliveryPreferences: true,
-            timezone: true,
-            operatingHours: true,
           },
         },
         options: true,
-        productSchedule: {
-          select: {
-            type: true,
-            enabled: true,
-            goLiveAt: true,
-            takeDownAt: true,
-            graceMinutes: true,
-            startDate: true,
-            endDate: true,
-            windows: true,
-            isLive: true,
-          },
-        },
       },
     }),
     prisma.productReview.aggregate({
@@ -469,29 +408,17 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
   });
 
   const vendorOperating = isVendorOperating(product.vendor);
-  const orderable =
-    !product.archived &&
-    vendorOperating &&
-    evaluateProductSchedule(
-      product.productSchedule as any,
-      new Date(),
-      resolveVendorTimezone(
-        product.vendor.timezone,
-        product.vendor.operatingHours as unknown,
-      ),
-      product.isLive,
-    );
+  const orderable = !product.archived && vendorOperating;
 
   const productData = {
     ...product,
     averageRating: reviewStats._avg.rating ?? 0,
     reviewCount: reviewStats._count._all ?? 0,
-    isLive: computeIsLive(product.productSchedule, product.isLive),
     vendorOperating,
     orderable,
     vendorRating: vendorReviewStats._avg.rating ?? null,
     vendorReviewCount: vendorReviewStats._count.rating ?? 0,
-    // vendor fields (brandName, brandLogo, isLive, deliveryPreferences, timezone, operatingHours)
+    // vendor fields (brandName, brandLogo, isLive, deliveryPreferences)
     // are already included via spread from product.vendor select
   };
 
@@ -512,7 +439,7 @@ export const updateProduct = async (req: AuthRequest, res: Response) => {
 
   const product = await prisma.product.findUnique({
     where: { id: productId },
-    include: { options: true, productSchedule: true },
+    include: { options: true },
   });
   if (!product || product.vendorId !== req.user.id)
     throw new ForbiddenError("Unauthorized or product not found");
@@ -699,7 +626,7 @@ export const updateProduct = async (req: AuthRequest, res: Response) => {
     const updatedProduct = await tx.product.update({
       where: { id: product.id },
       data: updateData,
-      include: { options: true, productSchedule: true },
+      include: { options: true },
     });
 
     if (Array.isArray(options)) {
@@ -738,12 +665,10 @@ export const updateProduct = async (req: AuthRequest, res: Response) => {
   await clearProductCache(product.id, req.user!.id);
   await clearProductFromCarts(product.id);
 
-  const computedIsLive = computeIsLive(updated.productSchedule, updated.isLive);
   const cacheValue = JSON.stringify({
     ...updated,
     images: finalImages,
     video: finalVideo,
-    isLive: computedIsLive,
   });
   await redisProducts.set(CACHE_KEYS.PRODUCT_DETAIL(product.id), cacheValue, {
     EX: CACHE_TTLS.PRODUCT_DETAIL,
@@ -772,7 +697,6 @@ export const archiveProduct = async (req: AuthRequest, res: Response) => {
 
   const product = await prisma.product.findUnique({
     where: { id: productId },
-    include: { productSchedule: true },
   });
   if (!product || product.vendorId !== req.user.id)
     throw new ForbiddenError("Unauthorized or product not found");
@@ -780,7 +704,6 @@ export const archiveProduct = async (req: AuthRequest, res: Response) => {
   const updated = await prisma.product.update({
     where: { id: productId },
     data: { archived },
-    include: { productSchedule: true },
   });
 
   productIndexQueue
@@ -789,10 +712,9 @@ export const archiveProduct = async (req: AuthRequest, res: Response) => {
   await clearProductCache(productId, req.user.id);
   await clearProductFromCarts(productId);
 
-  const computedIsLive = computeIsLive(updated.productSchedule, updated.isLive);
   await redisProducts.set(
     CACHE_KEYS.PRODUCT_DETAIL(productId),
-    JSON.stringify({ ...updated, isLive: computedIsLive }),
+    JSON.stringify(updated),
     { EX: CACHE_TTLS.PRODUCT_DETAIL },
   );
 
@@ -869,7 +791,7 @@ export const getSearchSuggestions = async (req: Request, res: Response) => {
           archived: false,
           name: { contains: query, mode: "insensitive" },
         },
-        select: { id: true, name: true, category: true, isLive: true },
+        select: { id: true, name: true, category: true },
         take: 12,
       })
     : await prisma.product.findMany({
@@ -879,20 +801,18 @@ export const getSearchSuggestions = async (req: Request, res: Response) => {
             name: { contains: word, mode: "insensitive" as const },
           })),
         },
-        select: { id: true, name: true, category: true, isLive: true },
+        select: { id: true, name: true, category: true },
         take: 12,
       });
 
-  // Ranking: live products first, then exact prefix matches, then general matches
+  // Ranking: exact prefix matches first, then general matches.
   results.sort((a, b) => {
     const aName = a.name.toLowerCase();
     const bName = b.name.toLowerCase();
     const aScore =
-      (a.isLive ? 3 : 0) +
       (aName.startsWith(query) ? 2 : 0) +
       (keywords.every((w) => aName.includes(w)) ? 1 : 0);
     const bScore =
-      (b.isLive ? 3 : 0) +
       (bName.startsWith(query) ? 2 : 0) +
       (keywords.every((w) => bName.includes(w)) ? 1 : 0);
     return bScore - aScore;
@@ -902,7 +822,6 @@ export const getSearchSuggestions = async (req: Request, res: Response) => {
     id: p.id,
     name: p.name,
     category: p.category,
-    isLive: p.isLive,
   }));
   await redisSearch.set(cacheKey, JSON.stringify(suggestions), {
     EX: CACHE_TTLS.SUGGESTIONS,
@@ -922,11 +841,9 @@ export interface Product {
   price: number;
   vendorId: string;
   images: string[];
-  isLive: boolean;
   archived: boolean;
   createdAt: Date;
   updatedAt: Date;
-  computedIsLive: boolean;
   rank?: number;
   exact_match?: boolean;
   sim_score?: number;
@@ -1052,19 +969,13 @@ export const searchProducts = async (req: Request, res: Response) => {
   const fullTextResults = await prisma.$queryRawUnsafe<any[]>(
     `
     SELECT
-      p.id, p.name, p.description, p.price, p."vendorId", p.images, p."isLive", p.archived, p."createdAt", p."updatedAt",
-      CASE
-        WHEN s."goLiveAt" IS NOT NULL AND s."takeDownAt" IS NOT NULL
-          THEN (now() >= s."goLiveAt" AND now() <= s."takeDownAt" + (s."graceMinutes" * interval '1 minute'))
-        ELSE p."isLive"
-      END AS "computedIsLive",
+      p.id, p.name, p.description, p.price, p."vendorId", p.images, p.archived, p."createdAt", p."updatedAt",
       ts_rank_cd(setweight(to_tsvector('english', p.name), 'A') || setweight(to_tsvector('english', p.description), 'B'), websearch_to_tsquery('english', $1)) AS rank,
       (p.name ILIKE $2 OR p.description ILIKE $2) AS exact_match
     FROM "Product" p${vendorJoin}
-    LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
     WHERE p.archived = false
       AND (p.tsvector_col @@ websearch_to_tsquery('english', $1) OR p.name ILIKE $2 OR p.description ILIKE $2)${extraWhereSql}
-    ORDER BY exact_match DESC, "computedIsLive" DESC, rank DESC, ${secondaryOrder}
+    ORDER BY exact_match DESC, rank DESC, ${secondaryOrder}
     LIMIT $3 OFFSET $4;
   `,
     corrected,
@@ -1082,17 +993,11 @@ export const searchProducts = async (req: Request, res: Response) => {
     fuzzyResults = await prisma.$queryRawUnsafe<any[]>(
       `
       SELECT
-        p.id, p.name, p.description, p.price, p."vendorId", p.images, p."isLive", p.archived, p."createdAt", p."updatedAt",
-        CASE
-          WHEN s."goLiveAt" IS NOT NULL AND s."takeDownAt" IS NOT NULL
-            THEN (now() >= s."goLiveAt" AND now() <= s."takeDownAt" + (s."graceMinutes" * interval '1 minute'))
-          ELSE p."isLive"
-        END AS "computedIsLive",
+        p.id, p.name, p.description, p.price, p."vendorId", p.images, p.archived, p."createdAt", p."updatedAt",
         similarity(p.name || ' ' || p.description, $1) AS sim_score
       FROM "Product" p${vendorJoin}
-      LEFT JOIN "ProductSchedule" s ON s."productId" = p.id
       WHERE p.archived = false AND similarity(p.name || ' ' || p.description, $1) > $2${extraWhereSql}
-      ORDER BY "computedIsLive" DESC, sim_score DESC, ${secondaryOrder}
+      ORDER BY sim_score DESC, ${secondaryOrder}
       LIMIT $3 OFFSET $4;
     `,
       corrected,
@@ -1152,12 +1057,10 @@ export const getMostPopularProducts = async (req: Request, res: Response) => {
     );
   }
 
-  // Filtered by isLive directly in SQL (both the page query and the count
-  // query) rather than fetching a page of "archived = false" rows and
-  // filtering out non-live ones in JS afterward. isLive is kept reasonably
-  // fresh by fixLiveStatusJob (runs every 5 minutes) — see
-  // fetchMostPopularProducts in product.service.ts, which now owns this
-  // query so GET /api/home/feed can reuse it verbatim.
+  // Most-popular marketplace products (not archived + vendor live +
+  // accepting orders), ranked by popularityScore — see
+  // fetchMostPopularProducts in product.service.ts, which owns this query
+  // so GET /api/home/feed can reuse it verbatim.
   const { products, total: totalCount } = await fetchMostPopularProducts({
     skip,
     take: limit,

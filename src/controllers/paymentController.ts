@@ -44,7 +44,7 @@ async function getPayableOrderBatch(idempotencyKey: string, userId: string) {
       payments: true,
       items: {
         include: {
-          product: { select: { id: true, name: true, isLive: true, productSchedule: { select: { takeDownAt: true, graceMinutes: true } } } },
+          product: { select: { id: true, name: true, archived: true } },
         },
       },
     },
@@ -63,18 +63,12 @@ async function getPayableOrderBatch(idempotencyKey: string, userId: string) {
   return orders;
 }
 
-/** Throws if any item across the whole batch belongs to a product that's gone offline. */
+/** Throws if any item across the whole batch belongs to a product that's been archived. */
 function assertProductsStillLive(orders: Awaited<ReturnType<typeof getPayableOrderBatch>>) {
-  const now = nowUtc();
   for (const order of orders) {
     for (const item of order.items) {
-      const schedule = item.product.productSchedule;
-      if (schedule?.takeDownAt) {
-        const grace = schedule.graceMinutes ?? 0;
-        const effectiveClose = addMinutesUtc(toUtc(schedule.takeDownAt), grace);
-        if (now >= effectiveClose) {
-          throw new ValidationError(`Product "${item.product.name}" is offline and cannot accept payments.`);
-        }
+      if (item.product.archived) {
+        throw new ValidationError(`Product "${item.product.name}" is no longer available and cannot accept payments.`);
       }
     }
   }

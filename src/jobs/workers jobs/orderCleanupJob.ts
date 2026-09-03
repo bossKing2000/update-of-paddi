@@ -1,15 +1,20 @@
 import { Payment, Order, OrderItem } from "@prisma/client";
-import { nowUtc, addMinutesUtc, isAfterUtc } from "../../utils/time";
+import { nowUtc, isAfterUtc } from "../../utils/time";
 import { OrderStatus } from "@prisma/client";
 import prisma from "../../config/prismaClient";
 import { logger } from "../../lib/logger";
 
 /**
  * 🧹 Automatically cancels expired or offline orders in batches
+ *
+ * Stage 1 (no product scheduling): an AWAITING_PAYMENT order becomes
+ * unfulfillable when its product was archived or its vendor went offline /
+ * paused orders. Cancellation still requires the order's own payment window
+ * to have expired too — a customer mid-payment is never yanked. Paid,
+ * cooking, ready, delivery and completed orders are untouched.
  */
 export const runOrderCleanupJob = async (batchSize = 1000) => {
   const now = nowUtc();
-  const graceMinutesDefault = 15;
   let offlineUpdated = 0;
 
   try {
@@ -26,9 +31,7 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
         items: (OrderItem & {
           product: {
             id: string;
-            isLive: boolean;
-            liveUntil: Date | null;
-            productSchedule: { takeDownAt: Date | null; graceMinutes: number | null } | null;
+            archived: boolean;
           };
         })[];
         payments: Payment[];
@@ -36,21 +39,17 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
         where: {
           status: OrderStatus.AWAITING_PAYMENT,
           OR: [
-            // Product-level offline (existing rule)
+            // Product-level offline: vendor archived the product.
             {
               items: {
                 some: {
                   product: {
-                    OR: [
-                      { isLive: false },
-                      { productSchedule: { takeDownAt: { lt: now } } },
-                    ],
+                    archived: true,
                   },
                 },
               },
             },
-            // Vendor Live: vendor went offline or paused orders (same
-            // lifecycle treatment as product-offline — only affects
+            // Vendor went offline or paused orders (only affects
             // AWAITING_PAYMENT orders; paid/completed orders are untouched)
             {
               vendor: {
@@ -69,11 +68,7 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
               product: {
                 select: {
                   id: true,
-                  isLive: true,
-                  liveUntil: true,
-                  productSchedule: {
-                    select: { takeDownAt: true, graceMinutes: true },
-                  },
+                  archived: true,
                 },
               },
             },
@@ -87,27 +82,11 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
 
       for (const order of batch) {
         const latestPayment = order.payments[0];
-        const orderGrace = order.paymentGraceMinutes ?? graceMinutesDefault;
 
-        const productOffline = order.items.some((item) => {
-          const prod = item.product;
-          const sch = prod.productSchedule;
-          const grace = sch?.graceMinutes ?? orderGrace;
+        const productOffline = order.items.some((item) => item.product.archived);
 
-          const scheduledClose = sch?.takeDownAt
-            ? addMinutesUtc(sch.takeDownAt, grace)
-            : null;
-          const liveUntilClose = prod.liveUntil ? new Date(prod.liveUntil) : null;
-
-          return (
-            !prod.isLive ||
-            (scheduledClose && isAfterUtc(now, scheduledClose)) ||
-            (liveUntilClose && isAfterUtc(now, liveUntilClose))
-          );
-        });
-
-        // Vendor Live: vendor offline / paused orders blocks the unpaid
-        // purchase flow exactly like product-offline does.
+        // Vendor offline / paused orders blocks the unpaid purchase flow
+        // exactly like product-offline does.
         const vendorOffline =
           !order.vendor.isLive ||
           ((order.vendor.deliveryPreferences as Record<string, unknown> | null)?.acceptingOrders === false);

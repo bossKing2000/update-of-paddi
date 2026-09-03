@@ -28,46 +28,34 @@ model User {
   nin       String?   @unique
   ninData   Json? // raw Dojah verification response, stored for audit/dispute purposes
 
-  order_openAT        String?
-  order_closeAT       String?
   // Vendor self-service settings persisted as JSON so the API can evolve without another table.
-  operatingHours      Json?
   deliveryPreferences Json?
   serviceAreas        Json?
 
-  // ── Vendor Live (marketplace migration) ──────────────────────
-  // VENDOR only: whether this vendor is currently operating on the
-  // marketplace. This is the vendor-level counterpart of the per-product
-  // schedule mirror below — a product is marketplace-available only while
-  // its vendor is live AND accepting orders AND the product itself is
-  // available/unarchived within its own schedule. Customers cannot toggle
+  // ── Vendor Live ──────────────────────────────────────────────
+  // VENDOR only: whether this vendor is active on the marketplace.
+  // A product is orderable only while its vendor is live AND accepting
+  // orders AND the product itself is not archived. Customers cannot toggle
   // this; vendors flip it via PATCH /api/vendor/settings/live (KYC VERIFIED
-  // required to go live). Default false for new vendors; existing vendors
-  // were backfilled to true by the migration so pre-migration behavior is
-  // preserved until each vendor explicitly goes offline.
+  // required to go live). Default false for new vendors.
   isLive Boolean @default(false)
-
-  // IANA timezone for the vendor's business (e.g. "Africa/Lagos"). Used to
-  // evaluate recurring product schedules in the vendor's local time.
-  // Effective timezone = timezone ?? operatingHours.timezone ?? UTC.
-  timezone String?
 
   // ── Vendor payout fields ──────────────────────────────────────
   // Didn't exist at all before — there was no way for a vendor to ever
   // receive a payout through the platform. commissionRate is per-vendor
   // so it can be negotiated individually rather than being a single
   // global constant.
-  commissionRate        Float    @default(0.15)
-  bankName              String?
-  bankCode              String? // Paystack bank code, required for transfers (distinct from the display name)
-  bankAccountNumber     String?
-  bankAccountName       String? // set from Paystack's own resolution, not typed in by the vendor
-  paystackRecipientCode String? // set once bank details are verified with Paystack; cleared whenever bank details change
-  vendorPayouts         VendorPayout[] @relation("VendorPayouts")
-  payoutsProcessed      VendorPayout[] @relation("PayoutProcessedBy")
-  vendorPromotions      Promotion[]      @relation("VendorPromotions")
-  promotionUsages       PromotionUsage[] @relation("UserPromotionUsages")
-  vendorSupportTickets  VendorSupportTicket[] @relation("VendorSupportTickets")
+  commissionRate         Float                   @default(0.15)
+  bankName               String?
+  bankCode               String? // Paystack bank code, required for transfers (distinct from the display name)
+  bankAccountNumber      String?
+  bankAccountName        String? // set from Paystack's own resolution, not typed in by the vendor
+  paystackRecipientCode  String? // set once bank details are verified with Paystack; cleared whenever bank details change
+  vendorPayouts          VendorPayout[]          @relation("VendorPayouts")
+  payoutsProcessed       VendorPayout[]          @relation("PayoutProcessedBy")
+  vendorPromotions       Promotion[]             @relation("VendorPromotions")
+  promotionUsages        PromotionUsage[]        @relation("UserPromotionUsages")
+  vendorSupportTickets   VendorSupportTicket[]   @relation("VendorSupportTickets")
   customerSupportTickets CustomerSupportTicket[] @relation("CustomerSupportTickets")
 
   // ── Referrals ──────────────────────────────────────────────────
@@ -75,32 +63,32 @@ model User {
   // code (generated on first request rather than at signup, so
   // existing accounts get one lazily too); referredByUserId records
   // who they signed up through, if anyone.
-  referralCode     String?  @unique
-  referredByUserId String?
-  referredBy       User?    @relation("UserReferrals", fields: [referredByUserId], references: [id])
-  referredUsers    User[]   @relation("UserReferrals")
-  referralRewardsEarned  ReferralReward[] @relation("ReferralAsReferrer")
+  referralCode            String?          @unique
+  referredByUserId        String?
+  referredBy              User?            @relation("UserReferrals", fields: [referredByUserId], references: [id])
+  referredUsers           User[]           @relation("UserReferrals")
+  referralRewardsEarned   ReferralReward[] @relation("ReferralAsReferrer")
   referralRewardAsInvitee ReferralReward[] @relation("ReferralAsReferred")
 
   // Relations
-  products              Product[]           @relation("VendorProducts")
-  vendorReviewsReceived VendorReview[]      @relation("VendorReviews")
-  vendorReviewsGiven    VendorReview[]      @relation("CustomerVendorReviews")
-  productReviewsGiven   ProductReview[]     @relation("CustomerProductReviews")
-  customerOrders        Order[]             @relation("CustomerOrders")
-  vendorOrders          Order[]             @relation("VendorOrders")
-  vendorRepliesSent     VendorReply[]       @relation("VendorReplies")
-  reviewVotes           ReviewVote[]        @relation("UserReviewVotes")
-  reviewReports         ReviewReport[]      @relation("UserReviewReports")
-  notifications         Notification[]      @relation("UserNotifications")
-  loginHistory          LoginHistory[]      @relation("UserLoginHistory")
-  addresses             Address[]           @relation("UserAddresses")
-  carts                 Cart[]              @relation("UserCarts")
-  cartSummarySnapshots  CartSummarySnapshot[] @relation("UserCartSnapshots")
-  UserPaymentMethod     UserPaymentMethod[]
-  deliveryPerson        DeliveryPerson?
-  riderWithdrawalsProcessed RiderWithdrawal[] @relation("RiderWithdrawalProcessedBy")
-  deliveryProofsReviewed    DeliveryProof[]   @relation("DeliveryProofReviewedBy")
+  products                  Product[]             @relation("VendorProducts")
+  vendorReviewsReceived     VendorReview[]        @relation("VendorReviews")
+  vendorReviewsGiven        VendorReview[]        @relation("CustomerVendorReviews")
+  productReviewsGiven       ProductReview[]       @relation("CustomerProductReviews")
+  customerOrders            Order[]               @relation("CustomerOrders")
+  vendorOrders              Order[]               @relation("VendorOrders")
+  vendorRepliesSent         VendorReply[]         @relation("VendorReplies")
+  reviewVotes               ReviewVote[]          @relation("UserReviewVotes")
+  reviewReports             ReviewReport[]        @relation("UserReviewReports")
+  notifications             Notification[]        @relation("UserNotifications")
+  loginHistory              LoginHistory[]        @relation("UserLoginHistory")
+  addresses                 Address[]             @relation("UserAddresses")
+  carts                     Cart[]                @relation("UserCarts")
+  cartSummarySnapshots      CartSummarySnapshot[] @relation("UserCartSnapshots")
+  UserPaymentMethod         UserPaymentMethod[]
+  deliveryPerson            DeliveryPerson?
+  riderWithdrawalsProcessed RiderWithdrawal[]     @relation("RiderWithdrawalProcessedBy")
+  deliveryProofsReviewed    DeliveryProof[]       @relation("DeliveryProofReviewedBy")
 
   tokenVersion               Int                 @default(0)
   createdAt                  DateTime            @default(now())
@@ -142,18 +130,18 @@ model User {
 }
 
 model UserSession {
-  id        String   @id @default(uuid())
-  userId    String
-  sessionId String   @unique
-  ip        String?
-  userAgent String?
-  deviceId  String?
-  geoCity   String?
-  geoRegion String?
-  geoCountry String?
-  createdAt DateTime @default(now())
+  id              String   @id @default(uuid())
+  userId          String
+  sessionId       String   @unique
+  ip              String?
+  userAgent       String?
+  deviceId        String?
+  geoCity         String?
+  geoRegion       String?
+  geoCountry      String?
+  createdAt       DateTime @default(now())
   lastRefreshedAt DateTime @updatedAt
-  expiresAt DateTime
+  expiresAt       DateTime
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -195,7 +183,7 @@ model Product {
   category    Category
 
   images              String[]
-  thumbnail           String?   // 👈 ADD THIS
+  thumbnail           String? // 👈 ADD THIS
   video               String[]
   vendorId            String
   vendor              User                  @relation(name: "VendorProducts", fields: [vendorId], references: [id], onDelete: Cascade)
@@ -216,14 +204,6 @@ model Product {
   // Special requests associated with this product
   specialRequests     SpecialOrderRequest[] @relation("ProductSpecialRequests")
 
-
-  // 🟢 Live scheduling (mirrored for performance)
-  isLive    Boolean   @default(false) // current live state
-  liveUntil DateTime? // takeDownAt mirror
-
-  // 🔗 Full schedule relation
-  productSchedule ProductSchedule?
-
   // Essential indexes (keep these)
   @@index([name], map: "product_name_idx") // Speeds up search suggestions
   @@index([category], map: "product_category_idx") // Faster category filtering
@@ -231,60 +211,6 @@ model Product {
   @@index([archived])
   @@index([createdAt])
   @@index([price])
-  @@index([isLive])
-}
-
-model ProductSchedule {
-  id        String  @id @default(uuid())
-  productId String  @unique
-  product   Product @relation(fields: [productId], references: [id])
-
-  // ONE_TIME = absolute goLiveAt/takeDownAt window (legacy/compat).
-  // WEEKLY  = recurring weekly windows in ProductScheduleWindow, evaluated
-  // against the vendor's effective timezone. The schedule definition is
-  // the authoritative source; Product.isLive remains a display mirror.
-  type    ProductScheduleType @default(ONE_TIME)
-  enabled Boolean             @default(true)
-
-  goLiveAt   DateTime?
-  takeDownAt DateTime?
-  isLive     Boolean   @default(false)
-
-  // 🧭 Grace control for this session (ONE_TIME domain)
-  graceMinutes       Int?    @default(0)
-  autoGraceEnabled   Boolean @default(false)
-  manualGraceEnabled Boolean @default(false)
-
-  // WEEKLY recurrence range (optional). Interpreted as dates in the
-  // vendor's effective timezone; inclusive on both ends.
-  startDate DateTime?
-  endDate   DateTime?
-
-  windows ProductScheduleWindow[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-// One availability window inside a WEEKLY ProductSchedule. Multiple rows
-// per day are allowed (e.g. lunch 12:00–15:00 + dinner 18:00–22:00).
-// endMinute <= startMinute means the window crosses midnight into the next
-// day (e.g. Friday 22:00–02:00 → active Sat 00:00–02:00 as well).
-model ProductScheduleWindow {
-  id          String          @id @default(uuid())
-  scheduleId  String
-  schedule    ProductSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
-  dayOfWeek   Int             // 0 = Sunday … 6 = Saturday (JS/Postgres dow)
-  startMinute Int             // minutes from local midnight (0–1439)
-  endMinute   Int             // minutes from local midnight (1–1440); <= start ⇒ overnight
-  enabled     Boolean         @default(true)
-
-  @@index([scheduleId, dayOfWeek])
-}
-
-enum ProductScheduleType {
-  ONE_TIME
-  WEEKLY
 }
 
 model ProductOption {
@@ -331,7 +257,7 @@ model Order {
 
   // Set when this order was created from an accepted special-order offer
   // rather than a normal cart checkout.
-  specialOrderOfferId String?           @unique
+  specialOrderOfferId String?            @unique
   specialOrderOffer   SpecialOrderOffer? @relation("SpecialOfferOrder", fields: [specialOrderOfferId], references: [id])
 
   customer    User                 @relation("CustomerOrders", fields: [customerId], references: [id], onDelete: Cascade)
@@ -373,7 +299,7 @@ model OrderItem {
   unitPrice Float
   subtotal  Float
   createdAt DateTime          @default(now())
-  updatedAt DateTime?  // specialRequest String? // NEW FIELD
+  updatedAt DateTime? // specialRequest String? // NEW FIELD
   order     Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product   Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
   options   OrderItemOption[]
@@ -443,14 +369,14 @@ enum ReviewReportStatus {
 }
 
 model ReviewReport {
-  id        String   @id @default(uuid())
-  reviewId  String
-  userId    String
-  reason    String
-  status    ReviewReportStatus @default(PENDING)
+  id                String             @id @default(uuid())
+  reviewId          String
+  userId            String
+  reason            String
+  status            ReviewReportStatus @default(PENDING)
   resolvedByAdminId String?
   resolvedAt        DateTime?
-  createdAt DateTime @default(now())
+  createdAt         DateTime           @default(now())
 
   review ProductReview @relation(fields: [reviewId], references: [id], onDelete: Cascade)
   user   User          @relation("UserReviewReports", fields: [userId], references: [id], onDelete: Cascade)
@@ -508,21 +434,21 @@ model PasswordResetToken {
 }
 
 model Payment {
-  id           String   @id @default(cuid())
+  id           String        @id @default(cuid())
   userId       String
   orderId      String // the primary/first order this payment was initiated for
   amount       Int //mount in kobo, e.g. 600000 = ₦6,000.00 ✅
-  reference    String   @unique
+  reference    String        @unique
   status       PaymentStatus @default(PENDING)
   paystackData Json? // ✅ Add this
   channel      String? // ✅ Optional
-  ipAddress    String   @default("unknown") // ✅ fraud logs
-  userAgent    String   @default("unknown") // ✅ fraud logs
+  ipAddress    String        @default("unknown") // ✅ fraud logs
+  userAgent    String        @default("unknown") // ✅ fraud logs
   deviceId     String? // optional
   geoCity      String? // <-- add this
   geoCountry   String? // <-- add this
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @default(now()) @updatedAt // ✅ add default
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @default(now()) @updatedAt // ✅ add default
   metadata     Json? // ✅ add this line
 
   // A single checkout can produce multiple orders (one per vendor) that
@@ -705,7 +631,7 @@ model Promotion {
 }
 
 model PromotionUsage {
-  id          String  @id @default(uuid())
+  id          String   @id @default(uuid())
   promotionId String
   userId      String
   orderIds    String[] // every order this redemption's discount was applied across (a multi-vendor checkout batch)
@@ -773,17 +699,17 @@ model VendorPayout {
 }
 
 model RefundRequest {
-  id         String       @id @default(uuid())
-  user       User         @relation(fields: [userId], references: [id])
-  userId     String
-  paymentRef String // Paystack reference
-  reason     String
-  status     RefundStatus @default(PENDING)
-  adminNote          String?
-  resolvedByAdminId  String?
-  resolvedAt         DateTime?
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
+  id                String       @id @default(uuid())
+  user              User         @relation(fields: [userId], references: [id])
+  userId            String
+  paymentRef        String // Paystack reference
+  reason            String
+  status            RefundStatus @default(PENDING)
+  adminNote         String?
+  resolvedByAdminId String?
+  resolvedAt        DateTime?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
 
   // Set when the admin submits the refund to Paystack (APPROVED -> PROCESSING).
   // Paystack's own refund id/reference — used to match the async
@@ -1008,7 +934,7 @@ model RiderPayoutAccount {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  deliveryPerson DeliveryPerson @relation(fields: [deliveryPersonId], references: [id], onDelete: Cascade)
+  deliveryPerson DeliveryPerson    @relation(fields: [deliveryPersonId], references: [id], onDelete: Cascade)
   withdrawals    RiderWithdrawal[]
 
   @@index([bankCode])
@@ -1030,7 +956,7 @@ model RiderWithdrawal {
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
 
-  deliveryPerson   DeliveryPerson      @relation(fields: [deliveryPersonId], references: [id], onDelete: Cascade)
+  deliveryPerson   DeliveryPerson     @relation(fields: [deliveryPersonId], references: [id], onDelete: Cascade)
   payoutAccount    RiderPayoutAccount @relation(fields: [payoutAccountId], references: [id], onDelete: Restrict)
   processedByAdmin User?              @relation("RiderWithdrawalProcessedBy", fields: [processedByAdminId], references: [id])
 
@@ -1040,19 +966,19 @@ model RiderWithdrawal {
 }
 
 model DeliveryProof {
-  id                 String              @id @default(uuid())
-  assignmentId       String              @unique
-  proofUrl           String
-  mediaType          String
-  recipientName      String?
-  note               String?
-  status             DeliveryProofStatus @default(SUBMITTED)
-  reviewNote         String?
-  submittedAt        DateTime            @default(now())
-  reviewedAt         DateTime?
-  reviewedByAdminId  String?
-  createdAt          DateTime            @default(now())
-  updatedAt          DateTime            @updatedAt
+  id                String              @id @default(uuid())
+  assignmentId      String              @unique
+  proofUrl          String
+  mediaType         String
+  recipientName     String?
+  note              String?
+  status            DeliveryProofStatus @default(SUBMITTED)
+  reviewNote        String?
+  submittedAt       DateTime            @default(now())
+  reviewedAt        DateTime?
+  reviewedByAdminId String?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
 
   assignment      DeliveryAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   reviewedByAdmin User?              @relation("DeliveryProofReviewedBy", fields: [reviewedByAdminId], references: [id])
@@ -1179,15 +1105,15 @@ enum BroadcastStatus {
 }
 
 model DeliveryBroadcast {
-  id               String   @id @default(cuid())
-  orderId          String
-  driverIds        String[] // Array of driver UUIDs
-  declinedDriverIds String[] @default([]) // riders who explicitly dismissed this offer
-  acceptedDriverId String?
-  status           DeliveryBroadcastStatus // "PENDING" | "ACCEPTED" | "EXPIRED"
-  expiresAt        DateTime
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  id                String                  @id @default(cuid())
+  orderId           String
+  driverIds         String[] // Array of driver UUIDs
+  declinedDriverIds String[]                @default([]) // riders who explicitly dismissed this offer
+  acceptedDriverId  String?
+  status            DeliveryBroadcastStatus // "PENDING" | "ACCEPTED" | "EXPIRED"
+  expiresAt         DateTime
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
@@ -1230,15 +1156,15 @@ model VendorFollower {
 }
 
 model SpecialOrderRequest {
-  id         String   @id @default(uuid())
+  id         String                    @id @default(uuid())
   customerId String
-  vendorId   String?       // optional, because request may exist before a vendor responds
+  vendorId   String? // optional, because request may exist before a vendor responds
   productId  String
   quantity   Int
-  message    String        // you can use this as "details"
+  message    String // you can use this as "details"
   status     SpecialOrderRequestStatus @default(PENDING)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  createdAt  DateTime                  @default(now())
+  updatedAt  DateTime                  @updatedAt
 
   customer User    @relation("CustomerSpecialRequests", fields: [customerId], references: [id], onDelete: Cascade)
   vendor   User?   @relation("VendorSpecialRequests", fields: [vendorId], references: [id], onDelete: Cascade)
@@ -1247,16 +1173,15 @@ model SpecialOrderRequest {
   offers SpecialOrderOffer[]
 }
 
-
 model SpecialOrderOffer {
-  id        String   @id @default(uuid())
+  id        String                  @id @default(uuid())
   requestId String
   vendorId  String
   price     Float
   message   String?
   status    SpecialOrderOfferStatus @default(PENDING)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime                @default(now())
+  updatedAt DateTime                @updatedAt
 
   request SpecialOrderRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
   vendor  User                @relation("VendorSpecialOffers", fields: [vendorId], references: [id], onDelete: Cascade)

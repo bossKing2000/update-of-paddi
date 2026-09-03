@@ -32,7 +32,6 @@ import notificationRouter from "./routes/notificationRouter";
 import paymentRouter from "./routes/paymentRoute";
 import cartRouter from "./routes/cartRouter";
 import deliveryRouter from "./routes/deliveryRouter";
-import productScheduleRoutes from "./routes/productScheduleRoutes";
 import vendorFollowRoutes from "./routes/vendorFollowRoutes";
 import seederRoutes from "./routes/seeder.routes";
 
@@ -51,9 +50,7 @@ import "./jobs/node-cron/runJob"; // ✅ Automatically starts cron jobs
 // ------------------------------
 // BullMQ Workers (auto-start)
 // ------------------------------
-import "./jobs/workers jobs/productDeactivateJob";
 import "./jobs/workers jobs/vendorFollowWorker";
-import "./jobs/workers jobs/productLiveWorker";
 import vendorDashboardRoutes from "./routes/vendorDashboard.routes";
 import vendorSettingsRoutes from "./routes/vendorSettings.routes";
 import vendorSupportRoutes from "./routes/vendorSupport.routes";
@@ -70,7 +67,6 @@ import {
   riderProofReadRoutes,
 } from "./routes/riderOperations.routes";
 import { ProductImageService } from "./jobs/sripts/backfillThumbnails";
-import { fixLiveStatusJob } from "./jobs/workers jobs/fixLiveStatusJob";
 import { paystackWebhookHandler } from "./controllers/webhook";
 
 dotenv.config();
@@ -213,7 +209,6 @@ app.use("/api/cart", cartRouter);
 app.use("/api/payments", paymentRouter);
 app.use("/api/delivery", deliveryRouter);
 app.use("/api/delivery", riderProofReadRoutes);
-app.use("/api/product", productScheduleRoutes);
 app.use("/api/vendor-follow", vendorFollowRoutes);
 app.use("/api/seeder", seederRoutes);
 app.use("/api/vendor", vendorDashboardRoutes);
@@ -400,10 +395,10 @@ app.use(errorHandler);
 
 /**
  * Runs the non-critical startup maintenance tasks (search index setup,
- * thumbnail backfill, product live-status fix) in the background, after
- * the server is already listening. None of these should ever delay port
- * binding — a slow backfill previously ran *before* server.listen(),
- * which risks failing a platform's deploy health check on a large catalog.
+ * thumbnail backfill) in the background, after the server is already
+ * listening. None of these should ever delay port binding — a slow
+ * backfill previously ran *before* server.listen(), which risks failing a
+ * platform's deploy health check on a large catalog.
  */
 async function runBackgroundStartupTasks() {
   try {
@@ -462,15 +457,6 @@ async function runBackgroundStartupTasks() {
       "Thumbnail backfill encountered an error (non-critical)",
     );
   }
-
-  fixLiveStatusJob(true)
-    .then(() => logger.info("Background product status check completed"))
-    .catch((err) =>
-      logger.error(
-        { err },
-        "Background product status check failed (non-critical)",
-      ),
-    );
 }
 
 const startServer = async () => {

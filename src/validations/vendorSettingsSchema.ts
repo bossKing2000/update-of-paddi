@@ -1,22 +1,5 @@
 import { z } from "zod";
 
-const dayHoursSchema = z.object({
-  enabled: z.boolean(),
-  open: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(),
-  close: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(),
-});
-
-export const operatingHoursSchema = z.object({
-  timezone: z.string().min(1).default("Africa/Lagos"),
-  monday: dayHoursSchema,
-  tuesday: dayHoursSchema,
-  wednesday: dayHoursSchema,
-  thursday: dayHoursSchema,
-  friday: dayHoursSchema,
-  saturday: dayHoursSchema,
-  sunday: dayHoursSchema,
-});
-
 export const deliveryPreferencesSchema = z.object({
   acceptingOrders: z.boolean(),
   deliveryEnabled: z.boolean(),
@@ -39,7 +22,6 @@ export const serviceAreasSchema = z.object({
 });
 
 export const vendorSettingsSchema = z.object({
-  operatingHours: operatingHoursSchema,
   deliveryPreferences: deliveryPreferencesSchema,
   serviceAreas: serviceAreasSchema,
 });

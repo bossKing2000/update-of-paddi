@@ -1,28 +1,18 @@
 import prisma from "../lib/prisma";
 import { ValidationError } from "../errors/AppError";
-import {
-  evaluateProductSchedule,
-  EvaluableProductSchedule,
-} from "./scheduleRules.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Authoritative marketplace-availability service (Vendor Live migration)
+// Marketplace-availability service (Bottom Pot Stage 1: no product scheduling)
 //
 // ONE definition of "can this product be bought right now?" used by the
-// home feed, cart, checkout and payment flows. Product-schedule mirror
-// maintenance (fixLiveStatusJob / productLiveWorker / productDeactivateJob)
-// remains product-domain logic elsewhere; nothing here mutates state.
+// home feed, cart, checkout and payment flows. Nothing here mutates state.
 //
-// Semantics:
+// Semantics (Stage 1 — intentionally no stock requirement; stock arrives in
+// Stage 2):
 //   Vendor operating      = vendor.isLive AND deliveryPreferences does not
 //                           explicitly disable acceptingOrders
 //   Product available     = NOT archived
-//   Product schedule OK   = now inside [goLiveAt, takeDownAt + graceMinutes]
-//                           when a schedule exists (missing/incomplete
-//                           schedule defers to the stored isLive mirror,
-//                           matching computeIsLive everywhere else)
 //   Marketplace available = vendor operating AND product available
-//                           AND product schedule OK
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface VendorOperatingState {
@@ -30,37 +20,10 @@ export interface VendorOperatingState {
   isLive: boolean;
   kycStatus?: string | null;
   deliveryPreferences?: unknown;
-  /** IANA timezone used to evaluate recurring schedules in vendor-local time. */
-  timezone?: string | null;
-  /** Legacy fallback for effective-timezone resolution. */
-  operatingHours?: unknown;
-}
-
-/**
- * Effective business timezone of a vendor.
- * Resolution order: explicit column → legacy operatingHours.timezone → UTC.
- * (Never silently hardcoded to a specific city.)
- */
-export function resolveVendorTimezone(
-  timezone?: string | null,
-  operatingHours?: unknown,
-): string {
-  if (timezone && timezone.trim() !== "") return timezone.trim();
-  if (
-    operatingHours &&
-    typeof operatingHours === "object" &&
-    typeof (operatingHours as Record<string, unknown>).timezone === "string" &&
-    ((operatingHours as Record<string, unknown>).timezone as string).trim() !== ""
-  ) {
-    return ((operatingHours as Record<string, unknown>).timezone as string).trim();
-  }
-  return "UTC";
 }
 
 export interface ProductAvailabilityInput {
   archived: boolean;
-  isLive: boolean;
-  productSchedule?: EvaluableProductSchedule | null;
 }
 
 /** Vendors may pause orders without leaving the platform entirely. */
@@ -80,41 +43,21 @@ export function isVendorOperating(vendor: {
 }
 
 /**
- * Product-level availability — schedule evaluation + archived check.
- * Delegates to the single scheduling evaluator (scheduleRules.service):
- * WEEKLY schedules are evaluated in the vendor's effective timezone;
- * ONE_TIME/legacy rows use the absolute window with grace, deferring to the
- * stored mirror when no window exists (same semantics as computeIsLive).
+ * Product-level availability — archived check only (Stage 1).
+ * Stock/portion gating arrives in Stage 2; callers must not invent it here.
  */
 export function isProductCurrentlyAvailable(
   product: ProductAvailabilityInput,
-  now: Date = new Date(),
-  vendorTimezone?: string | null,
 ): boolean {
-  if (product.archived) return false;
-
-  return evaluateProductSchedule(
-    product.productSchedule,
-    now,
-    vendorTimezone ?? null,
-    product.isLive,
-  );
+  return product.archived === false;
 }
 
 /** The single marketplace-availability rule. */
 export function isProductMarketplaceAvailable(
   product: ProductAvailabilityInput,
   vendor: VendorOperatingState,
-  now: Date = new Date(),
 ): boolean {
-  return (
-    isVendorOperating(vendor) &&
-    isProductCurrentlyAvailable(
-      product,
-      now,
-      resolveVendorTimezone(vendor.timezone, vendor.operatingHours),
-    )
-  );
+  return isVendorOperating(vendor) && isProductCurrentlyAvailable(product);
 }
 
 /** Loads the minimal vendor state needed for availability decisions. */
@@ -127,8 +70,6 @@ export async function loadVendorOperatingState(
       id: true,
       isLive: true,
       deliveryPreferences: true,
-      timezone: true,
-      operatingHours: true,
     },
   });
   return vendor ?? null;

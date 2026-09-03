@@ -54,7 +54,7 @@ export const getCart = async (req: AuthRequest, res: Response) => {
     include: {
       items: {
         include: {
-          product: { include: { options: true, vendor: { select: { id: true, name: true } }, productSchedule: true } },
+          product: { include: { options: true, vendor: { select: { id: true, name: true } } } },
           options: { include: { productOption: true } },
         },
       },
@@ -87,11 +87,12 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
   if (!product) throw new NotFoundError("Product");
   if (product.archived) throw new ValidationError("Product is no longer available");
 
-  // Vendor Live gate — a product can only be ADDED to a cart while its
-  // vendor is currently operating and the product itself is orderable.
+  // Availability gate (Stage 1: no scheduling) — a product can only be
+  // ADDED to a cart while its vendor is live + accepting orders and the
+  // product itself is not archived.
   const vendorState = await loadVendorOperatingState(product.vendorId);
   assertVendorAvailableForOrdering(vendorState);
-  if (!isProductCurrentlyAvailable(product)) {
+  if (!isProductCurrentlyAvailable({ archived: product.archived })) {
     throw new ValidationError("This product is not currently available for ordering.");
   }
 
@@ -383,7 +384,7 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
 
   const cart = await prisma.cart.findFirst({
     where: { customerId: userId },
-    include: { items: { include: { product: { include: { options: true, vendor: true, productSchedule: true } }, options: true } } },
+    include: { items: { include: { product: { include: { options: true, vendor: true } }, options: true } } },
   });
 
   if (!cart || cart.items.length === 0) throw new ValidationError("Your cart is empty");
@@ -411,12 +412,11 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     throw new ValidationError("Some products in your cart were removed because they're no longer available.", { removedProductIds });
   }
 
-  const now = new Date();
-  // Authoritative marketplace-availability rule (Vendor Live migration):
-  // an item is checkoutable only while its vendor is currently operating
-  // AND the product itself passes its own schedule/archived checks. Items
-  // failing this stay in the cart (never silently deleted) so customers
-  // keep them for when the vendor comes back online.
+  // Marketplace-availability rule (Stage 1: no scheduling) — an item is
+  // checkoutable only while its vendor is live + accepting orders AND the
+  // product itself is not archived. Items failing this stay in the cart
+  // (never silently deleted) so customers keep them for when the vendor
+  // comes back online.
   const liveItems = cart.items.filter((item) => {
     const vendorOperating = isVendorOperating(item.product.vendor as {
       isLive: boolean;
@@ -424,11 +424,7 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     });
     return (
       vendorOperating &&
-      isProductCurrentlyAvailable({
-        archived: item.product.archived,
-        isLive: item.product.isLive,
-        productSchedule: item.product.productSchedule,
-      }, now)
+      isProductCurrentlyAvailable({ archived: item.product.archived })
     );
   });
   const offlineItems = cart.items.filter((item) => !liveItems.includes(item));
@@ -644,7 +640,6 @@ async function getEnhancedCart(cartId: string) {
             include: {
               options: true,
               vendor: { select: { id: true, name: true, isLive: true, deliveryPreferences: true } },
-              productSchedule: true, // needed to determine live/offline status
             },
           },
           options: { include: { productOption: true } },
@@ -655,22 +650,15 @@ async function getEnhancedCart(cartId: string) {
 
   if (!cart) return null;
 
-  const now = new Date();
-
   const enrichedItems = cart.items.map((item) => {
     const selectedOptionIds = item.options.map((opt) => opt.productOptionId);
     const product = item.product;
-    const schedule = product.productSchedule;
 
-    // Marketplace-orderable right now = vendor operating AND product passes
-    // its own schedule/archived checks (Vendor Live migration).
+    // Marketplace-orderable right now = vendor live + accepting orders AND
+    // product not archived (Stage 1: no scheduling, no stock yet).
     const productonline =
       isVendorOperating(product.vendor as { isLive: boolean; deliveryPreferences?: unknown }) &&
-      isProductCurrentlyAvailable({
-        archived: product.archived,
-        isLive: product.isLive,
-        productSchedule: schedule,
-      }, now);
+      isProductCurrentlyAvailable({ archived: product.archived });
 
     return {
       id: item.id,

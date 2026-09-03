@@ -7,7 +7,6 @@ import {
   PaymentStatus,
   DeliveryPersonStatus,
   DeliveryStatus,
-  ProductScheduleType,
   SupportTicketStatus,
   SpecialOrderRequestStatus,
   SpecialOrderOfferStatus,
@@ -60,12 +59,6 @@ export const SEED_CONFIG = {
   deliveryPeople: envInt("SEED_DELIVERY", 20),
   addressesPerUser: envRange("SEED_ADDRESSES_MIN", "SEED_ADDRESSES_MAX", 1, 2),
   productsPerVendor: envRange("SEED_PRODUCTS_MIN", "SEED_PRODUCTS_MAX", 1, 10),
-  liveProductPercentage: envRange(
-    "SEED_LIVE_PERCENTAGE_MIN",
-    "SEED_LIVE_PERCENTAGE_MAX",
-    10,
-    40,
-  ),
   optionsPerProduct: envRange("SEED_OPTIONS_MIN", "SEED_OPTIONS_MAX", 1, 3),
   productReviewsPerProduct: envRange(
     "SEED_PRODUCT_REVIEWS_MIN",
@@ -595,7 +588,6 @@ async function seedDatabase() {
           role === Role.VENDOR || role === Role.DELIVERY
             ? "VERIFIED"
             : undefined,
-        timezone: role === Role.VENDOR ? "Africa/Lagos" : undefined,
       });
     }
   };
@@ -655,10 +647,6 @@ async function seedDatabase() {
   );
 
   const products: Prisma.ProductCreateManyInput[] = [];
-  const liveProductPercentage = Math.min(
-    randomRange(SEED_CONFIG.liveProductPercentage),
-    100,
-  );
   for (const vendor of vendors)
     for (
       let index = 0;
@@ -666,8 +654,6 @@ async function seedDatabase() {
       index++
     ) {
       const name = `${pick(foodNames) || "Meal"} ${index + 1}`;
-      const productIsLive =
-        faker.number.int({ min: 1, max: 100 }) <= liveProductPercentage;
       products.push({
         id: faker.string.uuid(),
         name,
@@ -691,8 +677,6 @@ async function seedDatabase() {
         vendorId: vendor.id,
         images: randomImages(),
         video: randomVideos(),
-        isLive: productIsLive,
-        liveUntil: productIsLive ? new Date(Date.now() + 30 * DAY_MS) : null,
         totalViews: faker.number.int({ min: 0, max: 1000 }),
         isNew: true,
       });
@@ -706,7 +690,6 @@ async function seedDatabase() {
     },
   });
   const options: Prisma.ProductOptionCreateManyInput[] = [];
-  const schedules: Prisma.ProductScheduleCreateManyInput[] = [];
   for (const product of savedProducts) {
     for (
       let index = 0;
@@ -718,32 +701,19 @@ async function seedDatabase() {
         name: `Option ${index + 1}`,
         price: money(100, 1000),
       });
-    schedules.push({
-      productId: product.id,
-      type: ProductScheduleType.ONE_TIME,
-      enabled: true,
-      goLiveAt: new Date(Date.now() - DAY_MS),
-      takeDownAt: product.isLive
-        ? new Date(Date.now() + 30 * DAY_MS)
-        : new Date(Date.now() - DAY_MS),
-      isLive: product.isLive,
-      graceMinutes: 15,
-    });
   }
   await createMany(
     (data) => prisma.productOption.createMany({ data }),
     options,
   );
-  await createMany(
-    (data) => prisma.productSchedule.createMany({ data, skipDuplicates: true }),
-    schedules,
-  );
   setProgress(
     35,
-    `Created ${savedProducts.length} products, ${options.length} options and schedules`,
+    `Created ${savedProducts.length} products and ${options.length} options`,
   );
 
-  const liveProducts = savedProducts.filter((product) => product.isLive);
+  // Stage 1: every seeded product is non-archived, i.e. orderable while its
+  // vendor is live + accepting orders. There is no scheduling anymore.
+  const liveProducts = savedProducts.filter((product) => !product.archived);
 
   const productReviews: Prisma.ProductReviewCreateManyInput[] = [];
   for (const product of savedProducts)

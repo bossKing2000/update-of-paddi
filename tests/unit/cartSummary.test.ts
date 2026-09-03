@@ -29,12 +29,10 @@ function makeCartItem(overrides: any = {}) {
       name: "Jollof Rice",
       images: ["img.png"],
       archived: false,
-      isLive: true,
       vendorId: "vendor-1",
-      // Vendor Live migration: fixtures default to an operating vendor so
-      // the marketplace-availability gate passes unless a test opts out.
+      // Fixtures default to an operating vendor so the
+      // marketplace-availability gate passes unless a test opts out.
       vendor: { name: "Mama Put", isLive: true, deliveryPreferences: { acceptingOrders: true } },
-      productSchedule: null,
       ...(overrides.product || {}),
     },
   };
@@ -52,11 +50,11 @@ describe("cartSummaryService", () => {
     expect(result.finalTotal).toBe(0);
   });
 
-  it("excludes offline (not isLive) items and reports the count", async () => {
+  it("excludes archived items and reports the count", async () => {
     mockedFindFirst.mockResolvedValue({
       items: [
         makeCartItem({ id: "a" }),
-        makeCartItem({ id: "b", product: { isLive: false } }),
+        makeCartItem({ id: "b", product: { archived: true } }),
       ],
     });
 

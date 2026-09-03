@@ -44,7 +44,7 @@ describe("home feed contract surface", () => {
 
   it("reuses existing query logic rather than duplicating it", () => {
     assert.match(service, /fetchMostPopularProducts/);
-    assert.match(service, /fetchLiveProducts/); // schedule-aware LIVE section
+    assert.match(service, /fetchLiveProducts/); // orderable-dishes LIVE section
     assert.match(service, /fetchNewProducts/);
     assert.match(service, /fetchProductPage/);
     assert.match(service, /findNearbyVendors/);
@@ -54,21 +54,21 @@ describe("home feed contract surface", () => {
     const productController = read("src", "controllers", "productController.ts");
     assert.match(productController, /fetchProductPage\(/);
     assert.match(productController, /fetchMostPopularProducts\(/);
-    // ...and the original p/most endpoint must NOT switch to the
-    // schedule-aware listing — its contract stays stored-flag based
+    // ...and the original p/most endpoint keeps its own contract —
+    // it must NOT switch to the home-feed live listing
     assert.doesNotMatch(productController, /fetchLiveProducts/);
     const promoController = read("src", "controllers", "promoController.ts");
     assert.match(promoController, /getActivePromotionsForCustomer\(userId\)/);
   });
 
-  it("keeps popularProducts on p/most semantics while liveProducts is schedule-aware", () => {
-    // live section: window predicate (source of truth)
+  it("keeps popularProducts on p/most semantics while liveProducts lists orderable dishes", () => {
+    // live section: currently-orderable marketplace products (Stage 1:
+    // no scheduling — no schedule tables, mirrors, or window predicates)
     const productService = read("src", "services", "product.service.ts");
     assert.match(productService, /export async function fetchLiveProducts/);
-    assert.match(
-      productService,
-      /s\."takeDownAt" \+ \(COALESCE\(s\."graceMinutes", 0\) \* INTERVAL '1 minute'\) >= NOW\(\)/,
-    );
+    assert.doesNotMatch(productService, /ProductSchedule/);
+    assert.doesNotMatch(productService, /takeDownAt|goLiveAt|graceMinutes/);
+    assert.doesNotMatch(productService, /weeklyAwareLivePredicate|WEEKLY_SCHEDULE_ACTIVE_SQL/);
     // feed cache key/TTL untouched by the robustness patch
     assert.match(cacheTiming, /HOME_FEED: 90/);
     assert.doesNotMatch(service, /home:feed:v2|home:live/);
@@ -116,9 +116,9 @@ describe("home feed contract surface", () => {
     // feed discovery surfaces are vendor-gated; plain browse is not forced to be
     assert.match(service, /vendorMustBeOperating: true/);
     const productService = read("src", "services", "product.service.ts");
-    assert.match(productService, /VENDOR_OPERATING_SQL/);
-    assert.match(productService, /v\."isLive" = true/);
-    assert.match(productService, /acceptingOrders', 'true'\) <> 'false'/);
+    assert.match(productService, /vendorOperatingWhere/);
+    assert.match(productService, /isLive: true/);
+    assert.match(productService, /acceptingOrders/);
     const productController = read("src", "controllers", "productController.ts");
     assert.doesNotMatch(productController, /vendorMustBeOperating/); // GET /product unchanged
 

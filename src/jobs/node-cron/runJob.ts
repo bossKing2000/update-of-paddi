@@ -3,7 +3,6 @@ import { runOrderCleanupJob } from "../workers jobs/orderCleanupJob";
 import { runExpireAwaitingPaymentJob } from "../workers jobs/expireAwaitingPaymentJob";
 import { verifyPendingPayments } from "../payment/worker/verifyPendingPayments";
 import { verifyPendingRefunds } from "../payment/worker/verifyPendingRefunds";
-import { fixLiveStatusJob } from "../workers jobs/fixLiveStatusJob";
 import { DeliveryAssignmentService } from "../../services/deliveryAssignment";
 import { logger } from "../../lib/logger";
 
@@ -58,16 +57,6 @@ cron.schedule("*/10 * * * *", async () => {
   } catch (err) {
     logger.error({ err }, "[CRON] Verify pending refunds failed");
   }
-});
-
-/**
- * 🟢 Fix Live Status Job
- * Runs every 5 minutes to ensure product `isLive` status matches schedule.
- */
-cron.schedule("*/5 * * * *", () => {
-  fixLiveStatusJob(false)
-    .then((result) => logger.info({ updatedCount: result.updatedCount }, "[CRON] Product status fix completed"))
-    .catch((err) => logger.error({ err }, "[CRON] Product status fix failed"));
 });
 
 /**

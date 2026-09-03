@@ -1,71 +1,20 @@
 import { Request, Response } from "express";
 import prisma from "../lib/prisma";
-
-const DAY_KEYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-
-interface DayHours {
-  enabled: boolean;
-  open?: string | null;
-  close?: string | null;
-}
-
-interface OperatingHours {
-  timezone?: string;
-  [day: string]: unknown;
-}
-
-interface DeliveryPreferences {
-  acceptingOrders?: boolean;
-}
+import { isVendorOperating } from "../services/vendorAvailability.service";
 
 /**
- * Whether a vendor is open right now. Two independent signals, either of
- * which can close them:
- *   - `deliveryPreferences.acceptingOrders === false` — an explicit manual
- *     pause, independent of the schedule
- *   - today's entry in `operatingHours` (evaluated in the vendor's own
- *     timezone, defaulting to Africa/Lagos) not being enabled or the
- *     current time falling outside its open/close window
+ * Whether a vendor is open right now (Bottom Pot Stage 1: no scheduling).
  *
- * A vendor who has never configured either setting is treated as open —
- * same "no schedule configured" default `computeIsLive` uses for products
- * with no ProductSchedule row.
+ * A vendor is open while they are live on the marketplace AND have not
+ * explicitly paused orders via `deliveryPreferences.acceptingOrders`.
+ * There is no operating-hours schedule anymore — vendors sell whenever
+ * they are accepting orders.
  */
-export function computeVendorIsOpen(
-  operatingHours: OperatingHours | null | undefined,
-  deliveryPreferences: DeliveryPreferences | null | undefined,
-): boolean {
-  if (deliveryPreferences?.acceptingOrders === false) return false;
-  if (!operatingHours) return true;
-
-  const timezone = operatingHours.timezone || "Africa/Lagos";
-  let dayKey: string;
-  let hhmm: string;
-  try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone,
-      weekday: "long",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).formatToParts(new Date());
-    dayKey = (parts.find((p) => p.type === "weekday")?.value || "").toLowerCase();
-    const hour = parts.find((p) => p.type === "hour")?.value || "00";
-    const minute = parts.find((p) => p.type === "minute")?.value || "00";
-    hhmm = `${hour === "24" ? "00" : hour}:${minute}`;
-  } catch {
-    // Bad/unrecognized timezone string shouldn't hide a vendor from search.
-    return true;
-  }
-
-  if (!DAY_KEYS.includes(dayKey)) return true;
-  const today = operatingHours[dayKey] as DayHours | undefined;
-  if (!today || today.enabled !== true) return false;
-  if (!today.open || !today.close) return true; // enabled, no explicit window = open all day
-
-  // Overnight windows, e.g. open 18:00 close 02:00.
-  if (today.close < today.open) return hhmm >= today.open || hhmm <= today.close;
-  return hhmm >= today.open && hhmm <= today.close;
+export function computeVendorIsOpen(vendor: {
+  isLive: boolean;
+  deliveryPreferences?: unknown;
+}): boolean {
+  return isVendorOperating(vendor);
 }
 
 export async function getNearbyVendors(req: Request, res: Response) {
@@ -98,7 +47,7 @@ export async function findNearbyVendors(lat: number, lng: number, radiusKm: numb
       brandName: true,
       brandLogo: true,
       avatarUrl: true,
-      operatingHours: true,
+      isLive: true,
       deliveryPreferences: true,
       addresses: { where: { isDefault: true } },
     },
@@ -128,10 +77,10 @@ export async function findNearbyVendors(lat: number, lng: number, radiusKm: numb
         brandName: vendor.brandName,
         brandLogo: vendor.brandLogo || vendor.avatarUrl,
         distanceKm,
-        isOpen: computeVendorIsOpen(
-          vendor.operatingHours as OperatingHours | null,
-          vendor.deliveryPreferences as DeliveryPreferences | null,
-        ),
+        isOpen: computeVendorIsOpen({
+          isLive: vendor.isLive,
+          deliveryPreferences: vendor.deliveryPreferences,
+        }),
       };
     })
     .filter((v): v is NonNullable<typeof v> => v !== null)

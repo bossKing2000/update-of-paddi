@@ -1,29 +1,9 @@
 import {
   deliveryPreferencesSchema,
-  operatingHoursSchema,
   serviceAreasSchema,
 } from "../../src/validations/vendorSettingsSchema";
 
-const hours = {
-  timezone: "Africa/Lagos",
-  monday: { enabled: true, open: "10:00", close: "22:00" },
-  tuesday: { enabled: true, open: "10:00", close: "22:00" },
-  wednesday: { enabled: true, open: "10:00", close: "22:00" },
-  thursday: { enabled: true, open: "10:00", close: "22:00" },
-  friday: { enabled: true, open: "10:00", close: "22:00" },
-  saturday: { enabled: true, open: "10:00", close: "22:00" },
-  sunday: { enabled: false, open: null, close: null },
-};
-
-describe("vendor settings validation", () => {
-  it("accepts a complete weekly schedule", () => {
-    expect(operatingHoursSchema.safeParse(hours).success).toBe(true);
-  });
-
-  it("rejects invalid 24-hour time values", () => {
-    expect(operatingHoursSchema.safeParse({ ...hours, monday: { enabled: true, open: "25:00", close: "22:00" } }).success).toBe(false);
-  });
-
+describe("vendor settings validation (Stage 1: no operating hours)", () => {
   it("accepts bounded delivery preferences", () => {
     expect(deliveryPreferencesSchema.safeParse({ acceptingOrders: true, deliveryEnabled: true, deliveryRadiusKm: 20, baseDeliveryFee: 300, preparationTimeMinutes: 30 }).success).toBe(true);
   });

@@ -58,7 +58,7 @@ export const cartSummaryService = async ({
     include: {
       items: {
         include: {
-          product: { include: { vendor: true, productSchedule: true } },
+          product: { include: { vendor: true } },
         },
       },
     },
@@ -79,10 +79,8 @@ export const cartSummaryService = async ({
 
   // Only items that are currently marketplace-available count toward the
   // summary — mirrors the exact availability split checkoutCart applies
-  // (Vendor Live: vendor operating AND product within its own schedule and
-  // not archived), so the total shown here always matches what checkout
-  // will actually charge.
-  const now = new Date();
+  // (Stage 1: vendor live + accepting orders AND product not archived), so
+  // the total shown here always matches what checkout will actually charge.
   const purchasableItems = cart.items.filter((item) => {
     const product = item.product;
     if (product.archived) return false;
@@ -92,11 +90,7 @@ export const cartSummaryService = async ({
     });
     return (
       vendorOperating &&
-      isProductCurrentlyAvailable({
-        archived: product.archived,
-        isLive: product.isLive,
-        productSchedule: product.productSchedule,
-      }, now)
+      isProductCurrentlyAvailable({ archived: product.archived })
     );
   });
 
