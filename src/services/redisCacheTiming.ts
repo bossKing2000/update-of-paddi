@@ -23,8 +23,6 @@ export const CACHE_KEYS = {
   PRODUCTS_MOST_POPULAR: (page: number, limit: number) =>
     `products:mostPopular:page=${page}:limit=${limit}`,
 
-  CATEGORIES_ALL: "categories:all",
-
   DISH_TYPES_ALL: "dishtypes:all",
 
   WHATS_IN_THE_POT: "home:pot",
@@ -47,8 +45,7 @@ export const CACHE_TTLS = {
   PRODUCTS_ALL: 60 * 60 * 5,          
   PRODUCT_DETAIL: 60 * 60 * 5,        
   SEARCH: 60 * 60 * 3,                
-  SUGGESTIONS: 60 * 30,               
-  CATEGORIES_ALL: 60 * 60,
+  SUGGESTIONS: 60 * 30,
   DISH_TYPES_ALL: 60 * 60,
 
   // The pot changes as vendors sell out — keep it fresh (60s).

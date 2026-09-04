@@ -24,6 +24,13 @@ import { calculateDeliveryFee } from "../services/deliveryFee.service";
 import { restoreStockForOrders } from "../services/inventory.service";
 import { creditReferralRewardIfEligible } from "./referralController";
 import { logger } from "../lib/logger";
+import {
+  assertQuantityAvailable,
+  reserveStockForItems,
+} from "../services/inventory.service";
+import {
+  assertVendorAvailableForOrdering,
+} from "../services/vendorAvailability.service";
 
 const round = (v: number) => Number(v.toFixed(2));
 
@@ -944,20 +951,62 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
     );
   }
 
-  const [, , acceptedOffer, order] = await prisma.$transaction([
-    prisma.specialOrderOffer.updateMany({
+  // Special orders bypass the cart, but they must not bypass availability:
+  // the vendor must be operating and the requested product/quantity must
+  // be purchasable (not archived, in stock).
+  const requestedProduct = await prisma.product.findUnique({
+    where: { id: offer.request.productId },
+    select: {
+      id: true,
+      name: true,
+      archived: true,
+      trackInventory: true,
+      stock: true,
+      vendor: { select: { isLive: true, deliveryPreferences: true } },
+    },
+  });
+  if (!requestedProduct || requestedProduct.archived) {
+    throw new ValidationError("This product is no longer available.");
+  }
+  assertVendorAvailableForOrdering(
+    requestedProduct.vendor
+      ? { id: offer.vendorId, ...requestedProduct.vendor }
+      : null,
+  );
+  assertQuantityAvailable({
+    productId: requestedProduct.id,
+    productName: requestedProduct.name,
+    quantity: offer.request.quantity,
+    trackInventory: requestedProduct.trackInventory,
+    stock: requestedProduct.stock,
+  });
+
+  const [, , acceptedOffer, order] = await prisma.$transaction(async (tx) => {
+    // Reserve stock atomically with order creation (same final-portion
+    // guarantee as cart checkout; rolls back on failure).
+    await reserveStockForItems(tx, [
+      {
+        productId: requestedProduct.id,
+        productName: requestedProduct.name,
+        quantity: offer.request.quantity,
+        trackInventory: requestedProduct.trackInventory,
+        stock: requestedProduct.stock,
+      },
+    ]);
+
+    const rejected = await tx.specialOrderOffer.updateMany({
       where: { requestId: offer.requestId, id: { not: offerId } },
       data: { status: "REJECTED" },
-    }),
-    prisma.specialOrderRequest.update({
+    });
+    const acceptedRequest = await tx.specialOrderRequest.update({
       where: { id: offer.requestId },
       data: { status: "ACCEPTED" },
-    }),
-    prisma.specialOrderOffer.update({
+    });
+    const accepted = await tx.specialOrderOffer.update({
       where: { id: offerId },
       data: { status: "ACCEPTED" },
-    }),
-    prisma.order.create({
+    });
+    const created = await tx.order.create({
       data: {
         customerId: userId,
         vendorId: offer.vendorId,
@@ -981,8 +1030,10 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
         },
       },
       include: { items: true },
-    }),
-  ]);
+    });
+    await clearProductCache(requestedProduct.id, offer.vendorId).catch(() => {});
+    return [rejected, acceptedRequest, accepted, created] as const;
+  });
 
   // Previously the vendor was never notified their offer was accepted —
   // they'd only find out by happening to check their orders list.

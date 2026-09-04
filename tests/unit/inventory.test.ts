@@ -1,3 +1,16 @@
+jest.mock("../../src/lib/redis", () => ({
+  __esModule: true,
+  redisProducts: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+  redisSearch: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+  redisTotalViews: { get: jest.fn(), set: jest.fn(), del: jest.fn(), incr: jest.fn(), expire: jest.fn() },
+  ShopCartRedis: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+}));
+
+jest.mock("../../src/lib/redisScan", () => ({
+  __esModule: true,
+  scanKeys: jest.fn(async () => []),
+}));
+
 import {
   assertQuantityAvailable,
   reserveStockForItems,

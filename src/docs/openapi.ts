@@ -134,10 +134,11 @@ export const openApiDocument = {
       post: { tags: ["Reviews"], summary: "Review a vendor (requires a completed order from them)", parameters: [{ name: "vendorId", in: "path", required: true, schema: { type: "string", format: "uuid" } }], responses: { "201": { description: "Created" } } },
     },
     "/product": {
-      get: { tags: ["Products"], summary: "List products (paginated, optional category filter)", parameters: [{ name: "page", in: "query", schema: { type: "integer" } }, { name: "limit", in: "query", schema: { type: "integer" } }, { name: "category", in: "query", schema: { type: "string" } }], responses: { "200": { description: "Products" } } },
-      post: { tags: ["Products"], summary: "Create a product (vendor only, multipart/form-data)", responses: { "201": { description: "Created" } } },
+      get: { tags: ["Products"], summary: "List products (paginated; dishType, vendorId, price, rating, availability filters; popularity/price/rating/newest sort)", parameters: [{ name: "page", in: "query", schema: { type: "integer" } }, { name: "limit", in: "query", schema: { type: "integer" } }, { name: "dishType", in: "query", schema: { type: "string" } }, { name: "vendorId", in: "query", schema: { type: "string" } }, { name: "minPrice", in: "query", schema: { type: "number" } }, { name: "maxPrice", in: "query", schema: { type: "number" } }, { name: "minRating", in: "query", schema: { type: "number" } }, { name: "availableOnly", in: "query", schema: { type: "boolean" } }, { name: "sortBy", in: "query", schema: { type: "string", enum: ["popularity", "priceAsc", "priceDesc", "newest", "rating"] } }], responses: { "200": { description: "Products" } } },
+      post: { tags: ["Products"], summary: "Create a product (vendor only, multipart/form-data; dishTypeId, portion, stock, add-ons)", responses: { "201": { description: "Created" } } },
     },
-    "/product/categories": { get: { tags: ["Products"], summary: "List valid product categories", responses: { "200": { description: "Categories" } } } },
+    "/product/dish-types": { get: { tags: ["Products"], summary: "Curated dish-type vocabulary (What's in the Pot?)", responses: { "200": { description: "Dish types" } } } },
+    "/product/categories": { get: { tags: ["Products"], summary: "Deprecated alias of /product/dish-types", responses: { "200": { description: "Dish types" } } } },
     "/product/{id}": {
       get: { tags: ["Products"], summary: "Get a product by id", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }], responses: { "200": { description: "Product" } } },
       patch: { tags: ["Products"], summary: "Update a product (vendor, owner only)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }], responses: { "200": { description: "Updated" } } },
@@ -149,9 +150,11 @@ export const openApiDocument = {
       },
     },
     "/product/{id}/archive": { patch: { tags: ["Products"], summary: "Archive or unarchive a product", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }], responses: { "200": { description: "Updated" } } } },
-    "/product/p/search": { get: { tags: ["Products"], summary: "Full-text + fuzzy product search with typo correction", parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }, { name: "page", in: "query", schema: { type: "integer" } }, { name: "sortBy", in: "query", schema: { type: "string", enum: ["relevance", "priceAsc", "priceDesc", "popularity", "newest"] } }], responses: { "200": { description: "Results" } } } },
-    "/product/p/suggestions": { get: { tags: ["Products"], summary: "Search-box autocomplete suggestions", parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }], responses: { "200": { description: "Suggestions" } } } },
-    "/product/p/most": { get: { tags: ["Products"], summary: "Most popular live products", parameters: [{ name: "page", in: "query", schema: { type: "integer" } }], responses: { "200": { description: "Products" } } } },
+    "/product/p/search": { get: { tags: ["Products"], summary: "Full-text + fuzzy product search with typo correction (matches names, descriptions and dish types)", parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }, { name: "page", in: "query", schema: { type: "integer" } }, { name: "sortBy", in: "query", schema: { type: "string", enum: ["relevance", "priceAsc", "priceDesc", "popularity", "newest"] } }], responses: { "200": { description: "Results" } } } },
+    "/product/p/suggestions": { get: { tags: ["Products"], summary: "Search-box autocomplete suggestions (name + dish type)", parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }], responses: { "200": { description: "Suggestions" } } } },
+    "/product/p/most": { get: { tags: ["Products"], summary: "Most popular orderable products", parameters: [{ name: "page", in: "query", schema: { type: "integer" } }], responses: { "200": { description: "Products" } } } },
+    "/product/p/new": { get: { tags: ["Products"], summary: "Newest products", parameters: [{ name: "limit", in: "query", schema: { type: "integer" } }, { name: "dishType", in: "query", schema: { type: "string" } }], responses: { "200": { description: "Products" } } } },
+    "/home/whats-in-the-pot": { get: { tags: ["Discovery"], summary: "Dish types with something orderable right now, ranked by count", responses: { "200": { description: "Pot" } } } },
     "/delivery/assign": {
       post: {
         tags: ["Delivery"],

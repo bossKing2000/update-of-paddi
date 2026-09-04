@@ -322,6 +322,15 @@ export async function fetchProductPage(opts: {
       ],
     };
   }
+  if (availableOnly) {
+    // availableOnly means currently orderable: sold-out products are
+    // excluded at query level (plain browse keeps them discoverable with
+    // orderable=false so customers see alternatives).
+    where.AND = [
+      ...(Array.isArray(where.AND) ? where.AND : []),
+      { OR: [{ trackInventory: false }, { stock: { gt: 0 } }] },
+    ];
+  }
 
   // Catalog sorting. Default (omitted sortBy) is newest-first.
   let orderBy: Prisma.ProductOrderByWithRelationInput[];

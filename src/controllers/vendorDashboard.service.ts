@@ -1,6 +1,7 @@
 import { OrderStatus } from "@prisma/client";
 import { startOfDay, endOfDay, subDays, format } from "date-fns";
 import { clearProductCache } from "../services/clearCaches";
+import { isProductCurrentlyAvailable } from "../services/vendorAvailability.service";
 import { redisProducts } from "../lib/redis";
 import prisma from "../lib/prisma";
 
@@ -481,12 +482,14 @@ async getOrdersToday(): Promise<number> {
       });
     }
 
-    // Orderable = not archived AND in stock (untracked counts as in stock).
+    // Same rule as the storefront (isProductCurrentlyAvailable).
     const formattedProducts = productsData.map((p) => ({
       ...p,
-      orderable:
-        p.archived === false &&
-        (!p.trackInventory || (p.stock ?? 0) > 0),
+      orderable: isProductCurrentlyAvailable({
+        archived: p.archived,
+        trackInventory: p.trackInventory,
+        stock: p.stock,
+      }),
     }));
 
     const pagination = {

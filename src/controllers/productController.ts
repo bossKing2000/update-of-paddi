@@ -873,6 +873,19 @@ export const deleteProduct = async (req: AuthRequest, res: Response) => {
   await clearProductCache(product.id, req.user.id);
   await clearProductFromCarts(product.id);
 
+  // Orphaned media: the row is gone, so remove its Cloudinary assets in
+  // the background — a failure must not fail the deletion itself.
+  if ((product.images?.length ?? 0) > 0 || (product.video?.length ?? 0) > 0) {
+    setTimeout(() => {
+      cleanupCloudinaryAssets(
+        product.images ?? [],
+        product.video?.[0] ?? null,
+      ).catch((err) =>
+        logger.warn({ err, productId }, "Background Cloudinary cleanup failed"),
+      );
+    }, 1000);
+  }
+
   return sendSuccess(res, {}, "Product deleted successfully");
 };
 
@@ -1067,7 +1080,7 @@ export const searchProducts = async (req: Request, res: Response) => {
   const vendorJoin = ` LEFT JOIN "User" v ON v."id" = p."vendorId"`;
   const vendorFilterSql =
     availableOnlyRaw === "true"
-      ? ` AND v."isLive" = true AND COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') <> 'false'`
+      ? ` AND v."isLive" = true AND COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') <> 'false' AND (NOT p."trackInventory" OR COALESCE(p.stock, 0) > 0)`
       : "";
   // Dish-type names participate in matching via this join, so "jollof"
   // finds "Smoky Party Rice" when its dishType is JOLLOF.
