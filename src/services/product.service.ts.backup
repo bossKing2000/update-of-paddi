@@ -216,9 +216,9 @@ export interface ProductListItem {
   /** Tracked and zero remaining — visible but not orderable. */
   soldOut: boolean;
   /** Vendor is live on the marketplace AND accepting orders. */
-  vendorOperating: boolean;
+  vendorOperating?: boolean;
   /** Marketplace availability (vendor operating + not archived + stock). */
-  orderable: boolean;
+  orderable?: boolean;
   vendor: { id: string; name: string; brandName: string | null; avatarUrl: string | null };
 }
 
@@ -558,11 +558,6 @@ export interface NewProductItem {
   images: string[];
   isNew: boolean;
   createdAt: Date;
-  trackInventory: boolean;
-  stock: number | null;
-  archived: boolean;
-  vendorOperating: boolean;
-  orderable: boolean;
   vendor: { id: string; name: string; brandName: string | null; avatarUrl: string | null };
 }
 
@@ -605,30 +600,39 @@ export async function fetchNewProducts(opts: {
   const where: Prisma.ProductWhereInput = { archived: false, isNew: true };
   if (dishType) where.dishTypeId = dishType;
 
-const [dbProducts, total] = await Promise.all([
+  const [items, total] = await Promise.all([
     prisma.product.findMany({
       where,
-      take,
       orderBy: { createdAt: "desc" },
+      take,
       select: {
-        ...productListSelect,
+        id: true,
+        name: true,
+        price: true,
+        dishType: { select: { id: true, name: true } },
+        images: true,
+        thumbnail: true,
         isNew: true,
         createdAt: true,
+        vendor: {
+          select: { id: true, name: true, brandName: true, avatarUrl: true },
+        },
       },
     }),
     prisma.product.count({ where }),
   ]);
 
-  const items = dbProducts.map((p) => {
-    const base = toProductListItem(p);
-    return {
-      ...base,
-      archived: p.archived,
+  return {
+    items: items.map((p) => ({
+      id: p.id,
+      name: p.name,
+      price: p.price,
+      dishType: p.dishType,
+      images: p.thumbnail ? [p.thumbnail] : p.images.length > 0 ? [p.images[0]] : [],
       isNew: p.isNew,
       createdAt: p.createdAt,
-    };
-  });
-
-  return { items, total };
+      vendor: p.vendor,
+    })),
+    total,
+  };
 }
-
