@@ -7,11 +7,12 @@ import { ValidationError } from "../errors/AppError";
 // ONE definition of "can this product be bought right now?" used by the
 // home feed, cart, checkout and payment flows. Nothing here mutates state.
 //
-// Semantics (Stage 1 — intentionally no stock requirement; stock arrives in
-// Stage 2):
+// Semantics:
 //   Vendor operating      = vendor.isLive AND deliveryPreferences does not
 //                           explicitly disable acceptingOrders
-//   Product available     = NOT archived
+//   Product available     = NOT archived AND in stock
+//                           (untracked products are always in stock;
+//                           tracked products need stock > 0)
 //   Marketplace available = vendor operating AND product available
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -24,6 +25,20 @@ export interface VendorOperatingState {
 
 export interface ProductAvailabilityInput {
   archived: boolean;
+  trackInventory?: boolean | null;
+  stock?: number | null;
+}
+
+/**
+ * Stock rule: untracked products are always in stock; tracked products
+ * need at least one remaining portion. Sold out (0) is NOT orderable.
+ */
+export function isProductInStock(product: {
+  trackInventory?: boolean | null;
+  stock?: number | null;
+}): boolean {
+  if (!product.trackInventory) return true;
+  return (product.stock ?? 0) > 0;
 }
 
 /** Vendors may pause orders without leaving the platform entirely. */
@@ -43,13 +58,13 @@ export function isVendorOperating(vendor: {
 }
 
 /**
- * Product-level availability — archived check only (Stage 1).
- * Stock/portion gating arrives in Stage 2; callers must not invent it here.
+ * Product-level availability: not archived AND in stock.
+ * (Vendor operating state is checked separately via isVendorOperating.)
  */
 export function isProductCurrentlyAvailable(
   product: ProductAvailabilityInput,
 ): boolean {
-  return product.archived === false;
+  return product.archived === false && isProductInStock(product);
 }
 
 /** The single marketplace-availability rule. */

@@ -5,6 +5,7 @@ import {
   getHomeFeed,
   parseHomeFeedQuery,
 } from "../services/homeFeed.service";
+import { fetchWhatsInThePot } from "../services/product.service";
 
 // GET /api/home/feed
 //
@@ -16,11 +17,12 @@ export const getHomeFeedController = async (
   req: AuthRequest,
   res: Response
 ) => {
-  // Invalid category throws ValidationError → central error middleware
+  // Invalid dishType throws ValidationError → central error middleware
   // serializes it with the standard error envelope.
-  const query = parseHomeFeedQuery({
+  const query = await parseHomeFeedQuery({
     lat: req.query.lat,
     lng: req.query.lng,
+    dishType: req.query.dishType as string | undefined,
     category: req.query.category as string | undefined,
     limit: req.query.limit,
   });
@@ -32,4 +34,15 @@ export const getHomeFeedController = async (
 
   res.setHeader("X-Cache", cache);
   return sendSuccess(res, payload, "Home feed fetched successfully");
+};
+
+// GET /api/home/whats-in-the-pot — public, no auth required.
+// Dish types with at least one orderable product right now, ranked by
+// count. Dynamic: a dish with nothing orderable never appears.
+export const getWhatsInThePotController = async (
+  _req: AuthRequest,
+  res: Response,
+) => {
+  const pot = await fetchWhatsInThePot();
+  return sendSuccess(res, { pot }, "What's in the pot fetched successfully");
 };

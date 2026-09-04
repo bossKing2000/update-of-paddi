@@ -16,6 +16,11 @@ import {
   loadVendorOperatingState,
   assertVendorAvailableForOrdering,
 } from "../services/vendorAvailability.service";
+import {
+  assertQuantityAvailable,
+  reserveStockForItems,
+} from "../services/inventory.service";
+import { clearProductCache } from "../services/clearCaches";
 import { logger } from "../lib/logger";
 
 // Normalize Express params/query values to string
@@ -83,22 +88,35 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
 
   const { productId, quantity = 1, selectedOptions = [], specialRequest } = parsed.data;
 
-  const product = await prisma.product.findUnique({ where: { id: productId }, include: { options: true } });
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+    include: { options: { where: { isActive: true } } },
+  });
   if (!product) throw new NotFoundError("Product");
   if (product.archived) throw new ValidationError("Product is no longer available");
 
-  // Availability gate (Stage 1: no scheduling) — a product can only be
-  // ADDED to a cart while its vendor is live + accepting orders and the
-  // product itself is not archived.
+  // Availability gate — a product can only be ADDED to a cart while its
+  // vendor is live + accepting orders and the product itself is not
+  // archived and in stock.
   const vendorState = await loadVendorOperatingState(product.vendorId);
   assertVendorAvailableForOrdering(vendorState);
-  if (!isProductCurrentlyAvailable({ archived: product.archived })) {
+  if (
+    !isProductCurrentlyAvailable({
+      archived: product.archived,
+      trackInventory: product.trackInventory,
+      stock: product.stock,
+    })
+  ) {
     throw new ValidationError("This product is not currently available for ordering.");
   }
 
-  const invalidOptions = selectedOptions.filter((id: string) => !product.options.some((o) => o.id === id));
+  // Add-ons must exist, belong to this product, and still be enabled.
+  // Prices always come from the database — never the client.
+  const invalidOptions = selectedOptions.filter(
+    (id: string) => !product.options.some((o) => o.id === id),
+  );
   if (invalidOptions.length > 0) {
-    throw new ValidationError("Invalid product options selected", { invalidOptions });
+    throw new ValidationError("One or more selected extras are no longer available", { invalidOptions });
   }
 
   let cart = await prisma.cart.findFirst({
@@ -136,6 +154,13 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
     if (newQty > MAX_QTY) {
       throw new ValidationError(`Quantity exceeds maximum allowed (${MAX_QTY})`, { maxQty: MAX_QTY, requested: newQty }, "VALIDATION_ERROR");
     }
+    assertQuantityAvailable({
+      productId,
+      productName: product.name,
+      quantity: newQty,
+      trackInventory: product.trackInventory,
+      stock: product.stock,
+    });
     await prisma.cartItem.update({
       where: { id: existingItem.id },
       data: {
@@ -146,6 +171,13 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
       },
     });
   } else {
+    assertQuantityAvailable({
+      productId,
+      productName: product.name,
+      quantity,
+      trackInventory: product.trackInventory,
+      stock: product.stock,
+    });
     await prisma.cartItem.create({
       data: {
         cartId: cart.id,
@@ -189,15 +221,21 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
 
   const item = await prisma.cartItem.findFirst({
     where: { id: itemId, cart: { customerId: req.user!.id } },
-    include: { cart: true, product: { include: { options: true } }, options: true },
+    include: {
+      cart: true,
+      product: { include: { options: { where: { isActive: true } } } },
+      options: true,
+    },
   });
 
   if (!item) throw new NotFoundError("Cart item");
 
   if (selectedOptions) {
-    const invalidOptions = selectedOptions.filter((optId: string) => !item.product.options.some((opt) => opt.id === optId));
+    const invalidOptions = selectedOptions.filter(
+      (optId: string) => !item.product.options.some((opt) => opt.id === optId),
+    );
     if (invalidOptions.length > 0) {
-      throw new ValidationError("Invalid product options selected", { invalidOptions });
+      throw new ValidationError("One or more selected extras are no longer available", { invalidOptions });
     }
   }
 
@@ -213,6 +251,14 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
 
     const unitPrice = item.product.price + optionsPrice;
     const qty = quantity ?? item.quantity;
+
+    assertQuantityAvailable({
+      productId: item.productId,
+      productName: item.product.name,
+      quantity: qty,
+      trackInventory: item.product.trackInventory,
+      stock: item.product.stock,
+    });
 
     updateData.unitPrice = unitPrice;
     updateData.subtotal = round(unitPrice * qty);
@@ -384,10 +430,76 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
 
   const cart = await prisma.cart.findFirst({
     where: { customerId: userId },
-    include: { items: { include: { product: { include: { options: true, vendor: true } }, options: true } } },
+    include: { items: { include: { product: { include: { vendor: true } }, options: true } } },
   });
 
   if (!cart || cart.items.length === 0) throw new ValidationError("Your cart is empty");
+
+  // Re-read every product and its ACTIVE add-ons straight from the
+  // database. The cart stores quoted prices; the database is the truth.
+  // Any drift (price edit, disabled add-on, depleted stock) rejects the
+  // checkout so the customer refreshes — client totals are never trusted.
+  const checkoutProductIds = [...new Set(cart.items.map((i) => i.productId))];
+  const freshProducts = await prisma.product.findMany({
+    where: { id: { in: checkoutProductIds } },
+    select: {
+      id: true,
+      name: true,
+      price: true,
+      archived: true,
+      trackInventory: true,
+      stock: true,
+      vendorId: true,
+      options: {
+        where: { isActive: true },
+        select: { id: true, name: true, price: true },
+      },
+    },
+  });
+  const freshById = new Map(freshProducts.map((p) => [p.id, p]));
+
+  // Authoritative per-line totals, keyed by cart item id.
+  const authoritativeLines = new Map<string, { unitPrice: number; subtotal: number }>();
+  // Aggregate quantities per product: one cart can hold the same product
+  // on several lines (different add-on combos), but stock is per product.
+  const qtyByProduct = new Map<string, number>();
+  for (const item of cart.items) {
+    qtyByProduct.set(item.productId, (qtyByProduct.get(item.productId) ?? 0) + item.quantity);
+  }
+
+  for (const item of cart.items) {
+    const fresh = freshById.get(item.productId);
+    if (!fresh || fresh.archived) continue; // handled by the archived cleanup below
+
+    const selectedIds = item.options.map((o) => o.productOptionId);
+    const activeById = new Map(fresh.options.map((o) => [o.id, o]));
+    const staleOption = selectedIds.find((id) => !activeById.has(id));
+    if (staleOption) {
+      throw new ValidationError(
+        `An extra selected for "${fresh.name}" is no longer available. Please refresh your cart.`,
+      );
+    }
+
+    const unitPrice = round(
+      fresh.price + selectedIds.reduce((sum, id) => sum + activeById.get(id)!.price, 0),
+    );
+    if (unitPrice !== round(item.unitPrice)) {
+      throw new ConflictError("Cart pricing changed. Please refresh your cart summary.");
+    }
+    authoritativeLines.set(item.id, { unitPrice, subtotal: round(unitPrice * item.quantity) });
+  }
+
+  for (const [productId, totalQty] of qtyByProduct) {
+    const fresh = freshById.get(productId);
+    if (!fresh || fresh.archived) continue;
+    assertQuantityAvailable({
+      productId,
+      productName: fresh.name,
+      quantity: totalQty,
+      trackInventory: fresh.trackInventory,
+      stock: fresh.stock,
+    });
+  }
 
   // Archived-item cleanup — remove anything the vendor pulled since it
   // was added, keep the rest.
@@ -412,19 +524,26 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     throw new ValidationError("Some products in your cart were removed because they're no longer available.", { removedProductIds });
   }
 
-  // Marketplace-availability rule (Stage 1: no scheduling) — an item is
-  // checkoutable only while its vendor is live + accepting orders AND the
-  // product itself is not archived. Items failing this stay in the cart
-  // (never silently deleted) so customers keep them for when the vendor
-  // comes back online.
+  // Marketplace-availability rule — an item is checkoutable only while
+  // its vendor is live + accepting orders AND the product itself is not
+  // archived and in stock. Items failing this stay in the cart (never
+  // silently deleted) so customers keep them for when the vendor comes
+  // back online. Stock uses the freshly-read values above, never the
+  // (possibly stale) cart include.
   const liveItems = cart.items.filter((item) => {
     const vendorOperating = isVendorOperating(item.product.vendor as {
       isLive: boolean;
       deliveryPreferences?: unknown;
     });
+    const fresh = freshById.get(item.productId);
+    if (!fresh) return false;
     return (
       vendorOperating &&
-      isProductCurrentlyAvailable({ archived: item.product.archived })
+      isProductCurrentlyAvailable({
+        archived: fresh.archived,
+        trackInventory: fresh.trackInventory,
+        stock: fresh.stock,
+      })
     );
   });
   const offlineItems = cart.items.filter((item) => !liveItems.includes(item));
@@ -485,8 +604,9 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
       assertVendorAvailableForOrdering(freshVendorState);
     }
 
-    // Atomic DB section: all vendor orders + cart cleanup + snapshot delete
-    // If any vendor order fails, the whole batch rolls back — no partial checkout.
+    // Atomic DB section: promo claim + stock reservation + all vendor
+    // orders + cart cleanup + snapshot delete. If any step fails, the whole
+    // batch rolls back — no partial checkout, no orphaned reservation.
     // Promo redemption is now inside the transaction to eliminate the
     // post-commit race where two concurrent checkouts could both consume the
     // last redemption while only one should succeed.
@@ -518,21 +638,49 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
         promoClaimed = true;
       }
 
+      // Atomically reserve stock for every checkout line. Concurrent
+      // checkouts serialize on the product row: exactly one winner per
+      // final portion, losers roll back with a sold-out error.
+      await reserveStockForItems(
+        tx,
+        liveItems.map((i) => {
+          const fresh = freshById.get(i.productId)!;
+          return {
+            productId: i.productId,
+            productName: fresh.name,
+            quantity: i.quantity,
+            trackInventory: fresh.trackInventory,
+            stock: fresh.stock,
+          };
+        }),
+      );
+
       const orders = [];
       for (const [vendorId, vendorItems] of Object.entries(groupedByVendor)) {
         const pricing = vendorPricing.get(vendorId);
-        const rawSubtotal = round(vendorItems.reduce((sum, i) => sum + i.subtotal, 0));
+        // Authoritative line totals revalidated above — the stored cart
+        // values are guaranteed identical, but the order record is built
+        // from the database truth, never from client-influenced state.
+        const rawSubtotal = round(
+          vendorItems.reduce(
+            (sum, i) => sum + (authoritativeLines.get(i.id)?.subtotal ?? i.subtotal),
+            0,
+          ),
+        );
         const discount = pricing?.discount ?? 0;
         const basePrice = round(rawSubtotal - discount);
         const deliveryFee = pricing?.deliveryFee ?? 0;
 
-        const orderItemsData = vendorItems.map((ci) => ({
-          productId: ci.productId,
-          quantity: ci.quantity,
-          unitPrice: ci.unitPrice,
-          subtotal: ci.subtotal,
-          options: { create: ci.options.map((opt) => ({ optionId: opt.productOptionId, name: opt.name, price: opt.price })) },
-        }));
+        const orderItemsData = vendorItems.map((ci) => {
+          const line = authoritativeLines.get(ci.id);
+          return {
+            productId: ci.productId,
+            quantity: ci.quantity,
+            unitPrice: line?.unitPrice ?? ci.unitPrice,
+            subtotal: line?.subtotal ?? ci.subtotal,
+            options: { create: ci.options.map((opt) => ({ optionId: opt.productOptionId, name: opt.name, price: opt.price })) },
+          };
+        });
 
         const order = await tx.order.create({
           data: {
@@ -580,6 +728,16 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
 
       return orders;
     });
+
+    // Stock moved inside the transaction above — cached product rows are
+    // stale now. Best-effort invalidation (a miss only costs one DB read).
+    await Promise.all(
+      [...new Set(liveItems.map((i) => i.productId))].map((productId) =>
+        clearProductCache(productId).catch((err) =>
+          logger.warn({ err, productId }, "Failed to invalidate product cache after checkout"),
+        ),
+      ),
+    );
 
     // External side-effects AFTER transaction — not held open
     for (const order of createdOrders) {
@@ -655,10 +813,14 @@ async function getEnhancedCart(cartId: string) {
     const product = item.product;
 
     // Marketplace-orderable right now = vendor live + accepting orders AND
-    // product not archived (Stage 1: no scheduling, no stock yet).
+    // product not archived and in stock.
     const productonline =
       isVendorOperating(product.vendor as { isLive: boolean; deliveryPreferences?: unknown }) &&
-      isProductCurrentlyAvailable({ archived: product.archived });
+      isProductCurrentlyAvailable({
+        archived: product.archived,
+        trackInventory: product.trackInventory,
+        stock: product.stock,
+      });
 
     return {
       id: item.id,

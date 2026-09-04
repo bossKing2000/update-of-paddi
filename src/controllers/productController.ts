@@ -7,7 +7,7 @@ import {
   createProductSchema,
   updateProductSchema,
 } from "../validations/ProductCRUDSchema";
-import { Category, Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { redisProducts, redisSearch } from "../lib/redis";
 import { scanKeys } from "../lib/redisScan";
 import {
@@ -15,11 +15,15 @@ import {
   trackProductView,
   fetchProductPage,
   fetchMostPopularProducts,
+  fetchNewProducts,
+  getActiveDishTypes,
+  assertActiveDishType,
   CATALOG_SORT_VALUES,
   type CatalogSortValue,
 } from "../services/product.service";
 import {
   isVendorOperating,
+  isProductCurrentlyAvailable,
 } from "../services/vendorAvailability.service";
 import { CACHE_KEYS, CACHE_TTLS } from "../services/redisCacheTiming";
 import { productIndexQueue } from "../jobs/workers jobs/redis-baseQueue";
@@ -89,27 +93,19 @@ function extractVideoPaths(files: any): string[] {
 // mirrors), so listings and detail endpoints expose `vendorOperating` and
 // `orderable` computed from those two signals only.
 
-// GET /product/categories
-// Previously didn't exist at all — the cache key/TTL for it (CACHE_KEYS.
-// CATEGORIES_ALL) were already defined and unused. The Flutter app had no
-// way to fetch valid category options except hardcoding the enum client-side.
-export const getCategories = async (_req: Request, res: Response) => {
-  const cached = await redisProducts.get(CACHE_KEYS.CATEGORIES_ALL);
-  if (cached) {
-    return sendSuccess(
-      res,
-      { categories: JSON.parse(cached) },
-      "Categories fetched (cache)",
-    );
-  }
+// GET /product/dish-types
+// Curated Bottom Pot food vocabulary ("What's in the Pot?"). Vendors must
+// choose from these — dish types are never free-typed, so duplicates like
+// "Ofada"/"ofada"/"OFADA" cannot occur.
+export const getDishTypes = async (_req: Request, res: Response) => {
+  const dishTypes = await getActiveDishTypes();
+  return sendSuccess(res, { dishTypes }, "Dish types fetched");
+};
 
-  const categories = Object.values(Category);
-  await redisProducts.set(
-    CACHE_KEYS.CATEGORIES_ALL,
-    JSON.stringify(categories),
-    { EX: CACHE_TTLS.CATEGORIES_ALL },
-  );
-  return sendSuccess(res, { categories }, "Categories fetched");
+// GET /product/categories — deprecated alias of /product/dish-types.
+// Kept so old clients keep working; returns the same dish-type list.
+export const getCategories = async (req: Request, res: Response) => {
+  return getDishTypes(req, res);
 };
 
 /**
@@ -138,30 +134,57 @@ export const createProduct = async (req: AuthRequest, res: Response) => {
   const videoUrls = extractVideoPaths(req.files);
   if (imageUrls.length < 1 || imageUrls.length > 6)
     throw new ValidationError("Please upload between 1 and 6 images.");
+  if (videoUrls.length > 1)
+    throw new ValidationError("Please upload at most 1 video.");
 
   const {
     name,
     description,
     price,
-    category,
+    dishTypeId,
+    portionLabel,
+    trackInventory = false,
+    stock,
     archived,
     options = [],
   } = parsed.data;
 
+  // Dish type must be a real, active vocabulary entry.
+  await assertActiveDishType(dishTypeId);
+
+  // Stock semantics: tracked products need an explicit starting count;
+  // untracked products ignore any stock value sent.
+  if (trackInventory && stock == null)
+    throw new ValidationError("Stock is required when inventory tracking is enabled.");
+
+  // No two add-ons on one product may share a name (case-insensitive) —
+  // customers must be able to tell extras apart at a glance.
+  const optionNames = options.map((o) => o.name.trim().toLowerCase());
+  if (new Set(optionNames).size !== optionNames.length)
+    throw new ValidationError("Add-on names must be unique per product.");
+
   const product = await prisma.product.create({
     data: {
-      name,
-      description,
+      name: name.trim(),
+      description: description.trim(),
       price,
+      dishTypeId,
+      portionLabel: portionLabel?.trim() || null,
+      trackInventory,
+      stock: trackInventory ? stock ?? 0 : null,
       archived: archived ?? false,
-      category,
       images: imageUrls,
-      video: videoUrls,
+      video: videoUrls.slice(0, 1),
       thumbnail: imageUrls[0],
       vendorId: req.user.id,
-      options: { create: options },
+      options: {
+        create: options.map((o) => ({
+          name: o.name.trim(),
+          price: o.price,
+        })),
+      },
     },
-    include: { options: true },
+    include: { options: true, dishType: true },
   });
 
   productIndexQueue
@@ -186,8 +209,14 @@ interface ProductResponse {
   name: string;
   price: number;
   images: string[];
-  category: Category;
+  dishType: { id: string; name: string };
   popularityPercent?: number | null;
+  averageRating: number;
+  reviewCount: number;
+  portionLabel: string | null;
+  trackInventory: boolean;
+  stock: number | null;
+  soldOut: boolean;
   vendorOperating?: boolean;
   orderable?: boolean;
   vendor?: {
@@ -215,15 +244,14 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
   );
   const skip = (page - 1) * limit;
 
-  const categoryQuery = (req.query.category as string)?.toUpperCase();
+  const dishTypeQueryRaw = String(req.query.dishType ?? "").trim();
   const vendorIdQuery = req.query.vendorId as string | undefined;
 
-  if (categoryQuery && categoryQuery !== "ALL") {
-    if (!Object.values(Category).includes(categoryQuery as Category)) {
-      throw new ValidationError(
-        `Invalid category. Valid options: ${Object.values(Category).join(", ")}`,
-      );
-    }
+  // dishType is an active DishType id (e.g. "JOLLOF") or "ALL".
+  // The legacy `category` meal-time param is ignored (graceful: unfiltered).
+  const dishTypeQuery = dishTypeQueryRaw === "" ? "ALL" : dishTypeQueryRaw.toUpperCase();
+  if (dishTypeQuery !== "ALL") {
+    await assertActiveDishType(dishTypeQuery);
   }
 
   // Explore filters (backward-compatible additions).
@@ -245,6 +273,14 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
     throw new ValidationError("minPrice cannot be greater than maxPrice");
   }
 
+  let minRating: number | undefined;
+  if (req.query.minRating != null && String(req.query.minRating).trim() !== "") {
+    minRating = Number(req.query.minRating);
+    if (!Number.isFinite(minRating) || minRating < 0 || minRating > 5) {
+      throw new ValidationError("minRating must be a number between 0 and 5");
+    }
+  }
+
   const sortBy = String(req.query.sortBy ?? "").trim();
   if (sortBy !== "" && !CATALOG_SORT_VALUES.includes(sortBy as CatalogSortValue)) {
     throw new ValidationError(
@@ -264,12 +300,13 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
     `sort=${sortBy || "default"}`,
     minPrice != null ? `min=${minPrice}` : "min=none",
     maxPrice != null ? `max=${maxPrice}` : "max=none",
+    minRating != null ? `mr=${minRating}` : "mr=none",
     `av=${availableOnly ? 1 : 0}`,
   ].join(":");
 
   const vendorPart = vendorIdQuery ? `vendor=${vendorIdQuery}:` : "";
-  const categoryPart = `category=${categoryQuery ?? "ALL"}`;
-  const cacheKey = `products:all:${vendorPart}${categoryPart}:page=${page}:limit=${limit}:${filterKey}`;
+  const dishTypePart = `dishtype=${dishTypeQuery}`;
+  const cacheKey = `products:all:${vendorPart}${dishTypePart}:page=${page}:limit=${limit}:${filterKey}`;
 
   const cached = await redisProducts.get(cacheKey);
   if (cached) {
@@ -288,19 +325,17 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
     fetchProductPage({
       skip,
       take: limit,
-      category: categoryQuery && categoryQuery !== "ALL" ? categoryQuery : undefined,
+      dishType: dishTypeQuery !== "ALL" ? dishTypeQuery : undefined,
       vendorId: vendorIdQuery,
       sortBy: sortBy || undefined,
       minPrice,
       maxPrice,
+      minRating,
       availableOnly,
     }),
   ]);
 
-  const products: ProductResponse[] = dbResult.products.map((p) => ({
-    ...p,
-    category: p.category as ProductResponse["category"],
-  }));
+  const products: ProductResponse[] = dbResult.products;
 
   const total = dbResult.total;
 
@@ -340,7 +375,7 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
   if (cached) {
     const productData = JSON.parse(cached);
     // CRITICAL: Recompute dynamic availability fields on cache hit
-    // (Stage 1: vendor live + accepting orders AND product not archived).
+    // (vendor live + accepting orders AND product not archived + in stock).
     if (productData.vendor) {
       const vendorOperating = isVendorOperating({
         isLive: productData.vendor.isLive ?? false,
@@ -348,7 +383,12 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
       });
       productData.vendorOperating = vendorOperating;
       productData.orderable =
-        productData.archived === false && vendorOperating;
+        vendorOperating &&
+        isProductCurrentlyAvailable({
+          archived: productData.archived === true,
+          trackInventory: productData.trackInventory,
+          stock: productData.stock,
+        });
     }
     res.setHeader("X-Cache", "HIT");
     return sendSuccess(res, productData, "Product retrieved successfully.");
@@ -363,11 +403,15 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
         description: true,
         price: true,
         images: true,
+        thumbnail: true,
         video: true,
         createdAt: true,
         updatedAt: true,
         totalViews: true,
-        category: true,
+        dishType: { select: { id: true, name: true, description: true } },
+        portionLabel: true,
+        trackInventory: true,
+        stock: true,
         popularityScore: true,
         popularityPercent: true,
         isNew: true,
@@ -388,7 +432,10 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
             deliveryPreferences: true,
           },
         },
-        options: true,
+        options: {
+          where: { isActive: true },
+          select: { id: true, name: true, price: true },
+        },
       },
     }),
     prisma.productReview.aggregate({
@@ -408,7 +455,13 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
   });
 
   const vendorOperating = isVendorOperating(product.vendor);
-  const orderable = !product.archived && vendorOperating;
+  const orderable =
+    vendorOperating &&
+    isProductCurrentlyAvailable({
+      archived: product.archived,
+      trackInventory: product.trackInventory,
+      stock: product.stock,
+    });
 
   const productData = {
     ...product,
@@ -416,6 +469,7 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
     reviewCount: reviewStats._count._all ?? 0,
     vendorOperating,
     orderable,
+    soldOut: product.trackInventory === true && (product.stock ?? 0) <= 0,
     vendorRating: vendorReviewStats._avg.rating ?? null,
     vendorReviewCount: vendorReviewStats._count.rating ?? 0,
     // vendor fields (brandName, brandLogo, isLive, deliveryPreferences)
@@ -478,7 +532,10 @@ export const updateProduct = async (req: AuthRequest, res: Response) => {
     name,
     description,
     price,
-    category,
+    dishTypeId,
+    portionLabel,
+    trackInventory,
+    stock,
     archived,
     options,
     images: oldImagesFormat, // backward compatibility
@@ -593,11 +650,27 @@ export const updateProduct = async (req: AuthRequest, res: Response) => {
   if (uploadedVideoUrls.length > 1)
     throw new ValidationError("Maximum 1 video can be uploaded at a time");
 
+  if (dishTypeId !== undefined) await assertActiveDishType(dishTypeId);
+
+  // Keep inventory coherent: enabling tracking without a count starts at
+  // the current stock (default 0); disabling tracking clears the count.
+  let resolvedTrackInventory = trackInventory;
+  let resolvedStock = stock;
+  if (trackInventory === true && stock == null) {
+    resolvedStock = product.stock ?? 0;
+  }
+  if (trackInventory === false) {
+    resolvedStock = null;
+  }
+
   const updateData: Prisma.ProductUpdateInput = {
-    ...(name !== undefined && { name }),
-    ...(description !== undefined && { description }),
+    ...(name !== undefined && { name: name.trim() }),
+    ...(description !== undefined && { description: description.trim() }),
     ...(price !== undefined && { price }),
-    ...(category !== undefined && { category }),
+    ...(dishTypeId !== undefined && { dishTypeId }),
+    ...(portionLabel !== undefined && { portionLabel: portionLabel?.trim() || null }),
+    ...(resolvedTrackInventory !== undefined && { trackInventory: resolvedTrackInventory }),
+    ...(resolvedStock !== undefined && { stock: resolvedStock }),
     ...(archived !== undefined && { archived }),
     images: finalImages,
     video: finalVideo,
@@ -630,26 +703,54 @@ export const updateProduct = async (req: AuthRequest, res: Response) => {
     });
 
     if (Array.isArray(options)) {
+      // Add-on names must be unique per product (case-insensitive) so
+      // customers can tell extras apart.
+      const incomingNames = options.map((opt) => opt.name.trim().toLowerCase());
+      if (new Set(incomingNames).size !== incomingNames.length)
+        throw new ValidationError("Add-on names must be unique per product.");
+
       const existingOptionIds = product.options.map((opt) => opt.id);
       const incomingOptionIds = options
         .filter((opt) => opt.id)
         .map((opt) => opt.id!);
+
+      // Ownership: an option id may only reference this vendor's product —
+      // otherwise Vendor A could rename Vendor B's add-ons.
+      if (incomingOptionIds.length > 0) {
+        const ownedCount = await tx.productOption.count({
+          where: { id: { in: incomingOptionIds }, productId: product.id },
+        });
+        if (ownedCount !== incomingOptionIds.length)
+          throw new ForbiddenError("One or more add-ons do not belong to this product");
+      }
+
       const toDelete = existingOptionIds.filter(
         (id) => !incomingOptionIds.includes(id),
       );
 
       if (toDelete.length > 0)
-        await tx.productOption.deleteMany({ where: { id: { in: toDelete } } });
+        await tx.productOption.deleteMany({
+          where: { id: { in: toDelete }, productId: product.id },
+        });
 
       for (const opt of options) {
         if (opt.id) {
           await tx.productOption.update({
             where: { id: opt.id },
-            data: { name: opt.name, price: opt.price },
+            data: {
+              name: opt.name.trim(),
+              price: opt.price,
+              ...(opt.isActive !== undefined && { isActive: opt.isActive }),
+            },
           });
         } else {
           await tx.productOption.create({
-            data: { productId: product.id, name: opt.name, price: opt.price },
+            data: {
+              productId: product.id,
+              name: opt.name.trim(),
+              price: opt.price,
+              isActive: opt.isActive ?? true,
+            },
           });
         }
       }
@@ -665,8 +766,19 @@ export const updateProduct = async (req: AuthRequest, res: Response) => {
   await clearProductCache(product.id, req.user!.id);
   await clearProductFromCarts(product.id);
 
+  // Re-read: the transaction's update ran BEFORE the add-on sync above,
+  // so `updated` carries pre-sync options. The response (and cache) must
+  // reflect what was actually saved.
+  const fresh = await prisma.product.findUnique({
+    where: { id: product.id },
+    include: { options: true, dishType: true },
+  });
+
   const cacheValue = JSON.stringify({
-    ...updated,
+    ...fresh,
+    // Customer detail only exposes enabled add-ons — never leak disabled
+    // ones through the pre-warmed cache entry.
+    options: (fresh?.options ?? []).filter((o) => o.isActive !== false),
     images: finalImages,
     video: finalVideo,
   });
@@ -679,7 +791,7 @@ export const updateProduct = async (req: AuthRequest, res: Response) => {
 
   return sendSuccess(
     res,
-    { ...updated, images: finalImages, video: finalVideo },
+    { ...fresh, images: finalImages, video: finalVideo },
     "Product updated successfully",
   );
 };
@@ -712,11 +824,10 @@ export const archiveProduct = async (req: AuthRequest, res: Response) => {
   await clearProductCache(productId, req.user.id);
   await clearProductFromCarts(productId);
 
-  await redisProducts.set(
-    CACHE_KEYS.PRODUCT_DETAIL(productId),
-    JSON.stringify(updated),
-    { EX: CACHE_TTLS.PRODUCT_DETAIL },
-  );
+  // Do NOT pre-warm the detail cache here: this update response carries no
+  // options/dishType relations, and a partial cache entry would serve a
+  // detail payload missing its add-ons. The next GET repopulates fully.
+  await redisProducts.del(CACHE_KEYS.PRODUCT_DETAIL(productId)).catch(() => {});
 
   const dashboardService = new VendorDashboardService(req.user.id);
   await dashboardService.invalidateCache();
@@ -785,35 +896,48 @@ export const getSearchSuggestions = async (req: Request, res: Response) => {
     );
   }
 
+  const nameMatch = (word: string) => ({
+    name: { contains: word, mode: "insensitive" as const },
+  });
+  const dishMatch = (word: string) => ({
+    dishType: { name: { contains: word, mode: "insensitive" as const } },
+  });
+  const matchWord = (word: string) => ({ OR: [nameMatch(word), dishMatch(word)] });
+
   const results = isSingleWord
     ? await prisma.product.findMany({
-        where: {
-          archived: false,
-          name: { contains: query, mode: "insensitive" },
+        where: { archived: false, OR: [nameMatch(query), dishMatch(query)] },
+        select: {
+          id: true,
+          name: true,
+          dishType: { select: { id: true, name: true } },
         },
-        select: { id: true, name: true, category: true },
         take: 12,
       })
     : await prisma.product.findMany({
-        where: {
-          archived: false,
-          AND: keywords.map((word) => ({
-            name: { contains: word, mode: "insensitive" as const },
-          })),
+        where: { archived: false, AND: keywords.map(matchWord) },
+        select: {
+          id: true,
+          name: true,
+          dishType: { select: { id: true, name: true } },
         },
-        select: { id: true, name: true, category: true },
         take: 12,
       });
 
-  // Ranking: exact prefix matches first, then general matches.
+  // Ranking: exact prefix matches first, then dish-type matches, then
+  // general name matches.
   results.sort((a, b) => {
     const aName = a.name.toLowerCase();
     const bName = b.name.toLowerCase();
+    const aDish = a.dishType.name.toLowerCase();
+    const bDish = b.dishType.name.toLowerCase();
     const aScore =
-      (aName.startsWith(query) ? 2 : 0) +
+      (aName.startsWith(query) ? 3 : 0) +
+      (aDish.includes(query) ? 2 : 0) +
       (keywords.every((w) => aName.includes(w)) ? 1 : 0);
     const bScore =
-      (bName.startsWith(query) ? 2 : 0) +
+      (bName.startsWith(query) ? 3 : 0) +
+      (bDish.includes(query) ? 2 : 0) +
       (keywords.every((w) => bName.includes(w)) ? 1 : 0);
     return bScore - aScore;
   });
@@ -821,7 +945,7 @@ export const getSearchSuggestions = async (req: Request, res: Response) => {
   const suggestions = results.map((p) => ({
     id: p.id,
     name: p.name,
-    category: p.category,
+    dishType: p.dishType,
   }));
   await redisSearch.set(cacheKey, JSON.stringify(suggestions), {
     EX: CACHE_TTLS.SUGGESTIONS,
@@ -867,6 +991,12 @@ export const searchProducts = async (req: Request, res: Response) => {
   const offset = (page - 1) * limit;
   const fuzzyThreshold = 0.1;
   const sortBy = (req.query.sortBy as string) || "relevance";
+  const SEARCH_SORT_VALUES = ["relevance", "priceAsc", "priceDesc", "popularity", "newest", "rating"] as const;
+  if (!(SEARCH_SORT_VALUES as readonly string[]).includes(sortBy)) {
+    throw new ValidationError(
+      `Invalid sortBy. Valid options: ${SEARCH_SORT_VALUES.join(", ")}`,
+    );
+  }
 
   // Explore filters (backward-compatible additions).
   let minPrice: number | undefined;
@@ -887,13 +1017,19 @@ export const searchProducts = async (req: Request, res: Response) => {
     throw new ValidationError("minPrice cannot be greater than maxPrice");
   }
 
-  const categoryQuery = (req.query.category as string)?.toUpperCase();
-  if (categoryQuery && categoryQuery !== "ALL") {
-    if (!Object.values(Category).includes(categoryQuery as Category)) {
-      throw new ValidationError(
-        `Invalid category. Valid options: ${Object.values(Category).join(", ")}`,
-      );
+  let minRating: number | undefined;
+  if (req.query.minRating != null && String(req.query.minRating).trim() !== "") {
+    minRating = Number(req.query.minRating);
+    if (!Number.isFinite(minRating) || minRating < 0 || minRating > 5) {
+      throw new ValidationError("minRating must be a number between 0 and 5");
     }
+  }
+
+  const dishTypeQueryRaw = String(req.query.dishType ?? "").trim();
+  const dishTypeQuery =
+    dishTypeQueryRaw === "" ? "ALL" : dishTypeQueryRaw.toUpperCase();
+  if (dishTypeQuery !== "ALL") {
+    await assertActiveDishType(dishTypeQuery);
   }
 
   const availableOnlyRaw = String(req.query.availableOnly ?? "").toLowerCase();
@@ -910,9 +1046,10 @@ export const searchProducts = async (req: Request, res: Response) => {
   // Cache key includes every new filter so different combinations never
   // share an entry.
   const filterKey = [
-    categoryQuery ?? "",
+    dishTypeQuery,
     minPrice != null ? `mp${minPrice}` : "",
     maxPrice != null ? `xp${maxPrice}` : "",
+    minRating != null ? `mr${minRating}` : "",
     availableOnlyRaw === "true" ? "av1" : "",
   ]
     .filter(Boolean)
@@ -922,19 +1059,46 @@ export const searchProducts = async (req: Request, res: Response) => {
     CACHE_KEYS.SEARCH(corrected, sortBy, undefined, page, limit) +
     (filterKey ? `:f=${filterKey}` : "");
 
-  // ── Dynamic discovery filters (category / price / availability) ──
-  // Category is whitelist-validated against the enum; prices are validated
-  // numbers. Both are safe to interpolate after validation.
-  const vendorJoin =
+  // ── Dynamic discovery filters (dish type / price / availability) ──
+  // Everything is parameterized ($n placeholders) — no string
+  // interpolation of client input into SQL. The vendor is always joined
+  // (PK lookup) so results can RANK orderable dishes first; availableOnly
+  // additionally FILTERS to them.
+  const vendorJoin = ` LEFT JOIN "User" v ON v."id" = p."vendorId"`;
+  const vendorFilterSql =
     availableOnlyRaw === "true"
-      ? ` JOIN "User" v ON v."id" = p."vendorId" AND v."isLive" = true AND COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') <> 'false'`
+      ? ` AND v."isLive" = true AND COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') <> 'false'`
       : "";
-  const extraWhereSql =
-    (categoryQuery && categoryQuery !== "ALL"
-      ? ` AND p."category"::text = '${categoryQuery}'`
-      : "") +
-    (minPrice != null ? ` AND p.price >= ${minPrice}` : "") +
-    (maxPrice != null ? ` AND p.price <= ${maxPrice}` : "");
+  // Dish-type names participate in matching via this join, so "jollof"
+  // finds "Smoky Party Rice" when its dishType is JOLLOF.
+  const dishJoin = ` JOIN "DishType" d ON d."id" = p."dishTypeId"`;
+  // Filter clauses in stable order; each query numbers its placeholders
+  // from its own base-param count (page queries carry limit/offset, the
+  // count query does not).
+  const filterClauses: ((n: number) => string)[] = [];
+  const filterParams: unknown[] = [];
+  if (dishTypeQuery !== "ALL") {
+    filterParams.push(dishTypeQuery);
+    filterClauses.push((n) => ` AND p."dishTypeId" = $${n}`);
+  }
+  if (minPrice != null) {
+    filterParams.push(minPrice);
+    filterClauses.push((n) => ` AND p.price >= $${n}`);
+  }
+  if (maxPrice != null) {
+    filterParams.push(maxPrice);
+    filterClauses.push((n) => ` AND p.price <= $${n}`);
+  }
+  if (minRating != null && minRating > 0) {
+    filterParams.push(minRating);
+    filterClauses.push((n) => ` AND p."averageRating" >= $${n}`);
+  }
+  const filterSql = (baseCount: number) =>
+    filterClauses.map((fn, i) => fn(baseCount + i + 1)).join("");
+  // Page queries: $1 query, $2 like/threshold, $3 limit, $4 offset.
+  const extraWhereSql = filterSql(4);
+  // Count query: $1 corrected, $2 like.
+  const countWhereSql = filterSql(2);
   const cached = await redisSearch.get(cacheKey);
   if (cached) {
     const data = JSON.parse(cached);
@@ -961,27 +1125,39 @@ export const searchProducts = async (req: Request, res: Response) => {
     case "popularity":
       secondaryOrder = `"popularityScore" DESC`;
       break;
+    case "rating":
+      secondaryOrder = `"averageRating" DESC`;
+      break;
     case "newest":
       secondaryOrder = `"createdAt" DESC`;
       break;
   }
 
+  // Base params $1..$4; filter params continue at $5+.
+  const baseParams: unknown[] = [corrected, `%${corrected}%`, limit, offset];
+
+  // Orderability for ranking: vendor live + accepting + not archived +
+  // in stock. Relevance still wins — availability only breaks ties below
+  // dish/name matches (a closer-but-irrelevant dish must never outrank).
+  const orderableExpr = `(v."isLive" = true AND COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') <> 'false' AND p.archived = false AND (NOT p."trackInventory" OR COALESCE(p.stock, 0) > 0))`;
+
   const fullTextResults = await prisma.$queryRawUnsafe<any[]>(
     `
     SELECT
       p.id, p.name, p.description, p.price, p."vendorId", p.images, p.archived, p."createdAt", p."updatedAt",
+      p."dishTypeId", jsonb_build_object('id', d."id", 'name', d."name") AS "dishType",
       ts_rank_cd(setweight(to_tsvector('english', p.name), 'A') || setweight(to_tsvector('english', p.description), 'B'), websearch_to_tsquery('english', $1)) AS rank,
-      (p.name ILIKE $2 OR p.description ILIKE $2) AS exact_match
-    FROM "Product" p${vendorJoin}
-    WHERE p.archived = false
-      AND (p.tsvector_col @@ websearch_to_tsquery('english', $1) OR p.name ILIKE $2 OR p.description ILIKE $2)${extraWhereSql}
-    ORDER BY exact_match DESC, rank DESC, ${secondaryOrder}
+      (p.name ILIKE $2 OR p.description ILIKE $2) AS exact_match,
+      (d."name" ILIKE $2) AS dish_match,
+      ${orderableExpr} AS orderable
+    FROM "Product" p${dishJoin}${vendorJoin}
+    WHERE p.archived = false${vendorFilterSql}
+      AND (p.tsvector_col @@ websearch_to_tsquery('english', $1) OR p.name ILIKE $2 OR p.description ILIKE $2 OR d."name" ILIKE $2)${extraWhereSql}
+    ORDER BY exact_match DESC, dish_match DESC, orderable DESC, rank DESC, ${secondaryOrder}
     LIMIT $3 OFFSET $4;
   `,
-    corrected,
-    `%${corrected}%`,
-    limit,
-    offset,
+    ...baseParams,
+    ...filterParams,
   );
 
   let fuzzyResults: any[] = [];
@@ -994,16 +1170,19 @@ export const searchProducts = async (req: Request, res: Response) => {
       `
       SELECT
         p.id, p.name, p.description, p.price, p."vendorId", p.images, p.archived, p."createdAt", p."updatedAt",
-        similarity(p.name || ' ' || p.description, $1) AS sim_score
-      FROM "Product" p${vendorJoin}
-      WHERE p.archived = false AND similarity(p.name || ' ' || p.description, $1) > $2${extraWhereSql}
-      ORDER BY sim_score DESC, ${secondaryOrder}
+        p."dishTypeId", jsonb_build_object('id', d."id", 'name', d."name") AS "dishType",
+        similarity(p.name || ' ' || p.description || ' ' || d."name", $1) AS sim_score,
+        ${orderableExpr} AS orderable
+      FROM "Product" p${dishJoin}${vendorJoin}
+      WHERE p.archived = false${vendorFilterSql} AND similarity(p.name || ' ' || p.description || ' ' || d."name", $1) > $2${extraWhereSql}
+      ORDER BY orderable DESC, sim_score DESC, ${secondaryOrder}
       LIMIT $3 OFFSET $4;
     `,
       corrected,
       fuzzyThreshold,
       limit,
       offset,
+      ...filterParams,
     );
   }
 
@@ -1016,11 +1195,12 @@ export const searchProducts = async (req: Request, res: Response) => {
 
   const totalResult = await prisma.$queryRawUnsafe<{ total: bigint }[]>(
     `
-    SELECT COUNT(*)::bigint AS total FROM "Product" p${vendorJoin}
-    WHERE p.archived = false AND (p.tsvector_col @@ websearch_to_tsquery('english', $1) OR p.name ILIKE $2 OR p.description ILIKE $2)${extraWhereSql};
+    SELECT COUNT(*)::bigint AS total FROM "Product" p${dishJoin}${vendorJoin}
+    WHERE p.archived = false${vendorFilterSql} AND (p.tsvector_col @@ websearch_to_tsquery('english', $1) OR p.name ILIKE $2 OR p.description ILIKE $2 OR d."name" ILIKE $2)${countWhereSql};
   `,
     corrected,
     `%${corrected}%`,
+    ...filterParams,
   );
 
   const total = Number(totalResult[0]?.total || 0);
@@ -1034,6 +1214,43 @@ export const searchProducts = async (req: Request, res: Response) => {
     EX: CACHE_TTLS.SEARCH,
   });
   return sendSuccess(res, responseData, "Products fetched successfully");
+};
+
+// GET /product/p/new
+export const getNewProducts = async (req: Request, res: Response) => {
+  const limit = Math.min(parseInt((req.query.limit as string) || "20", 10), 50);
+  const dishTypeQueryRaw = String(req.query.dishType ?? "").trim();
+  const dishTypeQuery = dishTypeQueryRaw === "" ? "ALL" : dishTypeQueryRaw.toUpperCase();
+  if (dishTypeQuery !== "ALL") {
+    await assertActiveDishType(dishTypeQuery);
+  }
+
+  const cacheKey = `products:new:limit=${limit}:dishtype=${dishTypeQuery}`;
+  const cached = await redisProducts.get(cacheKey);
+  if (cached) {
+    const cachedData = JSON.parse(cached);
+    res.setHeader("X-Cache", "HIT");
+    return sendSuccess(
+      res,
+      cachedData.data,
+      "New products fetched successfully",
+      200,
+      cachedData.pagination,
+    );
+  }
+
+  const { items, total } = await fetchNewProducts({
+    take: limit,
+    dishType: dishTypeQuery !== "ALL" ? dishTypeQuery : undefined,
+  });
+
+  res.setHeader("X-Cache", "MISS");
+  const pagination = { total, page: 1, limit, totalPages: Math.ceil(total / limit) };
+  await redisProducts.set(cacheKey, JSON.stringify({ data: items, pagination }), {
+    EX: CACHE_TTLS.PRODUCTS_MOST_POPULAR,
+  });
+
+  return sendSuccess(res, items, "New products fetched successfully", 200, pagination);
 };
 
 // GET /product/p/most

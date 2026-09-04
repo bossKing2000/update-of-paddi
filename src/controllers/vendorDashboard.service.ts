@@ -448,10 +448,13 @@ async getOrdersToday(): Promise<number> {
           id: true,
           name: true,
           price: true,
-          category: true,
+          dishType: { select: { id: true, name: true } },
           thumbnail: true,
           images: true,
           archived: true,
+          portionLabel: true,
+          trackInventory: true,
+          stock: true,
           popularityPercent: true,
           reviews: { select: { rating: true } },
         },
@@ -461,10 +464,13 @@ async getOrdersToday(): Promise<number> {
         id: p.id,
         name: p.name,
         price: p.price,
-        category: p.category,
+        dishType: p.dishType,
         images: p.thumbnail ? [p.thumbnail] : p.images.length > 0 ? [p.images[0]] : [],
         popularityPercent: p.popularityPercent,
         archived: p.archived,
+        portionLabel: p.portionLabel,
+        trackInventory: p.trackInventory,
+        stock: p.stock,
         averageRating:
           p.reviews.length > 0 ? p.reviews.reduce((sum, r) => sum + r.rating, 0) / p.reviews.length : null,
         reviewCount: p.reviews.length,
@@ -475,12 +481,12 @@ async getOrdersToday(): Promise<number> {
       });
     }
 
-    // Stage 1: without scheduling, a product is orderable while not
-    // archived. Keep the `orderable` flag (replaces the old `isLive`
-    // mirror) so vendor clients keep a stable availability field.
+    // Orderable = not archived AND in stock (untracked counts as in stock).
     const formattedProducts = productsData.map((p) => ({
       ...p,
-      orderable: p.archived === false,
+      orderable:
+        p.archived === false &&
+        (!p.trackInventory || (p.stock ?? 0) > 0),
     }));
 
     const pagination = {

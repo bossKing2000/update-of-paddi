@@ -11,6 +11,7 @@ import {
   createVendorReviewSchema,
 } from "../validations/ProductCRUDSchema";
 import { OrderStatus, ActivityType } from "@prisma/client";
+import { refreshProductRatingStats } from "../services/product.service";
 import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
 import { sendSuccess, sendCreated } from "../utils/apiResponse";
 import {
@@ -97,6 +98,10 @@ export const reviewProduct = async (req: AuthRequest, res: Response) => {
     },
   });
 
+  // Keep the product's denormalized rating stats truthful for ranking and
+  // minRating filtering. Awaited: listings must never serve stale stats.
+  await refreshProductRatingStats(parsed.data.productId);
+
   const product = await prisma.product.findUnique({
     where: { id: parsed.data.productId },
     select: { vendorId: true, name: true },
@@ -181,6 +186,8 @@ export const updateReview = async (req: AuthRequest, res: Response) => {
     },
   });
 
+  await refreshProductRatingStats(review.productId);
+
   return sendSuccess(res, { updated }, "Review updated");
 };
 
@@ -199,6 +206,7 @@ export const deleteReview = async (req: AuthRequest, res: Response) => {
   // Votes/reports/vendor reply are all onDelete: Cascade — cleaned up
   // automatically, no manual deletion needed here.
   await prisma.productReview.delete({ where: { id: reviewId } });
+  await refreshProductRatingStats(review.productId);
   return sendSuccess(res, {}, "Review deleted");
 };
 

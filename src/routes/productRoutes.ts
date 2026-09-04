@@ -9,20 +9,25 @@ import {
   searchProducts,
   getSearchSuggestions,
   getMostPopularProducts,
+  getNewProducts,
   getCategories,
+  getDishTypes,
 } from "../controllers/productController";
 import { authenticate, authorizeVendor } from "../middlewares/auth.middleware";
 import { upload } from "../utils/multer";
 
 const router = Router();
-const uploadFields = upload.fields([{ name: "images", maxCount: 6 }, { name: "video", maxCount: 3 }]);
+// 6 images max, 1 video max — matches controller enforcement.
+const uploadFields = upload.fields([{ name: "images", maxCount: 6 }, { name: "video", maxCount: 1 }]);
 
 // Public listing/search/detail endpoints — no auth required to browse.
 router.get("/", getAllProducts);
-router.get("/categories", getCategories); // was completely missing — cache infra for it existed and was unused
+router.get("/dish-types", getDishTypes);
+router.get("/categories", getCategories); // deprecated alias of /dish-types
 router.get("/p/suggestions", getSearchSuggestions);
 router.get("/p/search", searchProducts);
 router.get("/p/most", getMostPopularProducts);
+router.get("/p/new", getNewProducts);
 router.get("/:id", getProductById); // also tracks the view internally
 
 // Vendor-only management endpoints

@@ -21,6 +21,7 @@ import {
   createSpecialOfferSchema,
 } from "../validations/orderSchema";
 import { calculateDeliveryFee } from "../services/deliveryFee.service";
+import { restoreStockForOrders } from "../services/inventory.service";
 import { creditReferralRewardIfEligible } from "./referralController";
 import { logger } from "../lib/logger";
 
@@ -445,6 +446,19 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
     data: updateData,
   });
 
+  // Cancelling an unpaid order releases its checkout-time stock
+  // reservation back on sale. Paid orders never restore — portions are
+  // consumed once payment succeeds.
+  if (
+    status === OrderStatus.CANCELLED &&
+    currentStatus === OrderStatus.AWAITING_PAYMENT &&
+    order.paymentStatus !== "SUCCESS"
+  ) {
+    await restoreStockForOrders(prisma, [orderId]).catch((err) =>
+      logger.warn({ err, orderId }, "Failed to restore stock for cancelled order"),
+    );
+  }
+
   await clearProductCache(undefined, order.vendorId);
 
   // Referrals: check (and credit, if eligible) once an order actually
@@ -805,7 +819,7 @@ export const getMySpecialRequests = async (req: AuthRequest, res: Response) => {
             name: true,
             images: true,
             price: true,
-            category: true,
+            dishType: { select: { id: true, name: true } },
           },
         },
         offers: {

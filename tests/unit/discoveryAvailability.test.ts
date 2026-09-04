@@ -38,7 +38,7 @@ const productRow = (overrides: Record<string, unknown> = {}) => ({
   id: "prod-1",
   name: "Jollof Rice",
   price: 1500,
-  category: "LUNCH",
+  dishType: { id: "JOLLOF", name: "Jollof Rice" },
   thumbnail: "img.jpg",
   images: ["img.jpg"],
   popularityPercent: 42,

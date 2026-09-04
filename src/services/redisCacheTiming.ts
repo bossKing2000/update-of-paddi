@@ -10,12 +10,12 @@ export const CACHE_KEYS = {
 
   SEARCH: (
     query: string,
-    category?: string,
+    dishType?: string,
     sort?: string,
     page?: number,
     limit?: number
   ) =>
-    `search:${query.toLowerCase()}:${category || "all"}:${sort || "newest"}:${page || 1}:${limit || 20}`,
+    `search:${query.toLowerCase()}:${dishType || "all"}:${sort || "newest"}:${page || 1}:${limit || 20}`,
 
   SUGGESTIONS: (query?: string) =>
     query ? `suggestions:${query.toLowerCase()}` : "suggestions:*",
@@ -25,6 +25,10 @@ export const CACHE_KEYS = {
 
   CATEGORIES_ALL: "categories:all",
 
+  DISH_TYPES_ALL: "dishtypes:all",
+
+  WHATS_IN_THE_POT: "home:pot",
+
   // Phase 3A — composed home feed. Scope distinguishes guest vs
   // authenticated (personalized) feeds; coordinates are rounded to ~1km
   // granularity so GPS jitter doesn't explode the key space.
@@ -33,10 +37,10 @@ export const CACHE_KEYS = {
     userId: string,
     lat: number | null,
     lng: number | null,
-    category: string,
+    dishType: string,
     limit: number
   ) =>
-    `home:feed:${scope}:${userId}:lat=${lat ?? "-"}:lng=${lng ?? "-"}:category=${category}:limit=${limit}`,
+    `home:feed:${scope}:${userId}:lat=${lat ?? "-"}:lng=${lng ?? "-"}:dishtype=${dishType}:limit=${limit}`,
 };
 
 export const CACHE_TTLS = {
@@ -44,7 +48,11 @@ export const CACHE_TTLS = {
   PRODUCT_DETAIL: 60 * 60 * 5,        
   SEARCH: 60 * 60 * 3,                
   SUGGESTIONS: 60 * 30,               
-  CATEGORIES_ALL: 60 * 60,            
+  CATEGORIES_ALL: 60 * 60,
+  DISH_TYPES_ALL: 60 * 60,
+
+  // The pot changes as vendors sell out — keep it fresh (60s).
+  WHATS_IN_THE_POT: 60,
   PRODUCTS_MOST_POPULAR: 60 * 5,      
 
   // Home feed contains live products / open vendors / active promos — keep

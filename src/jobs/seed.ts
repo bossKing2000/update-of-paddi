@@ -2,7 +2,6 @@ import {
   Prisma,
   PrismaClient,
   Role,
-  Category,
   OrderStatus,
   PaymentStatus,
   DeliveryPersonStatus,
@@ -246,6 +245,69 @@ const imageUrls = [
   "https://images.unsplash.com/photo-1559715745-e1b33a271c8f?w=400&h=300&fit=crop&auto=format&q=80",
   "https://images.unsplash.com/photo-1572802419224-296b0aeee0d9?w=400&h=300&fit=crop&auto=format&q=80",
 ];
+
+// Mirrors the dish-type backfill in migration
+// 20260905000000_dish_types_inventory (ordered, specific-first). Seeded
+// products get a best-effort dish type; anything unmatched is OTHER.
+const DISH_KEYWORDS: [string, RegExp][] = [
+  ["JOLLOF", /jollof/i],
+  ["FRIED_RICE", /fried rice/i],
+  ["OFADA", /ofada|ayamase/i],
+  ["WHITE_RICE", /white rice/i],
+  ["COCONUT_RICE", /coconut rice/i],
+  ["AMALA", /amala|gbegiri/i],
+  ["EBA", /\beba\b/i],
+  ["POUNDED_YAM", /pounded yam/i],
+  ["FUFU", /fufu/i],
+  ["SEMOVITA", /semovita|semolina|wheat/i],
+  ["TUWO", /tuwo|miyan/i],
+  ["EWA_AGOYIN", /\bewa\b|agoyin/i],
+  ["MOI_MOI", /moin|moi moi/i],
+  ["AKARA", /akara|bean cake/i],
+  ["PUFF_PUFF", /puff/i],
+  ["EGUSI", /egusi/i],
+  ["OGBONO", /ogbono/i],
+  ["OKRA", /okra/i],
+  ["EFO_RIRO", /\befo\b/i],
+  ["AFANG", /afang|okazi/i],
+  ["EDIKANG", /edikang|ikong/i],
+  ["BANGA", /banga|starch/i],
+  ["OHA", /\boha\b/i],
+  ["BITTERLEAF", /bitterleaf|bitter leaf/i],
+  ["NSALA", /nsala|white soup/i],
+  ["FISHERMAN", /fisherman/i],
+  ["PEPPER_SOUP", /pepper soup|point and kill|ukodo/i],
+  ["ASUN", /asun/i],
+  ["SUYA", /suya/i],
+  ["BOLI", /boli|roasted plantain|booli/i],
+  ["FRIED_YAM", /fried yam/i],
+  ["PLANTAIN", /plantain porridge/i],
+  ["BEANS", /beans|porridge/i],
+  ["PLANTAIN", /plantain|\bdodo\b/i],
+  ["YAM_PORRIDGE", /yam porridge|asaro/i],
+  ["ABACHA", /abacha|african salad/i],
+  ["NKWOBI", /nkwobi/i],
+  ["ISIEWU", /isi ewu/i],
+  ["KILISHI", /kilishi|jerky/i],
+  ["PONMO", /ponmo|cow skin/i],
+  ["OKPA", /okpa|corn pudding/i],
+  ["AGIDI_PAP", /agidi|akamu|custard|\bpap\b|\bogi\b/i],
+  ["CHICKEN", /chicken|turkey/i],
+  ["GOAT_MEAT", /goat/i],
+  ["FISH", /fish|croaker|tilapia|catfish|titus|stockfish|seafood|shrimp|prawn/i],
+  ["SMALL_CHOPS", /small chop|samosa|spring roll/i],
+  ["SNACKS", /meat pie|sausage|gala|egg roll|scotch egg|chin chin/i],
+  ["SHAWARMA", /shawarma/i],
+  ["NOODLES", /indomie|noodle|spaghetti|pasta/i],
+  ["DRINKS", /zobo|kunu|smoothie|juice|tigernut|drink/i],
+];
+
+function classifyDishType(name: string): string {
+  for (const [id, re] of DISH_KEYWORDS) {
+    if (re.test(name)) return id;
+  }
+  return "OTHER";
+}
 
 const foodNames = [
   // 🍔 Global foods you had
@@ -576,7 +638,7 @@ async function seedDatabase() {
         username: `${prefix}_${index}_${faker.string.alphanumeric(5).toLowerCase()}`,
         password: faker.internet.password(),
         role,
-        preferences: take(Object.values(Category), 2),
+        preferences: take(["JOLLOF", "SUYA", "OFADA", "AMALA", "BOLI", "EGUSI"], 2),
         authProviders: ["local"],
         bio: faker.lorem.sentence(),
         avatarUrl: faker.image.avatar(),
@@ -672,7 +734,7 @@ async function seedDatabase() {
           ][Math.floor(Math.random() * 10)]
         } ${name.toLowerCase()} prepared with care by ${vendor.brandName || vendor.name}.`,
         price: money(),
-        category: pick(Object.values(Category)) || Category.LUNCH,
+        dishTypeId: classifyDishType(name),
         archived: false,
         vendorId: vendor.id,
         images: randomImages(),

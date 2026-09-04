@@ -1,9 +1,10 @@
 import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { redisProducts, redisSearch, redisTotalViews, ShopCartRedis } from "../lib/redis";
-import { CACHE_KEYS } from "./redisCacheTiming";
+import { CACHE_KEYS, CACHE_TTLS } from "./redisCacheTiming";
 import {
   isVendorOperating,
+  isProductCurrentlyAvailable,
 } from "./vendorAvailability.service";
 
 // Catalog sort values accepted by GET /api/product?sortBy=…
@@ -14,61 +15,78 @@ export const CATALOG_SORT_VALUES = [
   "priceAsc",
   "priceDesc",
   "newest",
+  "rating",
 ] as const;
 export type CatalogSortValue = (typeof CATALOG_SORT_VALUES)[number];
 
-// Fetch products with aggregate ratings
-export async function getProductsWithAggregates(
-  whereClause: Prisma.ProductWhereInput,
-  skip: number,
-  limit: number,
-  sort: string
-) {
-  const [totalItems, products] = await Promise.all([
-    prisma.product.count({ where: whereClause }),
-    prisma.product.findMany({
-      where: whereClause,
-      skip,
-      take: limit,
-      include: { vendor: { select: { id: true, name: true, brandName: true, avatarUrl: true } }, options: true },
-      orderBy: getSortCondition(sort),
-    }),
-  ]);
-
-  const reviewAggregates = await prisma.productReview.groupBy({
-    by: ["productId"],
-    where: { productId: { in: products.map(p => p.id) } },
-    _count: { id: true },
-    _avg: { rating: true },
-  });
-
-  const reviewMap = reviewAggregates.reduce((acc, agg) => {
-    acc[agg.productId] = { averageRating: agg._avg?.rating ?? 0, reviewCount: agg._count.id };
-    return acc;
-  }, {} as Record<string, { averageRating: number; reviewCount: number }>);
-
-  const productsWithAggregates = products.map(product => ({
-    ...product,
-    averageRating: reviewMap[product.id]?.averageRating ?? 0,
-    reviewCount: reviewMap[product.id]?.reviewCount ?? 0,
-  }));
-
-  return { products: productsWithAggregates, totalItems };
+export interface WhatsInThePotItem {
+  dishType: { id: string; name: string; description: string | null; imageUrl: string | null };
+  /** Currently orderable products of this dish type (dynamic — never hardcoded). */
+  count: number;
 }
 
-// Sort condition helper
-export function getSortCondition(sort: string): Prisma.ProductOrderByWithRelationInput {
-  switch (sort) {
-    case "popular":
-      return { popularityScore: "desc" };
-    case "price-asc":
-      return { price: "asc" };
-    case "price-desc":
-      return { price: "desc" };
-    case "newest":
-    default:
-      return { createdAt: "desc" };
+/**
+ * "What's in the Pot?" — dish types that have at least one orderable
+ * product RIGHT NOW (not archived + vendor live + accepting + in stock).
+ * Ranked by count desc. A dish with nothing orderable never appears.
+ */
+export async function fetchWhatsInThePot(): Promise<WhatsInThePotItem[]> {
+  try {
+    const cached = await redisProducts.get(CACHE_KEYS.WHATS_IN_THE_POT);
+    if (cached) return JSON.parse(cached) as WhatsInThePotItem[];
+  } catch {
+    // Cache is best-effort; fall through to the database.
   }
+
+  const groups = await prisma.product.groupBy({
+    by: ["dishTypeId"],
+    where: {
+      archived: false,
+      vendor: vendorOperatingWhere,
+      OR: [{ trackInventory: false }, { stock: { gt: 0 } }],
+    },
+    _count: { _all: true },
+  });
+
+  const counts = new Map(groups.map((g) => [g.dishTypeId, g._count._all]));
+  const items = (await getActiveDishTypes())
+    .filter((d) => (counts.get(d.id) ?? 0) > 0)
+    .map((d) => ({
+      dishType: { id: d.id, name: d.name, description: d.description, imageUrl: d.imageUrl },
+      count: counts.get(d.id) ?? 0,
+    }))
+    .sort((a, b) => b.count - a.count || a.dishType.name.localeCompare(b.dishType.name));
+
+  try {
+    await redisProducts.set(CACHE_KEYS.WHATS_IN_THE_POT, JSON.stringify(items), {
+      EX: CACHE_TTLS.WHATS_IN_THE_POT,
+    });
+  } catch {
+    // Best-effort.
+  }
+  return items;
+}
+
+/**
+ * Recomputes a product's denormalized rating stats from its reviews.
+ * Called after every product-review create/update/delete so the stored
+ * `averageRating`/`reviewCount` columns stay truthful for ranking and
+ * `minRating` filtering. Fire-and-forget safe: throws are the caller's
+ * choice (controllers await it so listings never serve stale stats).
+ */
+export async function refreshProductRatingStats(productId: string): Promise<void> {
+  const agg = await prisma.productReview.aggregate({
+    where: { productId },
+    _avg: { rating: true },
+    _count: { _all: true },
+  });
+  await prisma.product.update({
+    where: { id: productId },
+    data: {
+      averageRating: agg._avg.rating ?? 0,
+      reviewCount: agg._count._all,
+    },
+  });
 }
 
 
@@ -173,18 +191,70 @@ export async function clearSearchCaches() {
 // envelopes; these functions only do the DB work + response-shape mapping.
 // ─────────────────────────────────────────────────────────────────────────────
 
+export interface DishTypeListItem {
+  id: string;
+  name: string;
+  description: string | null;
+  imageUrl: string | null;
+  sortOrder: number;
+}
+
 export interface ProductListItem {
   id: string;
   name: string;
   price: number;
-  category: string;
+  dishType: { id: string; name: string };
   images: string[];
   popularityPercent: number;
+  averageRating: number;
+  reviewCount: number;
+  /** How much food one unit represents (e.g. "Family Pack — serves 4–5"). */
+  portionLabel: string | null;
+  trackInventory: boolean;
+  /** Remaining portions; null when inventory is not tracked. */
+  stock: number | null;
+  /** Tracked and zero remaining — visible but not orderable. */
+  soldOut: boolean;
   /** Vendor is live on the marketplace AND accepting orders. */
   vendorOperating?: boolean;
-  /** Marketplace availability (Stage 1: vendor operating + not archived). */
+  /** Marketplace availability (vendor operating + not archived + stock). */
   orderable?: boolean;
   vendor: { id: string; name: string; brandName: string | null; avatarUrl: string | null };
+}
+
+/** Active dish types, cached briefly — vendors and discovery read this often. */
+export async function getActiveDishTypes(): Promise<DishTypeListItem[]> {
+  try {
+    const cached = await redisProducts.get(CACHE_KEYS.DISH_TYPES_ALL);
+    if (cached) return JSON.parse(cached) as DishTypeListItem[];
+  } catch {
+    // Cache is best-effort; fall through to the database.
+  }
+
+  const rows = await prisma.dishType.findMany({
+    where: { isActive: true },
+    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    select: { id: true, name: true, description: true, imageUrl: true, sortOrder: true },
+  });
+  try {
+    await redisProducts.set(CACHE_KEYS.DISH_TYPES_ALL, JSON.stringify(rows), {
+      EX: CACHE_TTLS.DISH_TYPES_ALL,
+    });
+  } catch {
+    // Best-effort.
+  }
+  return rows;
+}
+
+/** Throws a ValidationError unless the id is an active dish type. */
+export async function assertActiveDishType(dishTypeId: string): Promise<void> {
+  const ids = new Set((await getActiveDishTypes()).map((d) => d.id));
+  if (!ids.has(dishTypeId)) {
+    const { ValidationError } = await import("../errors/AppError");
+    throw new ValidationError(
+      `Invalid dish type. Choose one of: ${[...ids].join(", ")}`,
+    );
+  }
 }
 
 export interface ProductPageResult {
@@ -201,37 +271,43 @@ export interface ProductPageResult {
 export async function fetchProductPage(opts: {
   skip: number;
   take: number;
-  category?: string;
+  dishType?: string;
   vendorId?: string;
   /** Marketplace surfaces set this; plain browse (GET /product) does not. */
   vendorMustBeOperating?: boolean;
-  /** Catalog sorting: popularity | priceAsc | priceDesc | newest. */
+  /** Catalog sorting: popularity | priceAsc | priceDesc | newest | rating. */
   sortBy?: string;
   minPrice?: number;
   maxPrice?: number;
+  /** Minimum stored average rating (0–5). */
+  minRating?: number;
   /** Only currently-orderable marketplace products (authoritative rules). */
   availableOnly?: boolean;
 }): Promise<ProductPageResult> {
   const {
     skip,
     take,
-    category,
+    dishType,
     vendorId,
     vendorMustBeOperating,
     sortBy,
     minPrice,
     maxPrice,
+    minRating,
     availableOnly,
   } = opts;
 
   const where: Prisma.ProductWhereInput = { archived: false };
-  if (category) where.category = category as Prisma.EnumCategoryFilter;
+  if (dishType) where.dishTypeId = dishType;
   if (vendorId) where.vendorId = vendorId;
   if (opts.minPrice != null || opts.maxPrice != null) {
     where.price = {
       ...(opts.minPrice != null ? { gte: opts.minPrice } : {}),
       ...(opts.maxPrice != null ? { lte: opts.maxPrice } : {}),
     } as Prisma.FloatFilter;
+  }
+  if (minRating != null && minRating > 0) {
+    where.averageRating = { gte: minRating };
   }
   if (vendorMustBeOperating || availableOnly) {
     where.vendor = {
@@ -259,6 +335,9 @@ export async function fetchProductPage(opts: {
     case "priceDesc":
       orderBy = [{ price: "desc" }, { createdAt: "desc" }];
       break;
+    case "rating":
+      orderBy = [{ averageRating: "desc" }, { reviewCount: "desc" }, { createdAt: "desc" }];
+      break;
     case "newest":
       orderBy = [{ createdAt: "desc" }];
       break;
@@ -276,11 +355,16 @@ export async function fetchProductPage(opts: {
         id: true,
         name: true,
         price: true,
-        category: true,
+        dishType: { select: { id: true, name: true } },
         thumbnail: true,
         images: true,
         popularityPercent: true,
+        averageRating: true,
+        reviewCount: true,
+        portionLabel: true,
         archived: true,
+        trackInventory: true,
+        stock: true,
         vendor: {
           select: {
             id: true,
@@ -296,20 +380,34 @@ export async function fetchProductPage(opts: {
     prisma.product.count({ where }),
   ]);
 
-  // Stage 1 availability: vendor operating + not archived (no scheduling,
-  // no stock yet). Exposed as `orderable` so discovery clients never
+  // Availability: vendor operating + product available (not archived,
+  // in stock). Exposed as `orderable` so discovery clients never
   // recompute availability locally.
   const products: ProductListItem[] = dbProducts.map((p) => {
     const vendorOperating = isVendorOperating(p.vendor);
-    const orderable = !p.archived && vendorOperating;
+    const availability = {
+      archived: p.archived,
+      trackInventory: p.trackInventory,
+      stock: p.stock,
+    };
+    const orderable =
+      vendorOperating && isProductCurrentlyAvailable(availability);
+    const soldOut =
+      p.trackInventory === true && (p.stock ?? 0) <= 0;
 
     return {
       id: p.id,
       name: p.name,
       price: p.price,
-      category: p.category as string,
+      dishType: p.dishType,
       images: p.thumbnail ? [p.thumbnail] : p.images.length > 0 ? [p.images[0]] : [],
       popularityPercent: p.popularityPercent,
+      averageRating: p.averageRating ?? 0,
+      reviewCount: p.reviewCount,
+      portionLabel: p.portionLabel,
+      trackInventory: p.trackInventory,
+      stock: p.trackInventory ? p.stock : null,
+      soldOut,
       vendorOperating,
       orderable,
       vendor: p.vendor,
@@ -335,13 +433,16 @@ const productListSelect = {
   id: true,
   name: true,
   price: true,
-  category: true,
+  dishType: { select: { id: true, name: true } },
   thumbnail: true,
   images: true,
   popularityPercent: true,
   popularityScore: true,
   averageRating: true,
   reviewCount: true,
+  portionLabel: true,
+  trackInventory: true,
+  stock: true,
   totalViews: true,
   archived: true,
   vendor: {
@@ -361,11 +462,16 @@ function toProductListItem(
     id: string;
     name: string;
     price: number;
-    category: unknown;
+    dishType: { id: string; name: string };
     thumbnail: string | null;
     images: string[];
     popularityPercent: number;
+    averageRating: number | null;
+    reviewCount: number;
+    portionLabel: string | null;
     archived: boolean;
+    trackInventory: boolean;
+    stock: number | null;
     vendor: {
       id: string;
       name: string;
@@ -377,15 +483,28 @@ function toProductListItem(
   },
 ): ProductListItem {
   const vendorOperating = isVendorOperating(p.vendor);
+  const orderable =
+    vendorOperating &&
+    isProductCurrentlyAvailable({
+      archived: p.archived,
+      trackInventory: p.trackInventory,
+      stock: p.stock,
+    });
   return {
     id: p.id,
     name: p.name,
     price: p.price,
-    category: p.category as string,
+    dishType: p.dishType,
     images: p.thumbnail ? [p.thumbnail] : p.images.length > 0 ? [p.images[0]] : [],
     popularityPercent: p.popularityPercent,
+    averageRating: p.averageRating ?? 0,
+    reviewCount: p.reviewCount,
+    portionLabel: p.portionLabel,
+    trackInventory: p.trackInventory,
+    stock: p.trackInventory ? p.stock : null,
+    soldOut: p.trackInventory === true && (p.stock ?? 0) <= 0,
     vendorOperating,
-    orderable: !p.archived && vendorOperating,
+    orderable,
     vendor: {
       id: p.vendor.id,
       name: p.vendor.name,
@@ -426,7 +545,7 @@ export interface NewProductItem {
   id: string;
   name: string;
   price: number;
-  category: string;
+  dishType: { id: string; name: string };
   images: string[];
   isNew: boolean;
   createdAt: Date;
@@ -440,15 +559,15 @@ export interface NewProductItem {
 // construction (vendorOperating/orderable are still exposed for clients).
 export async function fetchLiveProducts(opts: {
   take: number;
-  category?: string;
+  dishType?: string;
 }): Promise<ProductPageResult> {
-  const { take, category } = opts;
+  const { take, dishType } = opts;
 
   const where: Prisma.ProductWhereInput = {
     archived: false,
     vendor: vendorOperatingWhere,
   };
-  if (category) where.category = category as Prisma.EnumCategoryFilter;
+  if (dishType) where.dishTypeId = dishType;
 
   const [dbProducts, total] = await Promise.all([
     prisma.product.findMany({
@@ -465,12 +584,12 @@ export async function fetchLiveProducts(opts: {
 
 export async function fetchNewProducts(opts: {
   take: number;
-  category?: string;
+  dishType?: string;
 }): Promise<{ items: NewProductItem[]; total: number }> {
-  const { take, category } = opts;
+  const { take, dishType } = opts;
 
   const where: Prisma.ProductWhereInput = { archived: false, isNew: true };
-  if (category) where.category = category as any;
+  if (dishType) where.dishTypeId = dishType;
 
   const [items, total] = await Promise.all([
     prisma.product.findMany({
@@ -481,7 +600,7 @@ export async function fetchNewProducts(opts: {
         id: true,
         name: true,
         price: true,
-        category: true,
+        dishType: { select: { id: true, name: true } },
         images: true,
         thumbnail: true,
         isNew: true,
@@ -499,7 +618,7 @@ export async function fetchNewProducts(opts: {
       id: p.id,
       name: p.name,
       price: p.price,
-      category: p.category as string,
+      dishType: p.dishType,
       images: p.thumbnail ? [p.thumbnail] : p.images.length > 0 ? [p.images[0]] : [],
       isNew: p.isNew,
       createdAt: p.createdAt,

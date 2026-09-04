@@ -2,6 +2,7 @@ import { OrderStatus, PaymentStatus } from "@prisma/client";
 import prisma from "../../config/prismaClient";
 import { logger } from "../../lib/logger";
 import { nowUtc, isAfterUtc } from "../../utils/time";
+import { restoreStockForOrders } from "../../services/inventory.service";
 
 /**
  * 🧹 Expire abandoned AWAITING_PAYMENT orders whose payment window has passed.
@@ -86,6 +87,12 @@ export const runExpireAwaitingPaymentJob = async (batchSize = 500) => {
 
         if (updated.count > 0) {
           expiredCount++;
+          // Release the checkout-time stock reservation — the portions go
+          // back on sale. Runs only for the winner of the atomic status
+          // transition above, so concurrent paths cannot double-restore.
+          await restoreStockForOrders(prisma, [order.id]).catch((err) =>
+            logger.error({ err, orderId: order.id }, "Failed to restore stock for expired order"),
+          );
           logger.info({ orderId: order.id }, "Expired abandoned AWAITING_PAYMENT order");
         }
       }

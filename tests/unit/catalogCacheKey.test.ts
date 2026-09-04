@@ -6,7 +6,7 @@ import { CATALOG_SORT_VALUES } from "../../src/services/product.service";
  * so tests can verify uniqueness without Redis.
  */
 function buildCacheKey(params: {
-  category?: string;
+  dishType?: string;
   vendorId?: string;
   page?: number;
   limit?: number;
@@ -15,7 +15,7 @@ function buildCacheKey(params: {
   maxPrice?: number;
   availableOnly?: boolean;
 }): string {
-  const category = params.category?.toUpperCase() ?? "ALL";
+  const dishType = params.dishType?.toUpperCase() ?? "ALL";
   const sortBy = params.sortBy || "default";
   const page = params.page ?? 1;
   const limit = params.limit ?? 20;
@@ -27,21 +27,21 @@ function buildCacheKey(params: {
     `av=${params.availableOnly ? 1 : 0}`,
   ].join(":");
 
-  return `products:all:${vendorPart}category=${category}:page=${page}:limit=${limit}:${filterKey}`;
+  return `products:all:${vendorPart}dishtype=${dishType}:page=${page}:limit=${limit}:${filterKey}`;
 }
 
 describe("GET /product cache-key uniqueness", () => {
-  test("different categories produce different keys", () => {
-    const lunch = buildCacheKey({ category: "LUNCH" });
-    const breakfast = buildCacheKey({ category: "BREAKFAST" });
-    expect(lunch).not.toBe(breakfast);
-    expect(lunch).toContain("LUNCH");
-    expect(breakfast).toContain("BREAKFAST");
+  test("different dish types produce different keys", () => {
+    const jollof = buildCacheKey({ dishType: "JOLLOF" });
+    const suya = buildCacheKey({ dishType: "SUYA" });
+    expect(jollof).not.toBe(suya);
+    expect(jollof).toContain("JOLLOF");
+    expect(suya).toContain("SUYA");
   });
 
-  test("ALL produces a distinct key from any specific category", () => {
-    expect(buildCacheKey({ category: "ALL" }))
-      .not.toBe(buildCacheKey({ category: "LUNCH" }));
+  test("ALL produces a distinct key from any specific dish type", () => {
+    expect(buildCacheKey({ dishType: "ALL" }))
+      .not.toBe(buildCacheKey({ dishType: "JOLLOF" }));
   });
 
   test("different sortBy values produce different keys", () => {
@@ -87,15 +87,15 @@ describe("GET /product cache-key uniqueness", () => {
 
   test("combined filters produce a unique key", () => {
     const key1 = buildCacheKey({
-      category: "LUNCH", sortBy: "priceAsc", minPrice: 1000, maxPrice: 5000, availableOnly: true,
+      dishType: "JOLLOF", sortBy: "priceAsc", minPrice: 1000, maxPrice: 5000, availableOnly: true,
     });
     const key2 = buildCacheKey({
-      category: "LUNCH", sortBy: "priceAsc", minPrice: 1000, maxPrice: 5000, availableOnly: true,
+      dishType: "JOLLOF", sortBy: "priceAsc", minPrice: 1000, maxPrice: 5000, availableOnly: true,
     });
     expect(key1).toBe(key2); // same filters = same key (deterministic)
 
     const key3 = buildCacheKey({
-      category: "LUNCH", sortBy: "priceAsc", minPrice: 1000, maxPrice: 5000, availableOnly: false,
+      dishType: "JOLLOF", sortBy: "priceAsc", minPrice: 1000, maxPrice: 5000, availableOnly: false,
     });
     expect(key3).not.toBe(key1); // toggling availability changes the key
   });

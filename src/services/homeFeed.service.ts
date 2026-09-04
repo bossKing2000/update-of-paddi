@@ -1,4 +1,3 @@
-import { Category } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { redisProducts } from "../lib/redis";
 import { CACHE_KEYS, CACHE_TTLS } from "./redisCacheTiming";
@@ -7,6 +6,9 @@ import {
   fetchNewProducts,
   fetchProductPage,
   fetchLiveProducts,
+  fetchWhatsInThePot,
+  getActiveDishTypes,
+  assertActiveDishType,
 } from "./product.service";
 import { findNearbyVendors } from "../controllers/vendorControllerMapping";
 import { getActivePromotionsForCustomer } from "./promoService";
@@ -35,22 +37,24 @@ export interface HomeFeedViewer {
 export interface NormalizedHomeFeedQuery {
   lat: number | null;
   lng: number | null;
-  category: string; // "ALL" or a valid Category enum value
+  dishType: string; // "ALL" or an active DishType id (e.g. "JOLLOF")
   limit: number;
 }
 
 /**
  * Parses/clamps raw query values. Coordinate problems are handled
  * gracefully (treated as "no location") because location only enhances the
- * feed. An invalid category throws — mirroring GET /product, where an
- * unknown category is a client error rather than silently-empty data.
+ * feed. An invalid dishType throws — mirroring GET /product, where an
+ * unknown dish type is a client error rather than silently-empty data.
+ * Dish-type existence is verified against the cached active list.
  */
-export function parseHomeFeedQuery(raw: {
+export async function parseHomeFeedQuery(raw: {
   lat?: unknown;
   lng?: unknown;
-  category?: unknown;
+  dishType?: unknown;
+  category?: unknown; // legacy meal-time param — ignored
   limit?: unknown;
-}): NormalizedHomeFeedQuery {
+}): Promise<NormalizedHomeFeedQuery> {
   // Limit: clamp instead of reject — consistent with GET /product.
   const parsedLimit = parseInt(String(raw.limit ?? ""), 10);
   const limit = Number.isFinite(parsedLimit)
@@ -68,24 +72,21 @@ export function parseHomeFeedQuery(raw: {
     lng >= -180 &&
     lng <= 180;
 
-  let category = "ALL";
-  if (raw.category != null && String(raw.category).trim() !== "") {
-    const candidate = String(raw.category).toUpperCase();
+  let dishType = "ALL";
+  if (raw.dishType != null && String(raw.dishType).trim() !== "") {
+    const candidate = String(raw.dishType).trim().toUpperCase();
     if (candidate === "ALL") {
-      category = "ALL";
-    } else if (Object.values(Category).includes(candidate as Category)) {
-      category = candidate;
+      dishType = "ALL";
     } else {
-      throw new ValidationError(
-        `Invalid category. Valid options: ${Object.values(Category).join(", ")}`,
-      );
+      await assertActiveDishType(candidate);
+      dishType = candidate;
     }
   }
 
   return {
     lat: coordsValid ? roundCoord(lat) : null,
     lng: coordsValid ? roundCoord(lng) : null,
-    category,
+    dishType,
     limit,
   };
 }
@@ -105,7 +106,7 @@ export function buildHomeFeedCacheKey(opts: {
     opts.viewer ? opts.viewer.id : "anon",
     opts.query.lat,
     opts.query.lng,
-    opts.query.category,
+    opts.query.dishType,
     opts.query.limit,
   );
 }
@@ -152,7 +153,8 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
   // All sections are independent — fan out in parallel with per-section
   // fault isolation.
   const [
-    categories,
+    dishTypes,
+    whatsInThePot,
     popularResult,
     liveResult,
     newProducts,
@@ -161,11 +163,8 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
     promotions,
     unreadNotifications,
   ] = await Promise.all([
-    safeSection("categories", async () => {
-      const cachedCategories = await redisProducts.get(CACHE_KEYS.CATEGORIES_ALL);
-      if (cachedCategories) return JSON.parse(cachedCategories) as string[];
-      return Object.values(Category) as string[];
-    }, [] as string[]),
+    safeSection("dishTypes", () => getActiveDishTypes(), []),
+    safeSection("whatsInThePot", () => fetchWhatsInThePot(), []),
 
     safeSection(
       "popularProducts",
@@ -181,7 +180,7 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
       () =>
         fetchLiveProducts({
           take: Math.min(query.limit, 12),
-          category: query.category !== "ALL" ? query.category : undefined,
+          dishType: query.dishType !== "ALL" ? query.dishType : undefined,
         }),
       { products: [], total: 0 },
     ),
@@ -191,7 +190,7 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
       () =>
         fetchNewProducts({
           take: query.limit,
-          category: query.category !== "ALL" ? query.category : undefined,
+          dishType: query.dishType !== "ALL" ? query.dishType : undefined,
         }),
       { items: [], total: 0 },
     ),
@@ -202,7 +201,7 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
         fetchProductPage({
           skip: 0,
           take: Math.min(query.limit, 20),
-          category: query.category !== "ALL" ? query.category : undefined,
+          dishType: query.dishType !== "ALL" ? query.dishType : undefined,
           // Marketplace discovery surface: only vendors currently operating.
           // Plain GET /product keeps browse semantics (viewable offline).
           vendorMustBeOperating: true,
@@ -244,7 +243,14 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
   const payload = {
     generatedAt: new Date().toISOString(),
 
-    categories,
+    // Rich dish-type vocabulary ("What's in the Pot?").
+    dishTypes,
+    // Deprecated: dish-type ids as plain strings (old `categories` clients
+    // expect List<String>; ids are strings so old UIs keep rendering).
+    categories: (dishTypes as { id: string }[]).map((d) => d.id),
+
+    // "What's in the Pot?" — dish types with something orderable now.
+    whatsInThePot,
 
     liveProducts: {
       items: liveResult.products,

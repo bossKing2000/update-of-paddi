@@ -174,13 +174,46 @@ model Address {
   @@index([isDefault])
 }
 
+// Curated Bottom Pot food vocabulary ("What's in the Pot?").
+// Vendors choose from active rows — they never free-type dish types, so
+// "Ofada" / "ofada" / "OFADA" cannot duplicate. New dishes are added as
+// rows (no deployment). Stable string ids (e.g. "JOLLOF") keep API
+// contracts and Flutter code readable; OTHER is the honest fallback.
+model DishType {
+  id          String   @id // stable key, e.g. "JOLLOF", "OFADA", "OTHER"
+  name        String   @unique // display name, e.g. "Jollof Rice"
+  description String?
+  imageUrl    String?
+  sortOrder   Int      @default(100)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products Product[]
+
+  @@index([isActive, sortOrder])
+}
+
 model Product {
-  id          String   @id @default(uuid())
+  id          String  @id @default(uuid())
   name        String
   description String
   price       Float
-  archived    Boolean  @default(false) // just like a delete function
-  category    Category
+  archived    Boolean @default(false) // just like a delete function
+
+  // What the food actually is (required, vendor-selected from DishType).
+  dishTypeId String
+  dishType   DishType @relation(fields: [dishTypeId], references: [id])
+
+  // Portion size: how much food ONE purchased unit represents
+  // (e.g. "1 portion", "Family Pack — serves 4–5"). Free text, not inventory.
+  portionLabel String?
+
+  // Inventory: remaining purchasable units. When trackInventory is false
+  // the product has unlimited availability (stock is ignored). When true,
+  // stock is authoritative and 0 means SOLD OUT (not orderable).
+  trackInventory Boolean @default(false)
+  stock          Int?
 
   images              String[]
   thumbnail           String? // 👈 ADD THIS
@@ -206,8 +239,9 @@ model Product {
 
   // Essential indexes (keep these)
   @@index([name], map: "product_name_idx") // Speeds up search suggestions
-  @@index([category], map: "product_category_idx") // Faster category filtering
+  @@index([dishTypeId]) // Dish-type filtering ("What's in the Pot?")
   @@index([vendorId], map: "product_vendor_idx") // Helps with vendor-specific queries
+  @@index([vendorId, archived]) // Vendor storefront listing
   @@index([archived])
   @@index([createdAt])
   @@index([price])
@@ -218,9 +252,15 @@ model ProductOption {
   productId       String
   name            String
   price           Float
+  // Vendors can disable (not delete) an add-on; disabled add-ons are
+  // rejected at cart/checkout time but preserved on historical orders
+  // via the OrderItemOption snapshot.
+  isActive        Boolean           @default(true)
   product         Product           @relation("ProductOptions", fields: [productId], references: [id], onDelete: Cascade)
   OrderItemOption OrderItemOption[]
   CartItemOption  CartItemOption[]
+
+  @@unique([productId, name])
 }
 
 model Order {
@@ -513,14 +553,6 @@ enum SpecialOrderOfferStatus {
   PENDING
   ACCEPTED
   REJECTED
-}
-
-enum Category {
-  BREAKFAST
-  LUNCH
-  DINNER
-  DESSERT
-  DRINK
 }
 
 enum OrderStatus {

@@ -6,6 +6,7 @@ import {
 } from "@prisma/client";
 import retry from "async-retry";
 import prisma from "../lib/prisma";
+import { restoreStockForOrders } from "./inventory.service";
 import { logger } from "../lib/logger";
 import { generateReceipt } from "../utils/generate Receipt/generateReceipt";
 import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
@@ -235,6 +236,7 @@ async function runFinalizer(
         : false;
 
       if (!isWithinProtection && !isBeforeExpiry) {
+        const killedOrderIds: string[] = [];
         await prisma.$transaction(async (tx) => {
           await tx.payment.update({
             where: { reference },
@@ -257,8 +259,12 @@ async function runFinalizer(
                   paymentStatus: PaymentStatus.LATE_PAYMENT,
                 },
               });
+              killedOrderIds.push(order.id);
             }
           }
+          // The unpaid orders die here, so their checkout-time stock
+          // reservations die with them — atomically, in the same tx.
+          await restoreStockForOrders(tx, killedOrderIds);
         });
         logger.warn(
           { reference, orderIds: orders.map((o) => o.id) },

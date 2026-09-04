@@ -48,7 +48,7 @@ const row = (overrides: Record<string, unknown> = {}) => ({
   id: "p1",
   name: "Palm Nut Soup",
   price: 1200,
-  category: "DINNER",
+  dishType: { id: "JOLLOF", name: "Jollof Rice" },
   thumbnail: null,
   images: [],
   popularityPercent: 40,
@@ -92,9 +92,9 @@ describe("fetchLiveProducts (Stage 1: orderable marketplace products)", () => {
     expect(where.vendor.isLive).toBe(true);
   });
 
-  it("applies an optional category filter", async () => {
-    await fetchLiveProducts({ take: 12, category: "DINNER" });
-    expect(mockedFindMany.mock.calls[0][0].where.category).toBe("DINNER");
+  it("applies an optional dish-type filter", async () => {
+    await fetchLiveProducts({ take: 12, dishType: "JOLLOF" });
+    expect(mockedFindMany.mock.calls[0][0].where.dishTypeId).toBe("JOLLOF");
   });
 });
 

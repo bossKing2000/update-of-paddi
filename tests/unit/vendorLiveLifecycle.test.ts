@@ -24,7 +24,7 @@ jest.mock("../../src/lib/prisma", () => ({
       findMany: jest.fn(),
       update: jest.fn(),
     },
-    product: { findUnique: jest.fn() },
+    product: { findUnique: jest.fn(), findMany: jest.fn() },
     cart: {
       findFirst: jest.fn(),
       findUnique: jest.fn(),
@@ -255,6 +255,7 @@ describe("addToCart — vendor live gate", () => {
 // ─────────────────────────────────────────────────────────────────────
 
 const checkoutBase = (cartItems: any[]) => {
+  db.product.findMany.mockResolvedValue([freshProductRow()]);
   db.address.findFirst.mockResolvedValue({ id: "addr-1", userId: "cust-1" });
   db.cartSummarySnapshot.findUnique.mockResolvedValue({
     id: "snap-1",
@@ -291,6 +292,19 @@ const cartItemFrom = (vendor: Record<string, unknown>) => ({
     vendor, // THIS is what the rule reads
     options: [],
   },
+});
+
+// Fresh database truth for checkout revalidation: current price, archive
+// state, stock, and active add-ons. Mirrors the select in checkoutCart.
+const freshProductRow = () => ({
+  id: "prod-1",
+  name: "Jollof",
+  price: 1000,
+  archived: false,
+  trackInventory: false,
+  stock: null,
+  vendorId: "vendor-1",
+  options: [],
 });
 
 describe("checkoutCart — vendor live invariant", () => {

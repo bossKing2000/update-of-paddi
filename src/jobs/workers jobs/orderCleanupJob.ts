@@ -3,6 +3,7 @@ import { nowUtc, isAfterUtc } from "../../utils/time";
 import { OrderStatus } from "@prisma/client";
 import prisma from "../../config/prismaClient";
 import { logger } from "../../lib/logger";
+import { restoreStockForOrders } from "../../services/inventory.service";
 
 /**
  * 🧹 Automatically cancels expired or offline orders in batches
@@ -122,7 +123,14 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
               paymentStatus: "FAILED",
             },
           });
-          if (updated.count > 0) offlineUpdated++;
+          if (updated.count > 0) {
+            offlineUpdated++;
+            // Release the checkout-time stock reservation (see
+            // expireAwaitingPaymentJob — same winner-takes-restore rule).
+            await restoreStockForOrders(prisma, [order.id]).catch((err) =>
+              logger.error({ err, orderId: order.id }, "Failed to restore stock for cleaned-up order"),
+            );
+          }
         }
       }
 
