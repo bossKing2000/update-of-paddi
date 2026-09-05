@@ -1,5 +1,10 @@
 import prisma from "../lib/prisma";
 import { DiscountType, PromotionScope } from "@prisma/client";
+import { computeDiscountedPrice } from "./promotionPricing.service";
+import {
+  isProductCurrentlyAvailable,
+  isVendorOperating,
+} from "./vendorAvailability.service";
 
 const round = (v: number) => Number(v.toFixed(2));
 
@@ -261,7 +266,8 @@ export async function applyPromoService({
   return {
     applied: true,
     promoId: promo.id,
-    promoCode: promo.code,
+    // Code-gated path: looked up by code, so a code is always present.
+    promoCode: promo.code ?? code,
     discountType: promo.type,
     reason: null,
     vendorDiscounts,
@@ -308,8 +314,18 @@ export async function redeemPromo(
 // Extracted verbatim from promoController.getActivePromotions so that both
 // the original endpoint and the new GET /api/home/feed composition share one
 // implementation. Read-only: does not touch redemption/usage logic.
+//
+// Each promotion carries enough information to render a REAL promotional
+// product card (no client-side price math): product entries expose the
+// backend-computed discountedPrice/discountAmount, and VENDOR_WIDE
+// promotions include a small sample of actual eligible products so
+// discovery never shows a meaningless vendor-only banner.
+// userId is optional: guests skip only the per-user redemption-cap filter
+// (deals remain discoverable without login).
 // ─────────────────────────────────────────────────────────────────────────────
-export async function getActivePromotionsForCustomer(userId: string) {
+const VENDOR_WIDE_SAMPLE_PRODUCTS = 6;
+
+export async function getActivePromotionsForCustomer(userId?: string | null) {
   const now = new Date();
 
   const candidates = await prisma.promotion.findMany({
@@ -319,8 +335,28 @@ export async function getActivePromotionsForCustomer(userId: string) {
       AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gte: now } }] }],
     },
     include: {
-      vendor: { select: { id: true, brandName: true, brandLogo: true } },
-      products: { select: { id: true, name: true, thumbnail: true, price: true } },
+      vendor: {
+        select: {
+          id: true,
+          brandName: true,
+          brandLogo: true,
+          isLive: true,
+          deliveryPreferences: true,
+        },
+      },
+      products: {
+        where: { archived: false },
+        select: {
+          id: true,
+          name: true,
+          thumbnail: true,
+          price: true,
+          vendorId: true,
+          trackInventory: true,
+          stock: true,
+          archived: true,
+        },
+      },
     },
     orderBy: { createdAt: "desc" },
     take: 20,
@@ -333,32 +369,155 @@ export async function getActivePromotionsForCustomer(userId: string) {
 
   // This customer hasn't personally exhausted their own per-user cap —
   // batched in one groupBy rather than a count-query per candidate.
-  const personalUsage = await prisma.promotionUsage.groupBy({
-    by: ["promotionId"],
-    where: { userId, promotionId: { in: withinGlobalLimit.map((p) => p.id) } },
-    _count: { promotionId: true },
-  });
-  const usedByMe = new Map(personalUsage.map((u) => [u.promotionId, u._count.promotionId]));
+  // Guests (no userId) skip this filter: deals stay discoverable.
+  const usedByMe = new Map<string, number>();
+  if (userId) {
+    const personalUsage = await prisma.promotionUsage.groupBy({
+      by: ["promotionId"],
+      where: { userId, promotionId: { in: withinGlobalLimit.map((p) => p.id) } },
+      _count: { promotionId: true },
+    });
+    for (const u of personalUsage) usedByMe.set(u.promotionId, u._count.promotionId);
+  }
 
-  return withinGlobalLimit
-    .filter((p) => (usedByMe.get(p.id) ?? 0) < p.maxUsesPerUser)
-    .map((p) => ({
+  const visible = withinGlobalLimit.filter(
+    (p) => userId == null || (usedByMe.get(p.id) ?? 0) < p.maxUsesPerUser,
+  );
+
+  // VENDOR_WIDE promos carry no linked products — sample real eligible
+  // products per vendor in ONE query (never the whole catalogue).
+  const wideVendorIds = [
+    ...new Set(
+      visible
+        .filter((p) => p.scope === PromotionScope.VENDOR_WIDE && p.vendorId)
+        .map((p) => p.vendorId as string),
+    ),
+  ];
+  const samplesByVendor = new Map<string, SampleRow[]>();
+  type SampleRow = {
+    id: string;
+    name: string;
+    thumbnail: string | null;
+    price: number;
+    vendorId: string;
+    trackInventory: boolean;
+    stock: number | null;
+    archived: boolean;
+  };
+  if (wideVendorIds.length > 0) {
+    const sampleRows = await prisma.product.findMany({
+      where: { vendorId: { in: wideVendorIds }, archived: false },
+      select: {
+        id: true,
+        name: true,
+        thumbnail: true,
+        price: true,
+        vendorId: true,
+        trackInventory: true,
+        stock: true,
+        archived: true,
+      },
+      orderBy: [{ popularityScore: "desc" }, { createdAt: "desc" }],
+      take: VENDOR_WIDE_SAMPLE_PRODUCTS * Math.max(wideVendorIds.length, 1),
+    });
+    for (const row of sampleRows) {
+      const list = samplesByVendor.get(row.vendorId) ?? [];
+      if (list.length < VENDOR_WIDE_SAMPLE_PRODUCTS) {
+        list.push(row);
+        samplesByVendor.set(row.vendorId, list);
+      }
+    }
+  }
+
+  const priceFor = (
+    promo: (typeof visible)[number],
+    price: number,
+  ): { discountedPrice: number; discountAmount: number } => {
+    if (promo.type !== DiscountType.PERCENTAGE && promo.type !== DiscountType.FIXED) {
+      return { discountedPrice: Math.round(price * 100) / 100, discountAmount: 0 };
+    }
+    const discountedPrice = computeDiscountedPrice({
+      type: promo.type,
+      value: promo.value,
+      maxDiscount: promo.maxDiscount,
+      originalPrice: price,
+    });
+    return {
+      discountedPrice,
+      discountAmount: Math.round((price - discountedPrice) * 100) / 100,
+    };
+  };
+
+  const toProductEntry = (
+    promo: (typeof visible)[number],
+    prod: {
+      id: string;
+      name: string;
+      thumbnail: string | null;
+      price: number;
+      vendorId: string;
+      trackInventory: boolean;
+      stock: number | null;
+      archived: boolean;
+    },
+  ) => {
+    const { discountedPrice, discountAmount } = priceFor(promo, prod.price);
+    const orderable =
+      isVendorOperating({
+        isLive: promo.vendor?.isLive ?? false,
+        deliveryPreferences: promo.vendor?.deliveryPreferences,
+      }) &&
+      isProductCurrentlyAvailable({
+        archived: prod.archived,
+        trackInventory: prod.trackInventory,
+        stock: prod.stock,
+      });
+    return {
+      id: prod.id,
+      name: prod.name,
+      thumbnail: prod.thumbnail,
+      price: prod.price,
+      discountedPrice,
+      discountAmount,
+      orderable,
+      vendorId: prod.vendorId,
+      vendorName: promo.vendor?.brandName ?? null,
+    };
+  };
+
+  return visible.map((p) => {
+    const linked = p.products.map((prod) => toProductEntry(p, prod));
+    // Vendor-wide discovery: real eligible products, not a bare banner.
+    // Samples from an offline vendor are still listed (orderable=false) so
+    // the deal stays truthful about what it covers.
+    const samples =
+      p.scope === PromotionScope.VENDOR_WIDE && p.vendorId
+        ? (samplesByVendor.get(p.vendorId) ?? []).map((prod) =>
+            toProductEntry(p, prod),
+          )
+        : [];
+    return {
       id: p.id,
       code: p.code,
+      // False for automatic product/vendor discounts: no code entry needed.
+      requiresCode: p.code != null,
       name: p.name,
       description: p.description,
       type: p.type,
       value: p.value,
       maxDiscount: p.maxDiscount,
       minOrderAmount: p.minOrderAmount,
+      startsAt: p.startsAt,
       expiresAt: p.expiresAt,
       scope: p.scope,
-      vendor: p.vendor ? { id: p.vendor.id, name: p.vendor.brandName, logo: p.vendor.brandLogo } : null,
-      products: p.products.map((prod) => ({
-        id: prod.id,
-        name: prod.name,
-        thumbnail: prod.thumbnail,
-        price: prod.price,
-      })),
-    }));
+      vendor: p.vendor
+        ? {
+            id: p.vendor.id,
+            name: p.vendor.brandName,
+            logo: p.vendor.brandLogo,
+          }
+        : null,
+      products: linked.length > 0 ? linked : samples,
+    };
+  });
 }

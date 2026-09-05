@@ -6,6 +6,7 @@ import {
   isVendorOperating,
   isProductCurrentlyAvailable,
 } from "./vendorAvailability.service";
+import type { EffectivePromotion } from "./promotionPricing.service";
 
 // Catalog sort values accepted by GET /api/product?sortBy=…
 // "popularity" ranks by popularityScore; the rest map to stored fields.
@@ -220,6 +221,14 @@ export interface ProductListItem {
   /** Marketplace availability (vendor operating + not archived + stock). */
   orderable: boolean;
   vendor: { id: string; name: string; brandName: string | null; avatarUrl: string | null };
+  /**
+   * Effective automatic promotion resolved by the canonical promotion
+   * resolver (promotionPricing.service). Attached as a post-pass by
+   * controllers/feed via attachPromotions — never computed inline here so
+   * every surface shares one implementation. Absent (undefined) when the
+   * caller did not resolve promotions.
+   */
+  promotion?: EffectivePromotion | null;
 }
 
 /** Active dish types, cached briefly — vendors and discovery read this often. */
@@ -564,6 +573,8 @@ export interface NewProductItem {
   vendorOperating: boolean;
   orderable: boolean;
   vendor: { id: string; name: string; brandName: string | null; avatarUrl: string | null };
+  /** Effective automatic promotion (see ProductListItem.promotion). */
+  promotion?: EffectivePromotion | null;
 }
 
 // Currently-orderable marketplace listing behind the home feed's

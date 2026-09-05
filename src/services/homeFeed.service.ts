@@ -12,6 +12,7 @@ import {
 } from "./product.service";
 import { findNearbyVendors } from "../controllers/vendorControllerMapping";
 import { getActivePromotionsForCustomer } from "./promoService";
+import { attachPromotions, loadActiveProductPromos } from "./promotionPricing.service";
 import { logger } from "../lib/logger";
 import { ValidationError } from "../errors/AppError";
 
@@ -234,13 +235,15 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
       ? safeSection("nearbyVendors", () => findNearbyVendors(query.lat!, query.lng!, 5), [])
       : Promise.resolve([]),
 
-    isAuthenticated && viewer!.role === "CUSTOMER"
+    // Deals are public discovery data: guests see them too (only the
+    // per-user redemption-cap filter needs an authenticated id).
+    ((!isAuthenticated || viewer!.role === "CUSTOMER")
       ? safeSection(
           "promotions",
-          () => getActivePromotionsForCustomer(viewer!.id),
+          () => getActivePromotionsForCustomer(viewer?.id ?? null),
           [],
         )
-      : Promise.resolve([]),
+      : Promise.resolve([])),
 
     isAuthenticated
       ? safeSection(
@@ -271,6 +274,22 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
   // Live products are the currently-orderable marketplace dishes
   // (Stage 1: no scheduling). Popular products keep the exact
   // GET /product/p/most semantics.
+  //
+  // Every product surface carries the same backend-resolved effective
+  // promotion (canonical resolver) so all discovery and purchase surfaces
+  // always agree on the discounted price. The feed payload is short-lived
+  // (90s TTL), which bounds promotion staleness.
+  const activePromos = await safeSection(
+    "productPromotions",
+    () => loadActiveProductPromos(),
+    [],
+  );
+  const liveItems = attachPromotions(liveResult.products, activePromos);
+  const popularItems = attachPromotions(popularResult.products, activePromos);
+  const newItems = attachPromotions(newProducts.items, activePromos);
+  const jollofItems = attachPromotions(jollofResult.products, activePromos);
+  const pepeSoupItems = attachPromotions(pepeSoupResult.products, activePromos);
+  const catalogItems = attachPromotions(catalogResult.products, activePromos);
 
   const payload = {
     generatedAt: new Date().toISOString(),
@@ -285,25 +304,25 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
     whatsInThePot,
 
     liveProducts: {
-      items: liveResult.products,
+      items: liveItems,
       total: liveResult.total,
     },
 
-    popularProducts: popularResult.products,
+    popularProducts: popularItems,
 
     newProducts: {
-      items: newProducts.items,
+      items: newItems,
       total: newProducts.total,
     },
 
     // Ranked, orderable Jollof / Pepper Soup rails (same popularity
     // ordering as live discovery; empty when nothing orderable).
     jollofProducts: {
-      items: jollofResult.products,
+      items: jollofItems,
       total: jollofResult.total,
     },
     pepeSoupProducts: {
-      items: pepeSoupResult.products,
+      items: pepeSoupItems,
       total: pepeSoupResult.total,
     },
 
@@ -311,7 +330,7 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
     potPointsBalance,
 
     catalog: {
-      items: catalogResult.products,
+      items: catalogItems,
       total: catalogResult.total,
     },
 

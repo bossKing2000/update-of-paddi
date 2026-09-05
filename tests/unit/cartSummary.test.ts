@@ -4,7 +4,13 @@ jest.mock("../../src/lib/prisma", () => ({
   __esModule: true,
   default: {
     cart: { findFirst: jest.fn() },
+    promotion: { findMany: jest.fn() },
   },
+}));
+
+jest.mock("../../src/lib/redis", () => ({
+  __esModule: true,
+  redisProducts: { get: jest.fn(async () => null), set: jest.fn(), del: jest.fn() },
 }));
 
 jest.mock("../../src/services/deliveryFee.service", () => ({
@@ -13,6 +19,11 @@ jest.mock("../../src/services/deliveryFee.service", () => ({
 
 import prisma from "../../src/lib/prisma";
 import { calculateDeliveryFee } from "../../src/services/deliveryFee.service";
+import { DiscountType, PromotionScope } from "@prisma/client";
+
+const mockedPromotionFindMany = (prisma as any).promotion.findMany as jest.Mock;
+// No automatic promotions by default — each auto-discount test opts in.
+mockedPromotionFindMany.mockResolvedValue([]);
 
 const mockedFindFirst = (prisma as any).cart.findFirst as jest.Mock;
 const mockedDeliveryFee = calculateDeliveryFee as jest.Mock;
@@ -124,5 +135,81 @@ describe("cartSummaryService", () => {
     const result = await cartSummaryService({ userId: "user-1", addressId: "addr-1" });
     expect(result.warnings.length).toBeGreaterThan(0);
     expect(result.warnings[0]).toContain("Mama Put");
+  });
+
+  it("applies an automatic vendor-wide percentage discount with no promo code", async () => {
+    mockedPromotionFindMany.mockResolvedValue([
+      {
+        id: "promo-wide",
+        code: null,
+        type: DiscountType.PERCENTAGE,
+        value: 10,
+        maxDiscount: null,
+        scope: PromotionScope.VENDOR_WIDE,
+        isActive: true,
+        startsAt: null,
+        expiresAt: null,
+        usageLimit: null,
+        usedCount: 0,
+        vendorId: "vendor-1",
+        createdAt: new Date("2026-01-01T00:00:00Z"),
+        products: [],
+      },
+    ]);
+    mockedFindFirst.mockResolvedValue({
+      items: [
+        makeCartItem({
+          id: "a",
+          quantity: 1,
+          unitPrice: 5000,
+          productId: "prod-1",
+          product: { id: "prod-1", price: 5000, vendorId: "vendor-1" },
+        }),
+      ],
+    });
+
+    const result = await cartSummaryService({ userId: "user-1" });
+    expect(result.autoDiscount).toBe(500);
+    expect(result.codeDiscount).toBe(0);
+    expect(result.discount).toBe(500);
+    expect(result.finalTotal).toBe(4500);
+    expect(result.vendorBreakdown[0].autoDiscount).toBe(500);
+    expect(result.vendorBreakdown[0].items[0].effectiveUnitPrice).toBe(4500);
+    expect(result.vendorBreakdown[0].items[0].promotionId).toBe("promo-wide");
+  });
+
+  it("single-product automatic promos discount only the linked product", async () => {
+    mockedPromotionFindMany.mockResolvedValue([
+      {
+        id: "promo-single",
+        code: null,
+        type: DiscountType.FIXED,
+        value: 500,
+        maxDiscount: null,
+        scope: PromotionScope.SINGLE_PRODUCT,
+        isActive: true,
+        startsAt: null,
+        expiresAt: null,
+        usageLimit: null,
+        usedCount: 0,
+        vendorId: "vendor-1",
+        createdAt: new Date("2026-01-01T00:00:00Z"),
+        products: [{ id: "prod-1" }],
+      },
+    ]);
+    mockedFindFirst.mockResolvedValue({
+      items: [
+        makeCartItem({ id: "a", quantity: 1, unitPrice: 5000, productId: "prod-1", product: { id: "prod-1", price: 5000, vendorId: "vendor-1" } }),
+        makeCartItem({ id: "b", quantity: 1, unitPrice: 3000, productId: "prod-2", product: { id: "prod-2", price: 3000, vendorId: "vendor-1" } }),
+      ],
+    });
+
+    const result = await cartSummaryService({ userId: "user-1" });
+    expect(result.subtotal).toBe(8000);
+    expect(result.autoDiscount).toBe(500);
+    expect(result.finalTotal).toBe(7500);
+    const lines = result.vendorBreakdown[0].items;
+    expect(lines.find((l) => l.productId === "prod-1")!.effectiveUnitPrice).toBe(4500);
+    expect(lines.find((l) => l.productId === "prod-2")!.effectiveUnitPrice).toBe(3000);
   });
 });

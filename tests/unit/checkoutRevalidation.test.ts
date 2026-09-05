@@ -13,15 +13,16 @@ jest.mock("../../src/lib/prisma", () => ({
     cart: {
       findFirst: jest.fn(),
       findUnique: jest.fn(),
+      update: jest.fn(),
       updateMany: jest.fn(),
       delete: jest.fn(),
     },
-    cartItem: { findMany: jest.fn(), deleteMany: jest.fn(), count: jest.fn() },
+    cartItem: { findMany: jest.fn(), deleteMany: jest.fn(), count: jest.fn(), update: jest.fn() },
     cartItemOption: { deleteMany: jest.fn() },
     cartSummarySnapshot: { findUnique: jest.fn(), delete: jest.fn() },
     address: { findFirst: jest.fn() },
     order: { findMany: jest.fn(), create: jest.fn() },
-    promotion: { findUnique: jest.fn(), updateMany: jest.fn() },
+    promotion: { findUnique: jest.fn(), findMany: jest.fn(async () => []), updateMany: jest.fn() },
     promotionUsage: { count: jest.fn(), create: jest.fn() },
     $transaction: jest.fn(async (cb: any) => {
       const prismaMock = require("../../src/lib/prisma").default;
@@ -139,6 +140,8 @@ function baseMocks() {
   );
   db.product.findMany.mockResolvedValue([freshProduct()]);
   db.cart.updateMany.mockResolvedValue({ count: 1 });
+  db.cartItem.findMany.mockResolvedValue([]);
+  db.promotion.findMany.mockResolvedValue([]);
   mockedSummary.mockResolvedValue({
     warnings: [],
     finalTotal: 5000,
@@ -213,5 +216,38 @@ describe("checkoutCart — server-side revalidation", () => {
         }),
       }),
     );
+  });
+
+  it("heals stale quotes to the live effective price when a deal starts, then rejects for re-confirmation", async () => {
+    // Cart was quoted at ₦2,500 (2,000 base + 500 add-on) before any deal.
+    // A 10% automatic vendor-wide promo is now live: effective is ₦2,300.
+    db.promotion.findMany.mockResolvedValue([
+      {
+        id: "promo-wide",
+        code: null,
+        type: "PERCENTAGE",
+        value: 10,
+        maxDiscount: null,
+        scope: "VENDOR_WIDE",
+        isActive: true,
+        startsAt: null,
+        expiresAt: null,
+        usageLimit: null,
+        usedCount: 0,
+        vendorId: "vendor-1",
+        createdAt: new Date("2026-01-01T00:00:00Z"),
+        products: [],
+      },
+    ]);
+    db.cartItem.findMany.mockResolvedValue([{ unitPrice: 2300, quantity: 2 }]);
+
+    await expect(checkoutCart(req(), res())).rejects.toThrow(ConflictError);
+    // Stored quote healed to the live effective price …
+    expect(db.cartItem.update).toHaveBeenCalledWith({
+      where: { id: "item-1" },
+      data: { unitPrice: 2300, subtotal: 4600 },
+    });
+    // … and no order was created from the stale quote.
+    expect(db.order.create).not.toHaveBeenCalled();
   });
 });

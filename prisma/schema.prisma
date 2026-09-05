@@ -643,7 +643,11 @@ model AuditLog {
 // promo rules, which can be added later if there's real demand for it.
 model Promotion {
   id       String  @id @default(uuid())
-  code     String
+  // Null code = automatic product/vendor discount (no code entry required).
+  // Non-null code = code-gated campaign redeemed via applyPromoService.
+  // Previously every promotion required a code, which conflated ordinary
+  // vendor product discounts with promo-code campaigns.
+  code     String?
   vendorId String?
   vendor   User?   @relation("VendorPromotions", fields: [vendorId], references: [id], onDelete: Cascade)
 

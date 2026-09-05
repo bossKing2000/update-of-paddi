@@ -40,6 +40,11 @@ import { correctQuery } from "../AI/localSearchCorrect";
 import { logger } from "../lib/logger";
 import config from "../config/config";
 import { v2 as cloudinary } from "cloudinary";
+import type { EffectivePromotion } from "../services/promotionPricing.service";
+import {
+  attachPromotions,
+  loadActiveProductPromos,
+} from "../services/promotionPricing.service";
 
 cloudinary.config(config.cloudinaryUrl);
 
@@ -219,6 +224,8 @@ interface ProductResponse {
   soldOut: boolean;
   vendorOperating?: boolean;
   orderable?: boolean;
+  /** Effective automatic promotion (canonical resolver, attached per request). */
+  promotion?: EffectivePromotion | null;
   vendor?: {
     id: string;
     name: string;
@@ -312,9 +319,12 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
   if (cached) {
     res.setHeader("X-Cache", "HIT");
     const { data, pagination } = JSON.parse(cached);
+    // Promotions resolve fresh on every request (even cache hits) so a
+    // cached page can never serve a stale discount. One cached promos read.
+    const promos = await loadActiveProductPromos();
     return sendSuccess(
       res,
-      data,
+      attachPromotions(data, promos),
       "Products fetched successfully",
       200,
       pagination,
@@ -353,9 +363,12 @@ export const getAllProducts = async (req: AuthRequest, res: Response) => {
   );
   res.setHeader("X-Cache", "MISS");
 
+  // Cache stores the promotion-free page; the response carries the
+  // freshly-resolved effective promotion per product.
+  const promos = await loadActiveProductPromos();
   return sendSuccess(
     res,
-    products,
+    attachPromotions(products, promos),
     "Products fetched successfully",
     200,
     pagination,
@@ -390,8 +403,19 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
           stock: productData.stock,
         });
     }
+    // Promotions likewise resolve fresh — never serve a cached discount.
+    const promos = await loadActiveProductPromos();
+    const [withPromo] = attachPromotions(
+      [
+        {
+          ...productData,
+          vendorId: productData.vendorId ?? productData.vendor?.id,
+        },
+      ],
+      promos,
+    );
     res.setHeader("X-Cache", "HIT");
-    return sendSuccess(res, productData, "Product retrieved successfully.");
+    return sendSuccess(res, withPromo, "Product retrieved successfully.");
   }
 
   const [product, reviewStats] = await Promise.all([
@@ -481,7 +505,11 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
   });
   res.setHeader("X-Cache", "MISS");
 
-  return sendSuccess(res, productData, "Product retrieved successfully.");
+  // The cache entry stays promotion-free (5h TTL); the response carries
+  // the freshly-resolved effective promotion.
+  const freshPromos = await loadActiveProductPromos();
+  const [withPromo] = attachPromotions([productData], freshPromos);
+  return sendSuccess(res, withPromo, "Product retrieved successfully.");
 };
 
 // PATCH /product/:id
@@ -1115,11 +1143,12 @@ export const searchProducts = async (req: Request, res: Response) => {
   const cached = await redisSearch.get(cacheKey);
   if (cached) {
     const data = JSON.parse(cached);
+    const promos = await loadActiveProductPromos();
     return sendSuccess(
       res,
       {
         corrected,
-        results: data.results,
+        results: attachPromotions(data.results, promos),
         pagination: data.pagination,
         fromCache: true,
       },
@@ -1217,6 +1246,8 @@ export const searchProducts = async (req: Request, res: Response) => {
   );
 
   const total = Number(totalResult[0]?.total || 0);
+  const searchPromos = await loadActiveProductPromos();
+  // The cache entry stays promotion-free (3h TTL); promotions resolve fresh.
   const responseData = {
     corrected,
     results,
@@ -1226,7 +1257,11 @@ export const searchProducts = async (req: Request, res: Response) => {
   await redisSearch.set(cacheKey, JSON.stringify(responseData), {
     EX: CACHE_TTLS.SEARCH,
   });
-  return sendSuccess(res, responseData, "Products fetched successfully");
+  return sendSuccess(
+    res,
+    { ...responseData, results: attachPromotions(results, searchPromos) },
+    "Products fetched successfully",
+  );
 };
 
 // GET /product/p/new
@@ -1243,9 +1278,10 @@ export const getNewProducts = async (req: Request, res: Response) => {
   if (cached) {
     const cachedData = JSON.parse(cached);
     res.setHeader("X-Cache", "HIT");
+    const promos = await loadActiveProductPromos();
     return sendSuccess(
       res,
-      cachedData.data,
+      attachPromotions(cachedData.data, promos),
       "New products fetched successfully",
       200,
       cachedData.pagination,
@@ -1263,7 +1299,8 @@ export const getNewProducts = async (req: Request, res: Response) => {
     EX: CACHE_TTLS.PRODUCTS_MOST_POPULAR,
   });
 
-  return sendSuccess(res, items, "New products fetched successfully", 200, pagination);
+  const newPromos = await loadActiveProductPromos();
+  return sendSuccess(res, attachPromotions(items, newPromos), "New products fetched successfully", 200, pagination);
 };
 
 // GET /product/p/most
@@ -1278,9 +1315,10 @@ export const getMostPopularProducts = async (req: Request, res: Response) => {
   if (cached) {
     const cachedData = JSON.parse(cached);
     res.setHeader("X-Cache", "HIT");
+    const promos = await loadActiveProductPromos();
     return sendSuccess(
       res,
-      cachedData.data,
+      attachPromotions(cachedData.data, promos),
       "Most popular products fetched successfully",
       200,
       cachedData.pagination,
@@ -1310,9 +1348,10 @@ export const getMostPopularProducts = async (req: Request, res: Response) => {
     { EX: CACHE_TTLS.PRODUCTS_MOST_POPULAR },
   );
 
+  const mostPromos = await loadActiveProductPromos();
   return sendSuccess(
     res,
-    products,
+    attachPromotions(products, mostPromos),
     "Most popular products fetched successfully",
     200,
     pagination,

@@ -1,6 +1,10 @@
 import prisma from "../lib/prisma";
 import { calculateDeliveryFee } from "./deliveryFee.service";
 import { applyPromoService } from "./promoService";
+import {
+  loadActiveProductPromos,
+  resolveEffectivePromotionForProduct,
+} from "./promotionPricing.service";
 import { isProductCurrentlyAvailable, isVendorOperating } from "./vendorAvailability.service";
 
 type SummaryInput = {
@@ -20,6 +24,16 @@ export interface CartSummaryItem {
   quantity: number;
   unitPrice: number;
   subtotal: number;
+  /** Fresh base unit (product price + selected add-ons) before automatic
+   * promotion discounts. Equals unitPrice for carts quoted before any
+   * promotion existed. */
+  originalUnitPrice: number;
+  /** Server-authoritative effective unit after automatic promotions. */
+  effectiveUnitPrice: number;
+  /** Per-unit automatic saving (original - effective, never negative). */
+  unitDiscount: number;
+  /** Promotion driving the automatic discount, if any. */
+  promotionId: string | null;
 }
 
 export interface CartVendorBreakdown {
@@ -28,6 +42,10 @@ export interface CartVendorBreakdown {
   items: CartSummaryItem[];
   subtotal: number;
   discount: number;
+  /** Automatic product-promotion discount slice of `discount`. */
+  autoDiscount: number;
+  /** Code-promo discount slice of `discount`. */
+  codeDiscount: number;
   deliveryFee: number;
   deliveryDistanceKm: number | null;
   final: number;
@@ -36,6 +54,10 @@ export interface CartVendorBreakdown {
 export interface CartSummaryResult {
   subtotal: number;
   discount: number;
+  /** Automatic product-promotion savings (no code required). */
+  autoDiscount: number;
+  /** Code-gated promo savings (only when a promoCode was supplied). */
+  codeDiscount: number;
   deliveryFee: number;
   finalTotal: number;
   promo: { code: string | null; applied: boolean; promoId: string | null; meta: Record<string, unknown> | null };
@@ -59,6 +81,7 @@ export const cartSummaryService = async ({
       items: {
         include: {
           product: { include: { vendor: true } },
+          options: true,
         },
       },
     },
@@ -67,6 +90,8 @@ export const cartSummaryService = async ({
   const empty: CartSummaryResult = {
     subtotal: 0,
     discount: 0,
+    autoDiscount: 0,
+    codeDiscount: 0,
     deliveryFee: 0,
     finalTotal: 0,
     promo: { code: null, applied: false, promoId: null, meta: { reason: "Cart is empty" } },
@@ -105,7 +130,47 @@ export const cartSummaryService = async ({
     return { ...empty, excludedOfflineItemCount, promo: { ...empty.promo, meta: { reason: "No purchasable items" } } };
   }
 
-  const globalBase = round(purchasableItems.reduce((sum, i) => sum + i.unitPrice * i.quantity, 0));
+  // Automatic product promotions (canonical resolver): the same effective
+  // price Home and product detail show. Resolved once here and reused for
+  // every line, so cart math can never drift from display math.
+  const activePromos = await loadActiveProductPromos();
+
+  const pricedLines = purchasableItems.map((item) => {
+    const storedUnit = round(item.unitPrice);
+    const optionsTotal = round(
+      ((item as { options?: { price: number }[] }).options ?? []).reduce(
+        (sum, o) => sum + Number(o.price ?? 0),
+        0,
+      ),
+    );
+    // Fresh base product price from the database; falls back to the stored
+    // quote minus add-ons when the product row is unavailable (tests,
+    // stale includes) so pricing degrades to "no automatic discount"
+    // instead of crashing.
+    const productPrice =
+      typeof item.product.price === "number"
+        ? round(item.product.price)
+        : round(Math.max(storedUnit - optionsTotal, 0));
+    const effective = resolveEffectivePromotionForProduct({
+      product: {
+        id: item.productId,
+        price: productPrice,
+        vendorId: item.product.vendorId,
+        archived: item.product.archived,
+      },
+      promos: activePromos,
+    });
+    const effectiveBase = effective ? effective.discountedPrice : productPrice;
+    const effectiveUnit = round(effectiveBase + optionsTotal);
+    const originalUnit = round(productPrice + optionsTotal);
+    const unitDiscount = round(Math.max(storedUnit - effectiveUnit, 0));
+    return { item, storedUnit, optionsTotal, effectiveUnit, originalUnit, unitDiscount, effective };
+  });
+
+  const globalBase = round(pricedLines.reduce((sum, l) => sum + l.storedUnit * l.item.quantity, 0));
+  const globalAutoDiscount = round(
+    pricedLines.reduce((sum, l) => sum + l.unitDiscount * l.item.quantity, 0),
+  );
 
   const grouped = purchasableItems.reduce((acc, item) => {
     const vid = item.product.vendorId;
@@ -113,6 +178,7 @@ export const cartSummaryService = async ({
     acc[vid].push(item);
     return acc;
   }, {} as Record<string, typeof purchasableItems>);
+  const lineByItemId = new Map(pricedLines.map((l) => [l.item.id, l]));
 
   // Delivery fees — per vendor, since a multi-vendor cart has a separate
   // pickup point (and therefore a separate fee) for each vendor. Only
@@ -141,20 +207,35 @@ export const cartSummaryService = async ({
 
   const totalDeliveryFee = round(Object.values(deliveryFeeByVendor).reduce((sum, d) => sum + d.fee, 0));
 
-  // Real promo application — previously a documented no-op stub from the
-  // Cart phase, since Promotion/PromotionUsage didn't exist yet.
+  // Optional code-gated promo — applied ON TOP of automatic discounts, on
+  // the effective (already-discounted) subtotals. Product-scoped codes now
+  // receive the effective product groups, so they can actually apply here
+  // instead of always failing with "not in your cart".
   let promoResult: Awaited<ReturnType<typeof applyPromoService>> | null = null;
   if (promoCode) {
     const vendorGroups = Object.keys(grouped).map((vendorId) => ({
       vendorId,
-      subtotal: round(grouped[vendorId].reduce((sum, i) => sum + i.unitPrice * i.quantity, 0)),
+      subtotal: round(
+        grouped[vendorId].reduce(
+          (sum, i) => sum + (lineByItemId.get(i.id)?.effectiveUnit ?? round(i.unitPrice)) * i.quantity,
+          0,
+        ),
+      ),
       deliveryFee: deliveryFeeByVendor[vendorId]?.fee || 0,
     }));
-    promoResult = await applyPromoService({ userId, promoCode, vendorGroups });
+    const productGroups = purchasableItems.map((i) => ({
+      productId: i.productId,
+      vendorId: i.product.vendorId,
+      subtotal: round((lineByItemId.get(i.id)?.effectiveUnit ?? round(i.unitPrice)) * i.quantity),
+      quantity: i.quantity,
+      unitPrice: lineByItemId.get(i.id)?.effectiveUnit ?? round(i.unitPrice),
+    }));
+    promoResult = await applyPromoService({ userId, promoCode, vendorGroups, productGroups });
     if (!promoResult.applied && promoResult.reason) warnings.push(promoResult.reason);
   }
 
-  const globalDiscount = promoResult?.applied ? promoResult.totalDiscount : 0;
+  const globalCodeDiscount = promoResult?.applied ? promoResult.totalDiscount : 0;
+  const globalDiscount = round(globalAutoDiscount + globalCodeDiscount);
   const deliveryDiscountTotal = promoResult?.applied
     ? round(Object.values(promoResult.vendorDeliveryDiscounts).reduce((sum, d) => sum + d, 0))
     : 0;
@@ -162,9 +243,16 @@ export const cartSummaryService = async ({
   const vendorBreakdown: CartVendorBreakdown[] = Object.keys(grouped).map((vendorId) => {
     const items = grouped[vendorId];
     const subtotal = round(items.reduce((sum, i) => sum + i.unitPrice * i.quantity, 0));
+    const autoDiscount = round(
+      items.reduce((sum, i) => {
+        const line = lineByItemId.get(i.id);
+        return sum + (line ? line.unitDiscount * i.quantity : 0);
+      }, 0),
+    );
     const deliveryFeeInfo = deliveryFeeByVendor[vendorId];
     const rawDeliveryFee = deliveryFeeInfo?.fee || 0;
-    const discount = promoResult?.vendorDiscounts[vendorId] || 0;
+    const codeDiscount = promoResult?.vendorDiscounts[vendorId] || 0;
+    const discount = round(autoDiscount + codeDiscount);
     const deliveryDiscount = promoResult?.vendorDeliveryDiscounts[vendorId] || 0;
     const deliveryFee = round(Math.max(rawDeliveryFee - deliveryDiscount, 0));
     const final = round(subtotal - discount + deliveryFee);
@@ -172,16 +260,25 @@ export const cartSummaryService = async ({
     return {
       vendorId,
       vendorName: items[0].product.vendor.name,
-      items: items.map((i) => ({
-        productId: i.productId,
-        name: i.product.name,
-        image: i.product.images?.[0] || null,
-        quantity: i.quantity,
-        unitPrice: round(i.unitPrice),
-        subtotal: round(i.unitPrice * i.quantity),
-      })),
+      items: items.map((i) => {
+        const line = lineByItemId.get(i.id);
+        return {
+          productId: i.productId,
+          name: i.product.name,
+          image: i.product.images?.[0] || null,
+          quantity: i.quantity,
+          unitPrice: round(i.unitPrice),
+          subtotal: round(i.unitPrice * i.quantity),
+          originalUnitPrice: line?.originalUnit ?? round(i.unitPrice),
+          effectiveUnitPrice: line?.effectiveUnit ?? round(i.unitPrice),
+          unitDiscount: line?.unitDiscount ?? 0,
+          promotionId: line?.effective?.promotionId ?? null,
+        };
+      }),
       subtotal,
       discount,
+      autoDiscount,
+      codeDiscount,
       deliveryFee,
       deliveryDistanceKm: deliveryFeeInfo?.distanceKm ?? null,
       final,
@@ -193,6 +290,8 @@ export const cartSummaryService = async ({
   return {
     subtotal: globalBase,
     discount: globalDiscount,
+    autoDiscount: globalAutoDiscount,
+    codeDiscount: globalCodeDiscount,
     deliveryFee: round(totalDeliveryFee - deliveryDiscountTotal),
     finalTotal,
     promo: {

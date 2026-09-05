@@ -11,6 +11,10 @@ import { sendSuccess, sendCreated } from "../utils/apiResponse";
 import { AppError, NotFoundError, ValidationError, ConflictError } from "../errors/AppError";
 import { cartSummaryService } from "../services/cartSummary.service";
 import {
+  loadActiveProductPromos,
+  resolveEffectivePromotionForProduct,
+} from "../services/promotionPricing.service";
+import {
   isProductCurrentlyAvailable,
   isVendorOperating,
   loadVendorOperatingState,
@@ -134,7 +138,23 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
   const optionsPrice = product.options
     .filter((o) => selectedOptions.includes(o.id))
     .reduce((sum, o) => sum + o.price, 0);
-  const unitPrice = product.price + optionsPrice;
+  // Stored quotes are promotion-aware: an active automatic discount lowers
+  // the quoted unit price at add time (canonical resolver — the same price
+  // Home and product detail show). Checkout revalidates against the live
+  // effective price, so a deal starting/ending afterwards surfaces as a
+  // refreshable pricing change, never a silent over/under-charge.
+  const activePromos = await loadActiveProductPromos();
+  const effectivePromo = resolveEffectivePromotionForProduct({
+    product: {
+      id: product.id,
+      price: product.price,
+      vendorId: product.vendorId,
+      archived: product.archived,
+    },
+    promos: activePromos,
+  });
+  const effectiveBase = effectivePromo ? effectivePromo.discountedPrice : product.price;
+  const unitPrice = effectiveBase + optionsPrice;
 
   // Match by product + selected options combo, not just productId — two
   // cart lines for the same product with different options (e.g. "no
@@ -249,7 +269,19 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
       .filter((opt) => finalOptions.includes(opt.id))
       .reduce((sum, opt) => sum + opt.price, 0);
 
-    const unitPrice = item.product.price + optionsPrice;
+    // Same promotion-aware quoting as addToCart (see above).
+    const updatePromos = await loadActiveProductPromos();
+    const updateEffective = resolveEffectivePromotionForProduct({
+      product: {
+        id: item.product.id,
+        price: item.product.price,
+        vendorId: item.product.vendorId,
+        archived: item.product.archived,
+      },
+      promos: updatePromos,
+    });
+    const updateBase = updateEffective ? updateEffective.discountedPrice : item.product.price;
+    const unitPrice = updateBase + optionsPrice;
     const qty = quantity ?? item.quantity;
 
     assertQuantityAvailable({
@@ -460,6 +492,12 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
 
   // Authoritative per-line totals, keyed by cart item id.
   const authoritativeLines = new Map<string, { unitPrice: number; subtotal: number }>();
+  // Lines whose stored quote no longer matches the live effective price
+  // (a deal started/ended, or the vendor edited a price). They are healed
+  // to the live price below and the checkout is rejected so the customer
+  // re-confirms a fresh summary — never silently charged a stale total.
+  const driftedLines: { id: string; unitPrice: number; subtotal: number }[] = [];
+  const checkoutPromos = await loadActiveProductPromos();
   // Aggregate quantities per product: one cart can hold the same product
   // on several lines (different add-on combos), but stock is per product.
   const qtyByProduct = new Map<string, number>();
@@ -480,13 +518,40 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
       );
     }
 
+    // Effective unit = live discounted product price + add-ons (canonical
+    // resolver — identical to Home, detail and summary math).
+    const checkoutEffective = resolveEffectivePromotionForProduct({
+      product: { id: fresh.id, price: fresh.price, vendorId: fresh.vendorId, archived: fresh.archived },
+      promos: checkoutPromos,
+    });
+    const effectiveBase = checkoutEffective ? checkoutEffective.discountedPrice : fresh.price;
     const unitPrice = round(
-      fresh.price + selectedIds.reduce((sum, id) => sum + activeById.get(id)!.price, 0),
+      effectiveBase + selectedIds.reduce((sum, id) => sum + activeById.get(id)!.price, 0),
     );
     if (unitPrice !== round(item.unitPrice)) {
-      throw new ConflictError("Cart pricing changed. Please refresh your cart summary.");
+      driftedLines.push({ id: item.id, unitPrice, subtotal: round(unitPrice * item.quantity) });
+      continue;
     }
     authoritativeLines.set(item.id, { unitPrice, subtotal: round(unitPrice * item.quantity) });
+  }
+
+  if (driftedLines.length > 0) {
+    for (const drifted of driftedLines) {
+      await prisma.cartItem.update({
+        where: { id: drifted.id },
+        data: { unitPrice: drifted.unitPrice, subtotal: drifted.subtotal },
+      });
+    }
+    const refreshedItems = await prisma.cartItem.findMany({ where: { cartId: cart.id } });
+    await prisma.cart.update({ where: { id: cart.id }, data: calculateCartTotals(refreshedItems) });
+    try {
+      await ShopCartRedis.del(cacheKey);
+    } catch (err) {
+      logger.warn({ err, cacheKey }, "ShopCartRedis.del failed after price heal (best-effort)");
+    }
+    throw new ConflictError(
+      "Cart pricing changed (a deal started or ended, or the vendor updated a price). Your cart now shows the current prices — please refresh your summary and try again.",
+    );
   }
 
   for (const [productId, totalQty] of qtyByProduct) {
@@ -808,6 +873,17 @@ async function getEnhancedCart(cartId: string) {
 
   if (!cart) return null;
 
+  // Read-only effective pricing per line (canonical resolver). Stored
+  // unitPrice is the quote from add-to-cart time; effectiveUnitPrice is the
+  // live price after automatic promotions. Clients display the effective
+  // price; checkout heals stale quotes and enforces re-confirmation.
+  let linePromos: Awaited<ReturnType<typeof loadActiveProductPromos>> = [];
+  try {
+    linePromos = await loadActiveProductPromos();
+  } catch {
+    linePromos = [];
+  }
+
   const enrichedItems = cart.items.map((item) => {
     const selectedOptionIds = item.options.map((opt) => opt.productOptionId);
     const product = item.product;
@@ -822,12 +898,39 @@ async function getEnhancedCart(cartId: string) {
         stock: product.stock,
       });
 
+    const lineOptionsTotal = round(
+      item.options.reduce((sum, opt) => sum + Number(opt.productOption?.price ?? opt.price ?? 0), 0),
+    );
+    const linePromotion = resolveEffectivePromotionForProduct({
+      product: {
+        id: product.id,
+        price: typeof product.price === "number" ? product.price : round(item.unitPrice) - lineOptionsTotal,
+        vendorId: product.vendorId ?? product.vendor?.id,
+        archived: product.archived,
+      },
+      promos: linePromos,
+    });
+    const lineOriginalUnit = round(
+      (typeof product.price === "number" ? product.price : round(item.unitPrice) - lineOptionsTotal) +
+        lineOptionsTotal,
+    );
+    const lineEffectiveUnit = round(
+      (linePromotion ? linePromotion.discountedPrice : lineOriginalUnit - lineOptionsTotal) +
+        lineOptionsTotal,
+    );
+
     return {
       id: item.id,
       productId: item.productId,
       quantity: item.quantity,
       unitPrice: item.unitPrice,
       subtotal: round(item.unitPrice * item.quantity),
+      // Live effective pricing (automatic promotions). unitPrice stays the
+      // stored quote; clients should display effectiveUnitPrice.
+      originalUnitPrice: lineOriginalUnit,
+      effectiveUnitPrice: lineEffectiveUnit,
+      unitDiscount: round(Math.max(lineOriginalUnit - lineEffectiveUnit, 0)),
+      promotion: linePromotion,
       specialRequest: item.specialRequest || null,
       productonline, // true if product is live and can be ordered right now
       product: {
