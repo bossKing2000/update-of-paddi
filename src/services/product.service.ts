@@ -26,6 +26,11 @@ export interface WhatsInThePotItem {
   count: number;
 }
 
+export interface PopularDishType {
+  id: string;
+  name: string;
+}
+
 /**
  * "What's in the Pot?" — dish types that have at least one orderable
  * product RIGHT NOW (not archived + vendor live + accepting + in stock).
@@ -66,6 +71,60 @@ export async function fetchWhatsInThePot(): Promise<WhatsInThePotItem[]> {
     // Best-effort.
   }
   return items;
+}
+
+/**
+ * Fetches the top 3 most popular dish types based on the count of
+ * currently-orderable popular products (by popularityScore).
+ * This determines the Popular Picks tabs on the Home screen.
+ *
+ * Ranking rule:
+ * 1. Consider only currently-orderable products (not archived, vendor live,
+ *    accepting orders, in stock if tracked).
+ * 2. Rank by product popularityScore descending (same as fetchMostPopularProducts).
+ * 3. Aggregate at dish-type level: each product contributes 1 count to its dish type.
+ * 4. Return top 3 dish types by total count.
+ * 5. If fewer than 3 eligible dish types exist, return all available.
+ * 6. If none exist, return empty list.
+ */
+export async function fetchPopularDishTypes(): Promise<PopularDishType[]> {
+  const where: Prisma.ProductWhereInput = {
+    archived: false,
+    vendor: vendorOperatingWhere,
+    OR: [{ trackInventory: false }, { stock: { gt: 0 } }],
+  };
+
+  // Get a larger set of popular products to aggregate at dish-type level
+  const products = await prisma.product.findMany({
+    where,
+    orderBy: { popularityScore: "desc" },
+    take: 100,
+    select: {
+      dishTypeId: true,
+      dishType: { select: { id: true, name: true } },
+    },
+  });
+
+  // Aggregate by dish type
+  const counts = new Map<string, { count: number; name: string }>();
+  for (const p of products) {
+    if (!p.dishType) continue;
+    const existing = counts.get(p.dishTypeId);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      counts.set(p.dishTypeId, { count: 1, name: p.dishType.name });
+    }
+  }
+
+  // Sort by count desc, then by name for determinism
+  const sorted = Array.from(counts.entries())
+    .map(([id, { count, name }]) => ({ id, name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, 3)
+    .map(({ id, name }) => ({ id, name }));
+
+  return sorted;
 }
 
 /**

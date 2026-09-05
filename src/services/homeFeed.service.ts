@@ -7,6 +7,7 @@ import {
   fetchProductPage,
   fetchLiveProducts,
   fetchWhatsInThePot,
+  fetchPopularDishTypes,
   getActiveDishTypes,
   assertActiveDishType,
 } from "./product.service";
@@ -153,7 +154,7 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
 
   // All sections are independent — fan out in parallel with per-section
   // fault isolation.
-  const [
+const [
     dishTypes,
     whatsInThePot,
     popularResult,
@@ -163,9 +164,11 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
     pepeSoupResult,
     catalogResult,
     vendors,
-    promotions,
+    customerPromotions,
     unreadNotifications,
     potPointsBalance,
+    popularDishTypes,
+    vendorPromotions,
   ] = await Promise.all([
     safeSection("dishTypes", () => getActiveDishTypes(), []),
     safeSection("whatsInThePot", () => fetchWhatsInThePot(), []),
@@ -228,15 +231,18 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
       { products: [], total: 0 },
     ),
 
-    // Reuses the exact nearby-vendor implementation behind
-    // GET /api/auth/nearby — same shapes (brandName/brandLogo/distanceKm/
-    // isOpen/averageRating/reviewCount), nothing invented.
-    query.lat != null && query.lng != null
+    safeSection(
+      "popularDishTypes",
+      () => fetchPopularDishTypes(),
+      [],
+    ),
+
+    // Nearby vendors (conditional) — used for vendor section
+    (query.lat != null && query.lng != null)
       ? safeSection("nearbyVendors", () => findNearbyVendors(query.lat!, query.lng!, 5), [])
       : Promise.resolve([]),
 
-    // Deals are public discovery data: guests see them too (only the
-    // per-user redemption-cap filter needs an authenticated id).
+    // Customer promotions (guests see them too)
     ((!isAuthenticated || viewer!.role === "CUSTOMER")
       ? safeSection(
           "promotions",
@@ -245,6 +251,7 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
         )
       : Promise.resolve([])),
 
+    // Unread notifications
     isAuthenticated
       ? safeSection(
           "unreadNotifications",
@@ -256,23 +263,30 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
         )
       : Promise.resolve(0),
 
-    // Real Pot Points balance for the header wallet + banner. Guests get
-    // 0; failures degrade to 0 so loyalty can never break the feed.
+    // Pot Points balance
     isAuthenticated
-      ? safeSection("potPointsBalance", () =>
-          prisma.user
-            .findUnique({
-              where: { id: viewer!.id },
-              select: { potPointsBalance: true },
-            })
-            .then((u) => u?.potPointsBalance ?? 0),
-        0,
+      ? safeSection(
+          "potPointsBalance",
+          () =>
+            prisma.user
+              .findUnique({
+                where: { id: viewer!.id },
+                select: { potPointsBalance: true },
+              })
+              .then((u) => u?.potPointsBalance ?? 0),
+          0,
         )
       : Promise.resolve(0),
-  ]);
 
-  // Live products are the currently-orderable marketplace dishes
-  // (Stage 1: no scheduling). Popular products keep the exact
+    // Vendor promotions
+    ((!isAuthenticated || viewer!.role === "CUSTOMER")
+      ? safeSection(
+          "promotions",
+          () => getActivePromotionsForCustomer(viewer?.id ?? null),
+          [],
+        )
+      : Promise.resolve([])),
+  ]);
   // GET /product/p/most semantics.
   //
   // Every product surface carries the same backend-resolved effective
@@ -341,9 +355,11 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
     },
 
     promotions: {
-      items: promotions,
-      total: Array.isArray(promotions) ? promotions.length : 0,
+      items: customerPromotions,
+      total: Array.isArray(customerPromotions) ? customerPromotions.length : 0,
     },
+
+    popularDishTypes,
 
     unreadNotifications,
   };
