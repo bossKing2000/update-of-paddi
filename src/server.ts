@@ -61,6 +61,7 @@ import promoRoutes from "./routes/promoRoutes";
 import customerPromotionsRoutes from "./routes/customerPromotions.routes";
 import homeFeedRoutes from "./routes/homeFeed.routes";
 import referralRoutes from "./routes/referralRoutes";
+import potPointsRoutes from "./routes/potPoints.routes";
 import {
   riderOperationsAdminRoutes,
   riderOperationsRoutes,
@@ -221,6 +222,7 @@ app.use("/api/promotions", promoRoutes);
 app.use("/api/promotions", customerPromotionsRoutes);
 app.use("/api/home", homeFeedRoutes);
 app.use("/api/referrals", referralRoutes);
+app.use("/api/rewards", potPointsRoutes);
 app.use("/api/rider", riderOperationsRoutes);
 app.use("/api/admin/rider", riderOperationsAdminRoutes);
 

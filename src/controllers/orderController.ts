@@ -23,6 +23,10 @@ import {
 import { calculateDeliveryFee } from "../services/deliveryFee.service";
 import { restoreStockForOrders } from "../services/inventory.service";
 import { creditReferralRewardIfEligible } from "./referralController";
+import {
+  creditPotPointsForCompletedOrder,
+  logPotPointsFailure,
+} from "../services/potPoints.service";
 import { logger } from "../lib/logger";
 import {
   assertQuantityAvailable,
@@ -477,6 +481,11 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
         { err, orderId, customerId: order.customerId },
         "Failed to check/credit referral reward",
       ),
+    );
+    // Pot Points: +50 per completed order, idempotent per orderId.
+    // Fire-and-forget like referrals — completion must never fail here.
+    creditPotPointsForCompletedOrder(orderId, order.customerId).catch((err) =>
+      logPotPointsFailure(err, { orderId, customerId: order.customerId }),
     );
   }
 

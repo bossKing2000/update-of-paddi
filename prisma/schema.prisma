@@ -70,7 +70,14 @@ model User {
   referralRewardsEarned   ReferralReward[] @relation("ReferralAsReferrer")
   referralRewardAsInvitee ReferralReward[] @relation("ReferralAsReferred")
 
+  // ── Pot Points (Bottom Pot loyalty) ──────────────────────────────
+  // Denormalized spendable balance; the PotPointTransaction ledger is the
+  // source of truth and the only writer of this column (server-side, on
+  // order COMPLETED). Clients can only read — never set — points.
+  potPointsBalance Int @default(0)
+
   // Relations
+  potPointTransactions      PotPointTransaction[] @relation("UserPotPointTransactions")
   products                  Product[]             @relation("VendorProducts")
   vendorReviewsReceived     VendorReview[]        @relation("VendorReviews")
   vendorReviewsGiven        VendorReview[]        @relation("CustomerVendorReviews")
@@ -678,6 +685,34 @@ model PromotionUsage {
   @@index([promotionId])
   @@index([userId])
   @@index([userId, promotionId])
+}
+
+/// Bottom Pot loyalty ledger (Pot Points).
+///
+/// One row per earn/redeem/adjust event. Earns are idempotent per order
+/// (@@unique([orderId]) — an order credits points exactly once, no matter
+/// how many times completion is processed). The User.potPointsBalance
+/// column mirrors SUM(points) for cheap reads; only this ledger's writer
+/// may change it, and only server-side (order COMPLETED hook / admin
+/// adjust). Clients never submit point values.
+enum PotPointTransactionType {
+  EARN
+  REDEEM
+  ADJUST
+}
+
+model PotPointTransaction {
+  id        String                  @id @default(uuid())
+  userId    String
+  user      User                    @relation("UserPotPointTransactions", fields: [userId], references: [id], onDelete: Cascade)
+  points    Int // signed: EARN positive, REDEEM negative, ADJUST either
+  type      PotPointTransactionType
+  reason    String // e.g. "Order completed", "Admin adjustment"
+  orderId   String? // set for EARN rows; unique so double-completion is safe
+  createdAt DateTime                @default(now())
+
+  @@unique([orderId])
+  @@index([userId, createdAt])
 }
 
 model ReferralReward {

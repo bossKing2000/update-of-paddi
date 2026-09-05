@@ -158,10 +158,13 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
     popularResult,
     liveResult,
     newProducts,
+    jollofResult,
+    pepeSoupResult,
     catalogResult,
     vendors,
     promotions,
     unreadNotifications,
+    potPointsBalance,
   ] = await Promise.all([
     safeSection("dishTypes", () => getActiveDishTypes(), []),
     safeSection("whatsInThePot", () => fetchWhatsInThePot(), []),
@@ -193,6 +196,21 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
           dishType: query.dishType !== "ALL" ? query.dishType : undefined,
         }),
       { items: [], total: 0 },
+    ),
+
+    // Dish-spotlight rails: orderable dishes of one dish type, ranked by
+    // the same popularityScore ordering as live discovery (no new ranking
+    // logic — same query core, dishType filter only). JOLLOF and
+    // PEPPER_SOUP are stable DishType ids from the curated vocabulary.
+    safeSection(
+      "jollofProducts",
+      () => fetchLiveProducts({ take: 10, dishType: "JOLLOF" }),
+      { products: [], total: 0 },
+    ),
+    safeSection(
+      "pepeSoupProducts",
+      () => fetchLiveProducts({ take: 10, dishType: "PEPPER_SOUP" }),
+      { products: [], total: 0 },
     ),
 
     safeSection(
@@ -234,6 +252,20 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
           0,
         )
       : Promise.resolve(0),
+
+    // Real Pot Points balance for the header wallet + banner. Guests get
+    // 0; failures degrade to 0 so loyalty can never break the feed.
+    isAuthenticated
+      ? safeSection("potPointsBalance", () =>
+          prisma.user
+            .findUnique({
+              where: { id: viewer!.id },
+              select: { potPointsBalance: true },
+            })
+            .then((u) => u?.potPointsBalance ?? 0),
+        0,
+        )
+      : Promise.resolve(0),
   ]);
 
   // Live products are the currently-orderable marketplace dishes
@@ -263,6 +295,20 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
       items: newProducts.items,
       total: newProducts.total,
     },
+
+    // Ranked, orderable Jollof / Pepper Soup rails (same popularity
+    // ordering as live discovery; empty when nothing orderable).
+    jollofProducts: {
+      items: jollofResult.products,
+      total: jollofResult.total,
+    },
+    pepeSoupProducts: {
+      items: pepeSoupResult.products,
+      total: pepeSoupResult.total,
+    },
+
+    // Real loyalty balance for the header wallet + banner (0 for guests).
+    potPointsBalance,
 
     catalog: {
       items: catalogResult.products,
