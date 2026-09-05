@@ -243,6 +243,7 @@ model Product {
   isNew               Boolean               @default(false) // ✅ Make sure this is here
   // Special requests associated with this product
   specialRequests     SpecialOrderRequest[] @relation("ProductSpecialRequests")
+  promotions          Promotion[]           @relation("PromotionProducts")
 
   // Essential indexes (keep these)
   @@index([name], map: "product_name_idx") // Speeds up search suggestions
@@ -590,6 +591,12 @@ enum DiscountType {
   DELIVERY
 }
 
+enum PromotionScope {
+  SINGLE_PRODUCT
+  SELECTED_PRODUCTS
+  VENDOR_WIDE
+}
+
 enum ReferralRewardStatus {
   PENDING
   PAID
@@ -647,6 +654,12 @@ model Promotion {
   value       Float // percentage (0-100) or fixed naira amount, depending on type
   maxDiscount Float? // caps a PERCENTAGE discount's naira value
 
+  // Promotion scope: SINGLE_PRODUCT, SELECTED_PRODUCTS, VENDOR_WIDE
+  // - SINGLE_PRODUCT: applies to exactly one product (productId required)
+  // - SELECTED_PRODUCTS: applies to multiple specific products (products relation)
+  // - VENDOR_WIDE: applies to all eligible products of the vendor (vendorId required)
+  scope       PromotionScope @default(VENDOR_WIDE)
+
   isActive Boolean @default(true)
 
   startsAt  DateTime?
@@ -661,7 +674,8 @@ model Promotion {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  usages PromotionUsage[]
+  usages   PromotionUsage[]
+  products Product[] @relation("PromotionProducts")
 
   @@unique([vendorId, code])
   @@index([code])

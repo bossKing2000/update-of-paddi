@@ -1,5 +1,5 @@
 import prisma from "../lib/prisma";
-import { DiscountType } from "@prisma/client";
+import { DiscountType, PromotionScope } from "@prisma/client";
 
 const round = (v: number) => Number(v.toFixed(2));
 
@@ -9,10 +9,19 @@ export interface VendorGroup {
   deliveryFee: number;
 }
 
+export interface ProductGroup {
+  productId: string;
+  vendorId: string;
+  subtotal: number;
+  quantity: number;
+  unitPrice: number;
+}
+
 export interface ApplyPromoInput {
   userId: string;
   promoCode: string;
   vendorGroups: VendorGroup[];
+  productGroups?: ProductGroup[];
 }
 
 export interface PromoResult {
@@ -26,13 +35,29 @@ export interface PromoResult {
   /** Discount allocated to each vendor's delivery fee, keyed by vendorId (only ever non-zero for DELIVERY-type promos). */
   vendorDeliveryDiscounts: Record<string, number>;
   totalDiscount: number;
+  /** For product-specific promotions, which products were discounted */
+  discountedProductIds?: string[];
 }
 
-/**
- * Pure discount-calculation core, extracted for independent testing (see
- * tests/unit/promoCalculation.test.ts) — this is the part most prone to
- * subtle bugs (proportional allocation across vendors, capping, rounding).
- */
+function emptyResult(
+  promoCode: string,
+  reason: string,
+  promoId: string | null = null,
+  discountType: DiscountType | null = null,
+): PromoResult {
+  return {
+    applied: false,
+    promoId,
+    promoCode,
+    discountType,
+    reason,
+    vendorDiscounts: {},
+    vendorDeliveryDiscounts: {},
+    totalDiscount: 0,
+    discountedProductIds: [],
+  };
+}
+
 export function calculateDiscountAllocation(
   type: DiscountType,
   value: number,
@@ -88,41 +113,11 @@ export function calculateDiscountAllocation(
   };
 }
 
-function emptyResult(
-  promoCode: string,
-  reason: string,
-  promoId: string | null = null,
-  discountType: DiscountType | null = null,
-): PromoResult {
-  return {
-    applied: false,
-    promoId,
-    promoCode,
-    discountType,
-    reason,
-    vendorDiscounts: {},
-    vendorDeliveryDiscounts: {},
-    totalDiscount: 0,
-  };
-}
-
-/**
- * Applies a promo code across a multi-vendor cart. A vendor-scoped promo
- * only discounts that vendor's portion; a platform-wide promo (vendorId
- * null on the Promotion) discounts proportionally across every vendor in
- * the cart, so the per-vendor breakdown still sums correctly to the
- * overall total.
- *
- * This is a read-only preview — it does NOT increment usedCount or
- * create a PromotionUsage record. Actual redemption happens atomically
- * at checkout (see redeemPromo below), so a promo that looked valid at
- * preview time but got exhausted by a concurrent checkout in the
- * meantime is caught rather than silently over-redeemed.
- */
 export async function applyPromoService({
   userId,
   promoCode,
   vendorGroups,
+  productGroups,
 }: ApplyPromoInput): Promise<PromoResult> {
   const code = promoCode.trim().toUpperCase();
   if (!code) return emptyResult(promoCode, "No promo code provided");
@@ -134,9 +129,11 @@ export async function applyPromoService({
   const promo =
     (await prisma.promotion.findFirst({
       where: { code, vendorId: { in: cartVendorIds }, isActive: true },
+      include: { products: true },
     })) ??
     (await prisma.promotion.findFirst({
       where: { code, vendorId: null, isActive: true },
+      include: { products: true },
     }));
 
   if (!promo) return emptyResult(promoCode, "Promo code not found");
@@ -170,10 +167,59 @@ export async function applyPromoService({
       promo.type,
     );
 
-  // Which vendor groups does this promo actually apply to?
-  const eligibleGroups = promo.vendorId
-    ? vendorGroups.filter((v) => v.vendorId === promo.vendorId)
-    : vendorGroups;
+  let eligibleGroups: VendorGroup[];
+  let discountedProductIds: string[] = [];
+
+  switch (promo.scope) {
+    case PromotionScope.SINGLE_PRODUCT:
+    case PromotionScope.SELECTED_PRODUCTS:
+      // For product-specific promotions, filter productGroups to only those in the promotion
+      if (!productGroups || productGroups.length === 0) {
+        return emptyResult(
+          code,
+          "This promo applies to specific products not in your cart",
+          promo.id,
+          promo.type,
+        );
+      }
+      const promoProductIds = promo.products.map((p) => p.id);
+      const eligibleProductGroups = productGroups.filter((pg) =>
+        promoProductIds.includes(pg.productId),
+      );
+      if (eligibleProductGroups.length === 0) {
+        return emptyResult(
+          code,
+          "None of the eligible products for this promo are in your cart",
+          promo.id,
+          promo.type,
+        );
+      }
+      // Group by vendor to create vendorGroups for discount allocation
+      const vendorMap = new Map<string, { subtotal: number; deliveryFee: number }>();
+      for (const pg of eligibleProductGroups) {
+        const existing = vendorMap.get(pg.vendorId) || { subtotal: 0, deliveryFee: 0 };
+        existing.subtotal += pg.subtotal;
+        // Find the delivery fee from vendorGroups
+        const vg = vendorGroups.find((v) => v.vendorId === pg.vendorId);
+        if (vg) existing.deliveryFee = vg.deliveryFee;
+        vendorMap.set(pg.vendorId, existing);
+        discountedProductIds.push(pg.productId);
+      }
+      eligibleGroups = Array.from(vendorMap.entries()).map(([vendorId, data]) => ({
+        vendorId,
+        subtotal: data.subtotal,
+        deliveryFee: data.deliveryFee,
+      }));
+      break;
+
+    case PromotionScope.VENDOR_WIDE:
+    default:
+      // Vendor-wide or platform-wide promotion
+      eligibleGroups = promo.vendorId
+        ? vendorGroups.filter((v) => v.vendorId === promo.vendorId)
+        : vendorGroups;
+      break;
+  }
 
   if (eligibleGroups.length === 0) {
     return emptyResult(
@@ -221,19 +267,10 @@ export async function applyPromoService({
     vendorDiscounts,
     vendorDeliveryDiscounts,
     totalDiscount: round(totalDiscount),
+    discountedProductIds,
   };
 }
 
-/**
- * Atomically redeems a promo at checkout: increments usedCount only if
- * still under the limit, in one SQL statement, and records a
- * PromotionUsage. Race-safe against two concurrent checkouts both trying
- * to use the last remaining redemption of a limited promo — Postgres
- * serializes concurrent UPDATEs on the same row, so the second racer's
- * WHERE condition re-evaluates against the already-incremented value and
- * correctly fails to match. Returns false if the promo was exhausted
- * between the cart-summary preview and this checkout attempt.
- */
 export async function redeemPromo(
   promoId: string,
   userId: string,
@@ -283,6 +320,7 @@ export async function getActivePromotionsForCustomer(userId: string) {
     },
     include: {
       vendor: { select: { id: true, brandName: true, brandLogo: true } },
+      products: { select: { id: true, name: true, thumbnail: true, price: true } },
     },
     orderBy: { createdAt: "desc" },
     take: 20,
@@ -314,6 +352,13 @@ export async function getActivePromotionsForCustomer(userId: string) {
       maxDiscount: p.maxDiscount,
       minOrderAmount: p.minOrderAmount,
       expiresAt: p.expiresAt,
+      scope: p.scope,
       vendor: p.vendor ? { id: p.vendor.id, name: p.vendor.brandName, logo: p.vendor.brandLogo } : null,
+      products: p.products.map((prod) => ({
+        id: prod.id,
+        name: prod.name,
+        thumbnail: prod.thumbnail,
+        price: prod.price,
+      })),
     }));
 }
