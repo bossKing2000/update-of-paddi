@@ -1304,6 +1304,15 @@ export const createPlatformPromotion = async (
     promotionId: promo.id,
     code: upperCode,
   });
+  // Discovery embeds resolved promotions — sweep so creation surfaces.
+  try {
+    const { invalidateActiveProductPromosCache } = await import("../services/promotionPricing.service");
+    const { invalidateMarketplaceDiscoveryCaches } = await import("../services/clearCaches");
+    await invalidateActiveProductPromosCache();
+    await invalidateMarketplaceDiscoveryCaches();
+  } catch {
+    // Best-effort: TTLs bound staleness anyway.
+  }
   return sendSuccess(res, { promo }, "Platform-wide promotion created", 201);
 };
 
@@ -1325,6 +1334,15 @@ export const adminDeactivatePromotion = async (
     code: promo.code,
     vendorId: promo.vendorId,
   });
+  // Discovery embeds resolved promotions — sweep so deactivation surfaces.
+  try {
+    const { invalidateActiveProductPromosCache } = await import("../services/promotionPricing.service");
+    const { invalidateMarketplaceDiscoveryCaches } = await import("../services/clearCaches");
+    await invalidateActiveProductPromosCache();
+    await invalidateMarketplaceDiscoveryCaches();
+  } catch {
+    // Best-effort: TTLs bound staleness anyway.
+  }
 
   return sendSuccess(res, { promo: updated }, "Promotion deactivated");
 };

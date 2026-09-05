@@ -207,39 +207,59 @@ export const cartSummaryService = async ({
 
   const totalDeliveryFee = round(Object.values(deliveryFeeByVendor).reduce((sum, d) => sum + d.fee, 0));
 
-  // Optional code-gated promo — applied ON TOP of automatic discounts, on
-  // the effective (already-discounted) subtotals. Product-scoped codes now
-  // receive the effective product groups, so they can actually apply here
-  // instead of always failing with "not in your cart".
+  // --- RULE 3: Single best discount (auto OR code, never both) ---
+  // 1. Automatic discounts already computed above (globalAutoDiscount, per-line
+  //    effectiveUnit, autoDiscount per vendor).
+  // 2. If a promo code is supplied, compute code discount on ORIGINAL prices
+  //    (the stored unitPrice before auto discounts) so the two discount paths
+  //    are comparable. The code discount is evaluated on the same subtotal
+  //    basis but without auto discounts already applied.
+  // 3. Compare total auto discount vs total code discount and pick the single
+  //    best source. The winning source's pricing is used everywhere downstream.
+
+  // Prepare original-price product groups for code discount evaluation.
+  const originalPriceProductGroups = purchasableItems.map((i) => ({
+    productId: i.productId,
+    vendorId: i.product.vendorId,
+    subtotal: round((lineByItemId.get(i.id)?.originalUnit ?? round(i.unitPrice)) * i.quantity),
+    quantity: i.quantity,
+    unitPrice: lineByItemId.get(i.id)?.originalUnit ?? round(i.unitPrice),
+  }));
+
+  // Also prepare original-price vendor groups for code discount.
+  const originalVendorGroups = Object.keys(grouped).map((vendorId) => ({
+    vendorId,
+    subtotal: round(
+      grouped[vendorId].reduce(
+        (sum, i) => sum + (lineByItemId.get(i.id)?.originalUnit ?? round(i.unitPrice)) * i.quantity,
+        0,
+      ),
+    ),
+    deliveryFee: deliveryFeeByVendor[vendorId]?.fee || 0,
+  }));
+
+  // Compute code discount on ORIGINAL prices (if promo code supplied).
   let promoResult: Awaited<ReturnType<typeof applyPromoService>> | null = null;
   if (promoCode) {
-    const vendorGroups = Object.keys(grouped).map((vendorId) => ({
-      vendorId,
-      subtotal: round(
-        grouped[vendorId].reduce(
-          (sum, i) => sum + (lineByItemId.get(i.id)?.effectiveUnit ?? round(i.unitPrice)) * i.quantity,
-          0,
-        ),
-      ),
-      deliveryFee: deliveryFeeByVendor[vendorId]?.fee || 0,
-    }));
-    const productGroups = purchasableItems.map((i) => ({
-      productId: i.productId,
-      vendorId: i.product.vendorId,
-      subtotal: round((lineByItemId.get(i.id)?.effectiveUnit ?? round(i.unitPrice)) * i.quantity),
-      quantity: i.quantity,
-      unitPrice: lineByItemId.get(i.id)?.effectiveUnit ?? round(i.unitPrice),
-    }));
-    promoResult = await applyPromoService({ userId, promoCode, vendorGroups, productGroups });
+    promoResult = await applyPromoService({ userId, promoCode, vendorGroups: originalVendorGroups, productGroups: originalPriceProductGroups });
     if (!promoResult.applied && promoResult.reason) warnings.push(promoResult.reason);
   }
 
   const globalCodeDiscount = promoResult?.applied ? promoResult.totalDiscount : 0;
-  const globalDiscount = round(globalAutoDiscount + globalCodeDiscount);
-  const deliveryDiscountTotal = promoResult?.applied
+
+  // Pick the single best discount source: automatic OR code, never both.
+  const autoWins = globalAutoDiscount >= globalCodeDiscount;
+  const winningAutoDiscount = autoWins ? globalAutoDiscount : 0;
+  const winningCodeDiscount = autoWins ? 0 : globalCodeDiscount;
+  const globalDiscount = round(winningAutoDiscount + winningCodeDiscount);
+
+  // Delivery discount only applies if code discount wins (auto discounts
+  // never apply to delivery fees).
+  const deliveryDiscountTotal = !autoWins && promoResult?.applied
     ? round(Object.values(promoResult.vendorDeliveryDiscounts).reduce((sum, d) => sum + d, 0))
     : 0;
 
+  // For vendor breakdown, pick the winning discount per vendor.
   const vendorBreakdown: CartVendorBreakdown[] = Object.keys(grouped).map((vendorId) => {
     const items = grouped[vendorId];
     const subtotal = round(items.reduce((sum, i) => sum + i.unitPrice * i.quantity, 0));
@@ -251,9 +271,9 @@ export const cartSummaryService = async ({
     );
     const deliveryFeeInfo = deliveryFeeByVendor[vendorId];
     const rawDeliveryFee = deliveryFeeInfo?.fee || 0;
-    const codeDiscount = promoResult?.vendorDiscounts[vendorId] || 0;
-    const discount = round(autoDiscount + codeDiscount);
-    const deliveryDiscount = promoResult?.vendorDeliveryDiscounts[vendorId] || 0;
+    const codeDiscount = !autoWins ? (promoResult?.vendorDiscounts[vendorId] || 0) : 0;
+    const discount = round(autoWins ? autoDiscount : codeDiscount);
+    const deliveryDiscount = !autoWins ? (promoResult?.vendorDeliveryDiscounts[vendorId] || 0) : 0;
     const deliveryFee = round(Math.max(rawDeliveryFee - deliveryDiscount, 0));
     const final = round(subtotal - discount + deliveryFee);
 
@@ -262,6 +282,11 @@ export const cartSummaryService = async ({
       vendorName: items[0].product.vendor.name,
       items: items.map((i) => {
         const line = lineByItemId.get(i.id);
+        // If code wins, effective price = original - code discount share;
+        // but for line items we just store the winning discount's effective price.
+        const effectiveUnit = autoWins ? (line?.effectiveUnit ?? round(i.unitPrice)) : round(i.unitPrice); // code discount is at order level, not per-line
+        const originalUnit = line?.originalUnit ?? round(i.unitPrice);
+        const unitDiscount = autoWins ? (line?.unitDiscount ?? 0) : (codeDiscount > 0 ? round(codeDiscount * (i.unitPrice * i.quantity) / Math.max(subtotal, 1)) : 0);
         return {
           productId: i.productId,
           name: i.product.name,
@@ -269,16 +294,16 @@ export const cartSummaryService = async ({
           quantity: i.quantity,
           unitPrice: round(i.unitPrice),
           subtotal: round(i.unitPrice * i.quantity),
-          originalUnitPrice: line?.originalUnit ?? round(i.unitPrice),
-          effectiveUnitPrice: line?.effectiveUnit ?? round(i.unitPrice),
-          unitDiscount: line?.unitDiscount ?? 0,
-          promotionId: line?.effective?.promotionId ?? null,
+          originalUnitPrice: originalUnit,
+          effectiveUnitPrice: effectiveUnit,
+          unitDiscount,
+          promotionId: autoWins ? (line?.effective?.promotionId ?? null) : (promoResult?.promoId ?? null),
         };
       }),
       subtotal,
       discount,
-      autoDiscount,
-      codeDiscount,
+      autoDiscount: autoWins ? autoDiscount : 0,
+      codeDiscount: autoWins ? 0 : codeDiscount,
       deliveryFee,
       deliveryDistanceKm: deliveryFeeInfo?.distanceKm ?? null,
       final,
@@ -290,8 +315,8 @@ export const cartSummaryService = async ({
   return {
     subtotal: globalBase,
     discount: globalDiscount,
-    autoDiscount: globalAutoDiscount,
-    codeDiscount: globalCodeDiscount,
+    autoDiscount: winningAutoDiscount,
+    codeDiscount: winningCodeDiscount,
     deliveryFee: round(totalDeliveryFee - deliveryDiscountTotal),
     finalTotal,
     promo: {

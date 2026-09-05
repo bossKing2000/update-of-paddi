@@ -64,12 +64,15 @@ interface ValidatedScope {
  *   SELECTED_PRODUCTS needs 1..50; VENDOR_WIDE takes none (it resolves
  *   dynamically against all eligible vendor products, which is also why a
  *   product created after a vendor-wide promo automatically qualifies).
- */
+ * - A product cannot be covered by more than one active product-specific
+ *   promotion (SINGLE_PRODUCT or SELECTED_PRODUCTS). Vendor-wide promotions
+ *   are excluded from this conflict check.
+ * */
 async function validateScopeProducts(
   vendorId: string,
   scope: PromotionScope,
   productIds: string[],
-  opts: { code: string | null; type: DiscountType; minOrderAmount: number; usageLimit?: number | null },
+  opts: { code: string | null; type: DiscountType; minOrderAmount: number; usageLimit?: number | null; excludePromoId?: string },
 ): Promise<ValidatedScope> {
   if (opts.type === DiscountType.DELIVERY) {
     if (opts.code == null) {
@@ -123,6 +126,34 @@ async function validateScopeProducts(
   if (archived) {
     throw new ValidationError(`"${archived.name}" is archived and cannot be promoted. Unarchive it first.`);
   }
+
+  // Rule 2: a product cannot be covered by more than one active
+  // product-specific promotion (SINGLE_PRODUCT or SELECTED_PRODUCTS).
+  // Vendor-wide promotions are excluded from this conflict check.
+  const productSpecificScopes = [
+    PromotionScope.SINGLE_PRODUCT,
+    PromotionScope.SELECTED_PRODUCTS,
+  ];
+  const where: any = {
+    vendorId,
+    isActive: true,
+    scope: { in: productSpecificScopes },
+    products: { some: { id: { in: uniqueIds } } },
+  };
+  if (opts.excludePromoId) {
+    where.id = { not: opts.excludePromoId };
+  }
+  const existingConflicts = await prisma.promotion.findMany({
+    where,
+    select: { id: true, name: true, scope: true, products: { select: { id: true } } },
+  });
+  if (existingConflicts.length > 0) {
+    const conflictNames = existingConflicts.map((p) => p.name).join(", ");
+    throw new ValidationError(
+      `Products already covered by another active product-specific promotion: ${conflictNames}. One product can only have one active automatic discount.`,
+    );
+  }
+
   return { scope, productIds: uniqueIds };
 }
 
@@ -245,6 +276,7 @@ export const updatePromo = async (req: AuthRequest, res: Response) => {
     type: mergedType,
     minOrderAmount: mergedMinOrder,
     usageLimit: mergedUsageLimit,
+    excludePromoId: id,
   });
 
   const { productIds: _omit, ...rest } = data;
