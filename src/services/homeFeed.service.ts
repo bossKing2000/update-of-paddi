@@ -164,11 +164,10 @@ const [
     pepeSoupResult,
     catalogResult,
     vendors,
-    customerPromotions,
+    promotions,
     unreadNotifications,
     potPointsBalance,
     popularDishTypes,
-    vendorPromotions,
   ] = await Promise.all([
     safeSection("dishTypes", () => getActiveDishTypes(), []),
     safeSection("whatsInThePot", () => fetchWhatsInThePot(), []),
@@ -231,16 +230,12 @@ const [
       { products: [], total: 0 },
     ),
 
-    safeSection(
-      "popularDishTypes",
-      () => fetchPopularDishTypes(),
-      [],
-    ),
-
-    // Nearby vendors (conditional) — used for vendor section
-    (query.lat != null && query.lng != null)
+    // Reuses the exact nearby-vendor implementation behind
+    // GET /api/auth/nearby — same shapes (brandName/brandLogo/distanceKm/
+    // isOpen/averageRating/reviewCount), nothing invented.
+    (query.lat != null && query.lng != null
       ? safeSection("nearbyVendors", () => findNearbyVendors(query.lat!, query.lng!, 5), [])
-      : Promise.resolve([]),
+      : Promise.resolve([])),
 
     // Customer promotions (guests see them too)
     ((!isAuthenticated || viewer!.role === "CUSTOMER")
@@ -278,14 +273,12 @@ const [
         )
       : Promise.resolve(0),
 
-    // Vendor promotions
-    ((!isAuthenticated || viewer!.role === "CUSTOMER")
-      ? safeSection(
-          "promotions",
-          () => getActivePromotionsForCustomer(viewer?.id ?? null),
-          [],
-        )
-      : Promise.resolve([])),
+    // Top 3 popular dish types for the Popular Picks tabs (backend-driven).
+    safeSection(
+      "popularDishTypes",
+      () => fetchPopularDishTypes(),
+      [],
+    ),
   ]);
   // GET /product/p/most semantics.
   //
@@ -355,8 +348,8 @@ const [
     },
 
     promotions: {
-      items: customerPromotions,
-      total: Array.isArray(customerPromotions) ? customerPromotions.length : 0,
+      items: promotions,
+      total: Array.isArray(promotions) ? promotions.length : 0,
     },
 
     popularDishTypes,
