@@ -275,7 +275,6 @@ export async function loadActiveProductPromos(): Promise<LoadedProductPromo[]> {
         products: { select: { id: true } },
       },
       orderBy: { createdAt: "asc" },
-      take: 500,
     });
     rows = promos
       .filter((p) => p.usageLimit == null || p.usedCount < p.usageLimit)
