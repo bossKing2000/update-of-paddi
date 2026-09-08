@@ -11,6 +11,7 @@ import {
   DeliveryPersonStatus,
   ActivityType,
   DiscountType,
+  PromotionScope,
 } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { AuthRequest } from "../middlewares/auth.middleware";
@@ -33,6 +34,9 @@ import {
 } from "../services/payoutService";
 import { calculatePayoutAmounts } from "./vendorDashboard.service";
 import { logger } from "../lib/logger";
+import { invalidateActiveProductPromosCache } from "../services/promotionPricing.service";
+import { invalidateMarketplaceDiscoveryCaches } from "../services/clearCaches";
+import { clearProductCache } from "../services/clearCaches";
 
 function getPagination(req: Request) {
   const page = Math.max(1, Number(req.query.page) || 1);
@@ -54,26 +58,57 @@ function auditAdmin(
 
 // GET /admin/dashboard
 export const getDashboardOverview = async (_req: Request, res: Response) => {
+  const now = new Date();
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
   const [
     totalUsers,
     totalVendors,
     totalCustomers,
     totalDrivers,
+    totalAdmins,
+    blockedUsers,
     totalOrders,
+    pendingOrders,
     completedOrders,
+    cancelledOrders,
+    todayOrders,
     revenueAgg,
+    todayRevenueAgg,
+    monthRevenueAgg,
     pendingKyc,
     pendingRefunds,
     reportedReviews,
+    totalProducts,
+    activeProducts,
+    recentOrders,
+    recentUsers,
+    recentActivity,
+    paymentStatusBreakdown,
   ] = await Promise.all([
     prisma.user.count(),
     prisma.user.count({ where: { role: Role.VENDOR } }),
     prisma.user.count({ where: { role: Role.CUSTOMER } }),
     prisma.user.count({ where: { role: Role.DELIVERY } }),
+    prisma.user.count({ where: { role: Role.ADMIN } }),
+    prisma.user.count({ where: { isBlocked: true } }),
     prisma.order.count(),
+    prisma.order.count({ where: { status: OrderStatus.PENDING } }),
     prisma.order.count({ where: { status: OrderStatus.COMPLETED } }),
+    prisma.order.count({ where: { status: OrderStatus.CANCELLED } }),
+    prisma.order.count({ where: { createdAt: { gte: startOfDay } } }),
     prisma.order.aggregate({
-      where: { status: OrderStatus.COMPLETED },
+      where: { status: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.SUCCESS },
+      _sum: { totalPrice: true },
+    }),
+    prisma.order.aggregate({
+      where: { status: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.SUCCESS, createdAt: { gte: startOfDay } },
+      _sum: { totalPrice: true },
+    }),
+    prisma.order.aggregate({
+      where: { status: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.SUCCESS, createdAt: { gte: startOfMonth } },
       _sum: { totalPrice: true },
     }),
     prisma.user.count({
@@ -86,6 +121,35 @@ export const getDashboardOverview = async (_req: Request, res: Response) => {
     prisma.reviewReport.count({
       where: { status: ReviewReportStatus.PENDING },
     }),
+    prisma.product.count(),
+    prisma.product.count({ where: { archived: false } }),
+    prisma.order.findMany({
+      take: 5,
+      orderBy: { createdAt: "desc" },
+      include: {
+        customer: { select: { id: true, name: true } },
+        vendor: { select: { id: true, name: true, brandName: true } },
+      },
+    }),
+    prisma.user.findMany({
+      take: 5,
+      orderBy: { createdAt: "desc" },
+      select: { id: true, name: true, email: true, role: true, createdAt: true },
+    }),
+    prisma.activity.findMany({
+      take: 10,
+      orderBy: { createdAt: "desc" },
+      include: {
+        vendor: { select: { id: true, name: true, brandName: true } },
+        customer: { select: { id: true, name: true } },
+        order: { select: { id: true } },
+      },
+    }),
+    prisma.payment.groupBy({
+      by: ["status"],
+      _count: { id: true },
+      _sum: { amount: true },
+    }),
   ]);
 
   return sendSuccess(
@@ -95,10 +159,35 @@ export const getDashboardOverview = async (_req: Request, res: Response) => {
         total: totalUsers,
         vendors: totalVendors,
         customers: totalCustomers,
-        drivers: totalDrivers,
+        delivery: totalDrivers,
+        admins: totalAdmins,
+        blocked: blockedUsers,
       },
-      orders: { total: totalOrders, completed: completedOrders },
-      revenue: { allTime: revenueAgg._sum.totalPrice || 0 },
+      orders: {
+        total: totalOrders,
+        pending: pendingOrders,
+        completed: completedOrders,
+        cancelled: cancelledOrders,
+        today: todayOrders,
+      },
+      products: {
+        total: totalProducts,
+        active: activeProducts,
+      },
+      revenue: {
+        total: revenueAgg._sum.totalPrice || 0,
+        today: todayRevenueAgg._sum.totalPrice || 0,
+        thisMonth: monthRevenueAgg._sum.totalPrice || 0,
+      },
+      payments: paymentStatusBreakdown.map((p) => ({
+        status: p.status,
+        totalAmount: Number(p._sum.amount || 0),
+        count: p._count.id,
+      })),
+      pendingRefunds,
+      recentOrders,
+      recentUsers,
+      recentActivity,
       pendingActions: {
         kycReviews: pendingKyc,
         refundRequests: pendingRefunds,
@@ -489,7 +578,7 @@ export const getAllPayments = async (req: Request, res: Response) => {
   const status = req.query.status as PaymentStatus | undefined;
 
   const where = status ? { status } : {};
-  const [payments, total] = await Promise.all([
+  const [payments, total, summary] = await Promise.all([
     prisma.payment.findMany({
       where,
       select: {
@@ -507,9 +596,14 @@ export const getAllPayments = async (req: Request, res: Response) => {
       take: limit,
     }),
     prisma.payment.count({ where }),
+    prisma.payment.groupBy({
+      by: ["status"],
+      _count: { id: true },
+      _sum: { amount: true },
+    }),
   ]);
 
-  return sendSuccess(res, { payments }, "Payments retrieved", 200, {
+  return sendSuccess(res, { payments, summary }, "Payments retrieved", 200, {
     page,
     limit,
     total,
@@ -1316,6 +1410,75 @@ export const createPlatformPromotion = async (
   return sendSuccess(res, { promo }, "Platform-wide promotion created", 201);
 };
 
+// PATCH /admin/promotions/:id — update promotion details (platform-wide only)
+export const adminUpdatePromotion = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const id = ensureString(req.params.id);
+  const promo = await prisma.promotion.findUnique({ where: { id } });
+  if (!promo) throw new NotFoundError("Promotion");
+  if (promo.vendorId !== null) {
+    throw new ValidationError("Admins can only update platform-wide promotions");
+  }
+
+  const {
+    name,
+    description,
+    type,
+    value,
+    maxDiscount,
+    startsAt,
+    expiresAt,
+    usageLimit,
+    maxUsesPerUser,
+    minOrderAmount,
+    isActive,
+  } = req.body;
+
+  const updateData: Record<string, unknown> = {};
+  if (name !== undefined) updateData.name = name;
+  if (description !== undefined) updateData.description = description;
+  if (type !== undefined) {
+    if (!Object.values(DiscountType).includes(type)) {
+      throw new ValidationError("Invalid discount type");
+    }
+    updateData.type = type;
+  }
+  if (value !== undefined) {
+    if (type === DiscountType.PERCENTAGE && value > 100) {
+      throw new ValidationError("Percentage discount can't exceed 100");
+    }
+    updateData.value = value;
+  }
+  if (maxDiscount !== undefined) updateData.maxDiscount = maxDiscount;
+  if (startsAt !== undefined) updateData.startsAt = startsAt ? new Date(startsAt) : null;
+  if (expiresAt !== undefined) updateData.expiresAt = expiresAt ? new Date(expiresAt) : null;
+  if (usageLimit !== undefined) updateData.usageLimit = usageLimit;
+  if (maxUsesPerUser !== undefined) updateData.maxUsesPerUser = maxUsesPerUser;
+  if (minOrderAmount !== undefined) updateData.minOrderAmount = minOrderAmount;
+  if (isActive !== undefined) updateData.isActive = isActive;
+
+  const updated = await prisma.promotion.update({
+    where: { id },
+    data: updateData,
+  });
+
+  await auditAdmin(req, "ADMIN_UPDATED_PROMOTION", {
+    promotionId: id,
+    code: promo.code,
+    changes: updateData,
+  });
+  try {
+    await invalidateActiveProductPromosCache();
+    await invalidateMarketplaceDiscoveryCaches();
+  } catch {
+    // Best-effort: TTLs bound staleness anyway.
+  }
+
+  return sendSuccess(res, { promo: updated }, "Promotion updated");
+};
+
 // PATCH /admin/promotions/:id/deactivate
 export const adminDeactivatePromotion = async (
   req: AuthRequest,
@@ -1336,8 +1499,6 @@ export const adminDeactivatePromotion = async (
   });
   // Discovery embeds resolved promotions — sweep so deactivation surfaces.
   try {
-    const { invalidateActiveProductPromosCache } = await import("../services/promotionPricing.service");
-    const { invalidateMarketplaceDiscoveryCaches } = await import("../services/clearCaches");
     await invalidateActiveProductPromosCache();
     await invalidateMarketplaceDiscoveryCaches();
   } catch {
@@ -1345,4 +1506,607 @@ export const adminDeactivatePromotion = async (
   }
 
   return sendSuccess(res, { promo: updated }, "Promotion deactivated");
+};
+
+// PATCH /admin/promotions/:id/reactivate
+export const adminReactivatePromotion = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const id = ensureString(req.params.id);
+  const promo = await prisma.promotion.findUnique({ where: { id } });
+  if (!promo) throw new NotFoundError("Promotion");
+
+  if (promo.expiresAt && promo.expiresAt < new Date()) {
+    throw new ValidationError("Expired promotions cannot be reactivated; create a new promotion instead");
+  }
+
+  const updated = await prisma.promotion.update({
+    where: { id },
+    data: { isActive: true },
+  });
+
+  await auditAdmin(req, "ADMIN_REACTIVATED_PROMOTION", {
+    promotionId: id,
+    code: promo.code,
+    vendorId: promo.vendorId,
+  });
+  try {
+    await invalidateActiveProductPromosCache();
+    await invalidateMarketplaceDiscoveryCaches();
+  } catch {
+    // Best-effort: TTLs bound staleness anyway.
+  }
+
+  return sendSuccess(res, { promo: updated }, "Promotion reactivated");
+};
+
+// ==================== PRODUCTS ====================
+
+// GET /admin/products
+export const getAllProducts = async (req: Request, res: Response) => {
+  const { page, limit, skip } = getPagination(req);
+  const search = req.query.search as string | undefined;
+  const category = req.query.category as string | undefined;
+  const vendorId = req.query.vendorId as string | undefined;
+  const archived = req.query.archived as string | undefined;
+
+  const where: Prisma.ProductWhereInput = {
+    ...(search && {
+      OR: [
+        { name: { contains: search, mode: "insensitive" as const } },
+        { description: { contains: search, mode: "insensitive" as const } },
+      ],
+    }),
+    ...(category && { dishTypeId: category }),
+    ...(vendorId && { vendorId }),
+    ...(archived === "true" ? { archived: true } : archived === "false" ? { archived: false } : {}),
+  };
+
+  const [products, total] = await Promise.all([
+    prisma.product.findMany({
+      where,
+      include: {
+        vendor: { select: { id: true, name: true, brandName: true, email: true } },
+        dishType: { select: { id: true, name: true } },
+        _count: { select: { reviews: true, orders: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      skip,
+      take: limit,
+    }),
+    prisma.product.count({ where }),
+  ]);
+
+  return sendSuccess(res, { products }, "Products retrieved", 200, {
+    page,
+    limit,
+    total,
+    totalPages: Math.ceil(total / limit),
+  });
+};
+
+// GET /admin/products/:id
+export const getProductById = async (req: Request, res: Response) => {
+  const id = ensureString(req.params.id);
+  const product = await prisma.product.findUnique({
+    where: { id },
+    include: {
+      vendor: { select: { id: true, name: true, brandName: true, email: true, phoneNumber: true, isLive: true } },
+      dishType: { select: { id: true, name: true } },
+      options: { where: { isActive: true }, select: { id: true, name: true, price: true } },
+      _count: { select: { reviews: true, orders: true } },
+    },
+  });
+  if (!product) throw new NotFoundError("Product");
+  return sendSuccess(res, { product }, "Product retrieved");
+};
+
+// PATCH /admin/products/:id
+export const adminUpdateProduct = async (req: AuthRequest, res: Response) => {
+  const id = ensureString(req.params.id);
+  const { name, description, price, dishTypeId, archived, trackInventory, stock, available } = req.body;
+
+  const product = await prisma.product.findUnique({ where: { id } });
+  if (!product) throw new NotFoundError("Product");
+
+  const updateData: Prisma.ProductUpdateInput = {};
+  if (name !== undefined) updateData.name = name;
+  if (description !== undefined) updateData.description = description;
+  if (price !== undefined) updateData.price = Number(price);
+  if (dishTypeId !== undefined) updateData.dishType = { connect: { id: dishTypeId } };
+  if (archived !== undefined) updateData.archived = Boolean(archived);
+  if (trackInventory !== undefined) updateData.trackInventory = Boolean(trackInventory);
+  if (stock !== undefined) updateData.stock = Number(stock);
+
+  const updated = await prisma.product.update({
+    where: { id },
+    data: updateData,
+    include: {
+      vendor: { select: { id: true, name: true, brandName: true } },
+      dishType: { select: { id: true, name: true } },
+    },
+  });
+
+  await clearProductCache(id, updated.vendorId);
+  await invalidateActiveProductPromosCache();
+  await invalidateMarketplaceDiscoveryCaches();
+
+  await auditAdmin(req, "ADMIN_UPDATED_PRODUCT", { productId: id, changes: updateData });
+  return sendSuccess(res, { product: updated }, "Product updated");
+};
+
+// DELETE /admin/products/:id
+export const adminDeleteProduct = async (req: AuthRequest, res: Response) => {
+  const id = ensureString(req.params.id);
+  const product = await prisma.product.findUnique({ where: { id } });
+  if (!product) throw new NotFoundError("Product");
+
+  const hasOrderHistory = await prisma.orderItem.findFirst({ where: { productId: id } });
+  if (hasOrderHistory) {
+    throw new ConflictError("Product has order history and cannot be deleted — archive it instead");
+  }
+
+  await prisma.product.delete({ where: { id } });
+  await clearProductCache(id, product.vendorId);
+  await invalidateActiveProductPromosCache();
+  await invalidateMarketplaceDiscoveryCaches();
+
+  await auditAdmin(req, "ADMIN_DELETED_PRODUCT", { productId: id });
+  return sendSuccess(res, {}, "Product deleted");
+};
+
+// ==================== VENDOR DETAIL ====================
+
+// GET /admin/vendors/:id
+export const getVendorById = async (req: Request, res: Response) => {
+  const id = ensureString(req.params.id);
+  const vendor = await prisma.user.findUnique({
+    where: { id, role: Role.VENDOR },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phoneNumber: true,
+      brandName: true,
+      brandLogo: true,
+      kycStatus: true,
+      isBlocked: true,
+      blockedReason: true,
+      blockedAt: true,
+      commissionRate: true,
+      isLive: true,
+      isEmailVerified: true,
+      createdAt: true,
+      _count: { select: { products: true, vendorOrders: true, followers: true } },
+    },
+  });
+  if (!vendor) throw new NotFoundError("Vendor");
+
+  // Get products
+  const products = await prisma.product.findMany({
+    where: { vendorId: id },
+    select: {
+      id: true,
+      name: true,
+      price: true,
+      stock: true,
+      trackInventory: true,
+      archived: true,
+      averageRating: true,
+      dishType: { select: { id: true, name: true } },
+      _count: { select: { reviews: true } },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  // Get recent orders
+  const orders = await prisma.order.findMany({
+    where: { vendorId: id },
+    include: {
+      customer: { select: { id: true, name: true, phoneNumber: true } },
+      items: { include: { product: { select: { id: true, name: true } } } },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+  });
+
+  // Get stats
+  const [totalRevenueAgg, totalOrders, completedOrders, avgRatingAgg] = await Promise.all([
+    prisma.order.aggregate({
+      where: { vendorId: id, status: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.SUCCESS },
+      _sum: { totalPrice: true },
+    }),
+    prisma.order.count({ where: { vendorId: id } }),
+    prisma.order.count({ where: { vendorId: id, status: OrderStatus.COMPLETED } }),
+    prisma.productReview.aggregate({
+      where: { product: { vendorId: id } },
+      _avg: { rating: true },
+    }),
+  ]);
+
+  // Monthly revenue (last 12 months)
+  const twelveMonthsAgo = new Date();
+  twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
+  const monthlyRevenueRaw = await prisma.order.groupBy({
+    by: ["createdAt"],
+    where: {
+      vendorId: id,
+      status: OrderStatus.COMPLETED,
+      paymentStatus: PaymentStatus.SUCCESS,
+      createdAt: { gte: twelveMonthsAgo },
+    },
+    _sum: { totalPrice: true },
+  });
+  // Group by month
+  const monthlyMap = new Map<string, number>();
+  monthlyRevenueRaw.forEach((r) => {
+    const month = r.createdAt.toISOString().slice(0, 7); // YYYY-MM
+    monthlyMap.set(month, (monthlyMap.get(month) || 0) + Number(r._sum.totalPrice || 0));
+  });
+  const monthlyRevenue = Array.from(monthlyMap.entries())
+    .map(([month, revenue]) => ({ month, revenue }))
+    .sort((a, b) => a.month.localeCompare(b.month));
+
+  // Status breakdown
+  const statusBreakdown = await prisma.order.groupBy({
+    by: ["status"],
+    where: { vendorId: id },
+    _count: { id: true },
+  });
+
+  // Recent reviews
+  const recentReviews = await prisma.productReview.findMany({
+    where: { product: { vendorId: id } },
+    include: {
+      customer: { select: { id: true, name: true } },
+      product: { select: { id: true, name: true } },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+  });
+
+  const stats = {
+    totalRevenue: totalRevenueAgg._sum.totalPrice || 0,
+    totalOrders,
+    totalProducts: vendor._count.products,
+    followers: vendor._count.followers,
+    avgRating: avgRatingAgg._avg.rating || 0,
+  };
+
+  return sendSuccess(res, { vendor, products, orders, stats, monthlyRevenue, statusBreakdown, recentReviews }, "Vendor retrieved");
+};
+
+// ==================== TODAY'S ORDERS ====================
+
+// GET /admin/orders/today
+export const getTodaysOrders = async (req: Request, res: Response) => {
+  const { page, limit, skip } = getPagination(req);
+  const status = req.query.status as OrderStatus | undefined;
+
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date();
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const where: Prisma.OrderWhereInput = {
+    createdAt: { gte: startOfDay, lte: endOfDay },
+    ...(status && { status }),
+  };
+
+  const [orders, total, totals] = await Promise.all([
+    prisma.order.findMany({
+      where,
+      include: {
+        customer: { select: { id: true, name: true, phoneNumber: true } },
+        vendor: { select: { id: true, name: true, brandName: true } },
+        items: { include: { product: { select: { id: true, name: true } } } },
+      },
+      orderBy: { createdAt: "desc" },
+      skip,
+      take: limit,
+    }),
+    prisma.order.count({ where }),
+    prisma.order.groupBy({
+      by: ["status"],
+      where: { createdAt: { gte: startOfDay, lte: endOfDay } },
+      _count: { id: true },
+      _sum: { totalPrice: true },
+    }),
+  ]);
+
+  const totalOrders = totals.reduce((sum, t) => sum + Number(t._count.id), 0);
+  const totalRevenue = totals.reduce((sum, t) => sum + Number(t._sum.totalPrice || 0), 0);
+
+  return sendSuccess(
+    res,
+    { orders, totals, totalOrders, totalRevenue },
+    "Today's orders retrieved",
+    200,
+    {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+    },
+  );
+};
+
+// ==================== GROWTH ANALYTICS ====================
+
+// GET /admin/growth?period=monthly&year=2024
+export const getGrowthAnalytics = async (req: Request, res: Response) => {
+  const period = (req.query.period as "daily" | "weekly" | "monthly" | "yearly") || "monthly";
+  const year = Number(req.query.year) || new Date().getFullYear();
+
+  const startOfYear = new Date(year, 0, 1);
+  const endOfYear = new Date(year + 1, 0, 1);
+
+  const [revenue, orders, users, products] = await Promise.all([
+    getTimeSeriesData("revenue", period, startOfYear, endOfYear),
+    getTimeSeriesData("orders", period, startOfYear, endOfYear),
+    getTimeSeriesData("users", period, startOfYear, endOfYear),
+    getTimeSeriesData("products", period, startOfYear, endOfYear),
+  ]);
+
+  // Category breakdown (orders by dish type)
+  const categoryBreakdownRaw = await prisma.$queryRaw<Array<{ dish_type_id: string; count: bigint; revenue: bigint }>>`
+    SELECT p."dishTypeId" as dish_type_id, COUNT(DISTINCT o.id) as "count", COALESCE(SUM(o."totalPrice"), 0) as revenue
+    FROM "Order" o
+    JOIN "OrderItem" oi ON oi."orderId" = o.id
+    JOIN "Product" p ON p.id = oi."productId"
+    WHERE o."createdAt" >= ${startOfYear} AND o."createdAt" < ${endOfYear}
+      AND o.status = ${OrderStatus.COMPLETED}::"OrderStatus"
+      AND o."paymentStatus" = ${PaymentStatus.SUCCESS}::"PaymentStatus"
+    GROUP BY p."dishTypeId"
+  `;
+
+  const dishTypeIds = categoryBreakdownRaw.map((c) => c.dish_type_id).filter(Boolean);
+  const dishTypes = await prisma.dishType.findMany({
+    where: { id: { in: dishTypeIds } },
+    select: { id: true, name: true },
+  });
+  const dishTypeMap = new Map(dishTypes.map((d) => [d.id, d.name]));
+  const categoryData = categoryBreakdownRaw.map((c) => ({
+    category: dishTypeMap.get(c.dish_type_id) || c.dish_type_id || "Unknown",
+    count: Number(c.count),
+    revenue: Number(c.revenue),
+  }));
+
+  // Status breakdown
+  const statusBreakdown = await prisma.order.groupBy({
+    by: ["status"],
+    where: { createdAt: { gte: startOfYear, lt: endOfYear } },
+    _count: { id: true },
+  });
+
+  return sendSuccess(res, {
+    revenue,
+    orders,
+    users,
+    products,
+    categoryBreakdown: categoryData,
+    statusBreakdown,
+  }, "Growth analytics retrieved");
+};
+
+async function getTimeSeriesData(
+  type: "revenue" | "orders" | "users" | "products",
+  period: "daily" | "weekly" | "monthly" | "yearly",
+  start: Date,
+  end: Date,
+) {
+  if (type === "revenue") {
+    const data = await prisma.order.groupBy({
+      by: ["createdAt"],
+      where: { status: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.SUCCESS, createdAt: { gte: start, lt: end } },
+      _sum: { totalPrice: true },
+    });
+    return groupByPeriod(data.map((d) => ({ date: d.createdAt, value: Number(d._sum.totalPrice || 0) })), period);
+  }
+  if (type === "orders") {
+    const data = await prisma.order.groupBy({
+      by: ["createdAt"],
+      where: { createdAt: { gte: start, lt: end } },
+      _count: { id: true },
+    });
+    return groupByPeriod(data.map((d) => ({ date: d.createdAt, value: d._count.id })), period);
+  }
+  if (type === "users") {
+    const data = await prisma.user.groupBy({
+      by: ["createdAt"],
+      where: { createdAt: { gte: start, lt: end } },
+      _count: { id: true },
+    });
+    return groupByPeriod(data.map((d) => ({ date: d.createdAt, value: d._count.id })), period);
+  }
+  if (type === "products") {
+    const data = await prisma.product.groupBy({
+      by: ["createdAt"],
+      where: { createdAt: { gte: start, lt: end } },
+      _count: { id: true },
+    });
+    return groupByPeriod(data.map((d) => ({ date: d.createdAt, value: d._count.id })), period);
+  }
+  return [];
+}
+
+function groupByPeriod(
+  data: { date: Date; value: number }[],
+  period: "daily" | "weekly" | "monthly" | "yearly",
+) {
+  const map = new Map<string, { period: string; value: number }>();
+  for (const d of data) {
+    let key: string;
+    const date = new Date(d.date);
+    if (period === "daily") {
+      key = date.toISOString().slice(0, 10);
+    } else if (period === "weekly") {
+      const weekStart = new Date(date);
+      weekStart.setDate(date.getDate() - date.getDay());
+      key = weekStart.toISOString().slice(0, 10);
+    } else if (period === "monthly") {
+      key = date.toISOString().slice(0, 7);
+    } else {
+      key = date.getFullYear().toString();
+    }
+    const existing = map.get(key) || { period: key, value: 0 };
+    existing.value += d.value;
+    map.set(key, existing);
+  }
+  return Array.from(map.values()).sort((a, b) => a.period.localeCompare(b.period));
+}
+
+// ==================== KPIS ====================
+
+// GET /admin/kpis
+export const getKpis = async (_req: Request, res: Response) => {
+  const [
+    totalRevenue,
+    lastThirtyDaysRevenue,
+    totalOrders,
+    completedOrders,
+    avgOrderValue,
+    totalCustomers,
+    newCustomers30d,
+    repeatCustomers,
+    topCategoryAgg,
+    avgPlatformRating,
+  ] = await Promise.all([
+    prisma.order.aggregate({
+      where: { status: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.SUCCESS },
+      _sum: { totalPrice: true },
+    }),
+    prisma.order.aggregate({
+      where: {
+        status: OrderStatus.COMPLETED,
+        paymentStatus: PaymentStatus.SUCCESS,
+        createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+      },
+      _sum: { totalPrice: true },
+    }),
+    prisma.order.count(),
+    prisma.order.count({ where: { status: OrderStatus.COMPLETED } }),
+    prisma.order.aggregate({
+      where: { status: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.SUCCESS },
+      _avg: { totalPrice: true },
+    }),
+    prisma.user.count({ where: { role: Role.CUSTOMER } }),
+    prisma.user.count({
+      where: { role: Role.CUSTOMER, createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
+    }),
+    prisma.user.count({
+      where: { role: Role.CUSTOMER, customerOrders: { some: { status: OrderStatus.COMPLETED } } },
+    }),
+    prisma.$queryRaw<Array<{ dish_type_id: string; count: bigint }>>`
+      SELECT p."dishTypeId" as dish_type_id, COUNT(DISTINCT o.id) as "count"
+      FROM "Order" o
+      JOIN "OrderItem" oi ON oi."orderId" = o.id
+      JOIN "Product" p ON p.id = oi."productId"
+      WHERE o.status = ${OrderStatus.COMPLETED}::"OrderStatus"
+        AND o."paymentStatus" = ${PaymentStatus.SUCCESS}::"PaymentStatus"
+      GROUP BY p."dishTypeId"
+      ORDER BY "count" DESC
+      LIMIT 1
+    `,
+    prisma.productReview.aggregate({ _avg: { rating: true } }),
+  ]);
+
+  const topCategoryId = topCategoryAgg[0]?.dish_type_id;
+  let topCategory = "—";
+  if (topCategoryId) {
+    const dt = await prisma.dishType.findUnique({ where: { id: topCategoryId }, select: { name: true } });
+    topCategory = dt?.name || "—";
+  }
+
+  const completionRate = totalOrders > 0 ? Math.round((completedOrders / totalOrders) * 100) : 0;
+
+  return sendSuccess(res, {
+    revenue: { total: totalRevenue._sum.totalPrice || 0, lastThirtyDays: lastThirtyDaysRevenue._sum.totalPrice || 0 },
+    orders: { total: totalOrders, avgValue: avgOrderValue._avg.totalPrice || 0 },
+    completionRate,
+    users: { totalCustomers, newLastThirtyDays: newCustomers30d, repeatCustomers },
+    product: { topCategory, avgPlatformRating: avgPlatformRating._avg.rating || 0 },
+  }, "KPIs retrieved");
+};
+
+// ==================== REVIEWS ====================
+
+// GET /admin/reviews
+export const getAllReviews = async (req: Request, res: Response) => {
+  const { page, limit, skip } = getPagination(req);
+  const rating = req.query.rating ? Number(req.query.rating) : undefined;
+
+  const where: Prisma.ProductReviewWhereInput = {
+    ...(rating && { rating }),
+  };
+
+  const [reviews, total] = await Promise.all([
+    prisma.productReview.findMany({
+      where,
+      include: {
+        customer: { select: { id: true, name: true, email: true } },
+        product: { select: { id: true, name: true, vendorId: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      skip,
+      take: limit,
+    }),
+    prisma.productReview.count({ where }),
+  ]);
+
+  return sendSuccess(res, { reviews }, "Reviews retrieved", 200, {
+    page,
+    limit,
+    total,
+    totalPages: Math.ceil(total / limit),
+  });
+};
+
+// PATCH /admin/reviews/:id — action: "hide" | "delete"
+// DELETE /admin/reviews/:id — same as action=delete
+export const adminModerateReview = async (req: AuthRequest, res: Response) => {
+  const id = ensureString(req.params.id);
+  const action = req.method === "DELETE" ? "delete" : (req.body as { action?: "hide" | "delete" }).action;
+  if (!action || !["hide", "delete"].includes(action)) {
+    throw new ValidationError("action must be 'hide' or 'delete'");
+  }
+
+  const review = await prisma.productReview.findUnique({ where: { id } });
+  if (!review) throw new NotFoundError("Review");
+
+  if (action === "delete") {
+    await prisma.productReview.delete({ where: { id } });
+    await auditAdmin(req, "ADMIN_DELETED_REVIEW", { reviewId: id });
+    return sendSuccess(res, {}, "Review deleted");
+  }
+
+  // For "hide", we could add a moderation status field, but for now just delete
+  // since the schema doesn't have a hidden field. Alternatively, we could
+  // mark it as not verifiedPurchase or add a moderation flag in the future.
+  await prisma.productReview.update({
+    where: { id },
+    data: { verifiedPurchase: false },
+  });
+  await auditAdmin(req, "ADMIN_HIDDEN_REVIEW", { reviewId: id });
+  return sendSuccess(res, { id }, "Review hidden (unverified)");
+};
+
+// ==================== ACTIVITY ====================
+
+// GET /admin/activity
+export const getActivity = async (req: Request, res: Response) => {
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  
+  const activities = await prisma.activity.findMany({
+    include: {
+      vendor: { select: { id: true, name: true, brandName: true } },
+      customer: { select: { id: true, name: true } },
+      order: { select: { id: true } },
+    },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+  });
+
+  return sendSuccess(res, activities, "Activity feed retrieved");
 };

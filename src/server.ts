@@ -358,43 +358,6 @@ app.use(notFoundHandler);
 // Central error handler — must be last
 app.use(errorHandler);
 
-// ------------------------------
-// Start server
-// ------------------------------
-// const startServer = async () => {
-//   try {
-//     await ensureRedisReady();
-//     console.log('✅ Redis connected');
-
-//     await prisma.$connect();
-//     console.log('✅ PostgreSQL connected');
-
-//     try {
-//       await setupSearch();
-//       console.log('✅ Search setup completed');
-//     } catch (err) {
-//       console.error('⚠️ Search setup failed:', err);
-//     }
-
-//     console.log(`🌐 SERVER_URL: ${process.env.SERVER_URL}`);
-
-//     const server = http.createServer(app);
-//     initSocket(server);
-
-//     server.listen(5000, "0.0.0.0", () => {
-//       console.log(`🚀 Server running at http://localhost:${config.port}`);
-
-//       // Start cron / in-memory jobs
-//       startKeepAliveJob();
-
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Failed to start server:', error);
-//     process.exit(1);
-//   }
-// };
-
 /**
  * Runs the non-critical startup maintenance tasks (search index setup,
  * thumbnail backfill) in the background, after the server is already
