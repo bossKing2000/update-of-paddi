@@ -7,7 +7,10 @@ export const registerSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
   phoneNumber: z.string().min(10).optional(),
-  role: z.enum(['CUSTOMER', 'VENDOR', 'ADMIN', 'DELIVERY']),
+  // Public registration must never mint a privileged role. ADMIN accounts
+  // are created only via the create-admin CLI job or by an existing admin
+  // through PATCH /api/admin/users/:id/role.
+  role: z.enum(['CUSTOMER', 'VENDOR', 'DELIVERY']),
   brandName: z.string().nullable().optional(),
 });
 

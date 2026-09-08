@@ -148,6 +148,17 @@ export function resolveOnboardingState(user: OnboardingUser): OnboardingState {
 }
 
 export const register = async (req: AuthRequest, res: Response) => {
+  // Defense in depth: never trust a client-supplied privileged role, even
+  // if validation layers change. ADMIN is rejected outright (403), not
+  // silently downgraded — the caller must know the attempt was refused.
+  const rawRole =
+    typeof req.body?.role === "string" ? req.body.role.toUpperCase() : null;
+  if (rawRole === "ADMIN") {
+    return res
+      .status(403)
+      .json({ message: "Registration with ADMIN role is not allowed" });
+  }
+
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success)
     return res.status(422).json({ errors: parsed.error.flatten().fieldErrors });
@@ -277,6 +288,16 @@ export const login = async (req: Request, res: Response) => {
         .json({ message: "Please verify your email before logging in." });
     }
 
+    // Blocked accounts cannot authenticate. Revoke any lingering sessions
+    // (e.g. issued before the block if revocation partially failed) so the
+    // block takes effect immediately and cannot be bypassed by re-login.
+    if (user.isBlocked) {
+      await deleteAllUserSessions(user.id).catch(() => {});
+      return res
+        .status(403)
+        .json({ message: "This account has been blocked." });
+    }
+
     // Use client info if provided by geoMiddleware
     const clientInfo = (req as any).clientInfo || {};
     const ip = clientInfo.ip || req.ip || "unknown";
@@ -389,6 +410,14 @@ export const refreshToken = async (req: Request, res: Response) => {
     const user = await findUserById(decoded.id);
     if (!user || user.tokenVersion !== decoded.tokenVersion) {
       return res.status(401).json({ message: "Invalid refresh token" });
+    }
+
+    // Blocked accounts cannot mint fresh tokens — revoke everything.
+    if (user.isBlocked) {
+      await deleteAllUserSessions(user.id).catch(() => {});
+      return res
+        .status(403)
+        .json({ message: "This account has been blocked." });
     }
 
     // A refresh token issued before this session redesign won't carry a
@@ -1109,6 +1138,14 @@ export const googleLogin = async (req: Request, res: Response) => {
       where: { id: user.id },
       data: updates,
     });
+
+    // Blocked accounts cannot authenticate via Google either.
+    if (user.isBlocked) {
+      await deleteAllUserSessions(user.id).catch(() => {});
+      return res
+        .status(403)
+        .json({ message: "This account has been blocked." });
+    }
 
     const sessionId = uuidv4();
     const refreshJti = uuidv4();

@@ -29,7 +29,7 @@ import {
 } from "../validators/auth.validator";
 import { validateRequest } from "../middlewares/validateRequest.middleware";
 import { authRateLimiter } from "../middlewares/rateLimiter.middleware";
-import { authenticate } from "../middlewares/auth.middleware";
+import { authenticate, authorizeAdmin } from "../middlewares/auth.middleware";
 import { upload } from "../utils/multer";
 import { trackUserAction } from "../middlewares/tracking.middleware";
 import { geoMiddleware, GeoRequest } from "../middlewares/geo.middleware";
@@ -137,14 +137,17 @@ router.patch(
   updateProfile,
 );
 
-// NOTE: GET /alluser used to live here — no auth, no pagination, dumped
-// every user's email/phone/name/bio to any anonymous caller. Removed.
-// Use GET /api/admin/users instead (paginated, admin-only, built in the
-// Admin domain).
-
-router.get("/alluser", async (req: Request, res: Response) => {
-  await getAllUsers(req, res);
-});
+// GET /alluser — legacy alias for GET /api/admin/users (paginated).
+// Must stay ADMIN-only: it exposes every user's email/name. Uses the same
+// authenticate + authorizeAdmin chain as the rest of the admin domain.
+router.get(
+  "/alluser",
+  authenticate,
+  authorizeAdmin,
+  async (req: Request, res: Response) => {
+    await getAllUsers(req, res);
+  },
+);
 
 //  POST /select-role
 //  Allows user to choose a role (CUSTOMER, VENDOR) only once

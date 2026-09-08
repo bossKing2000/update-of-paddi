@@ -29,8 +29,8 @@ export const registerValidator = [
 
   body('role')
     .optional()
-    .isIn(['CUSTOMER', 'VENDOR', 'ADMIN', 'DELIVERY'])
-    .withMessage('Role must be CUSTOMER or VENDOR or ADMIN or DELIVERY'),
+    .isIn(['CUSTOMER', 'VENDOR', 'DELIVERY'])
+    .withMessage('Role must be CUSTOMER or VENDOR or DELIVERY'),
 
   body('phoneNumber')
     .optional()

@@ -211,7 +211,11 @@ app.use("/api/payments", paymentRouter);
 app.use("/api/delivery", deliveryRouter);
 app.use("/api/delivery", riderProofReadRoutes);
 app.use("/api/vendor-follow", vendorFollowRoutes);
-app.use("/api/seeder", seederRoutes);
+// Seeder is development-only: it bulk-generates fake data and must never be
+// mounted in production. Routes are additionally ADMIN-gated (seeder.routes).
+if (!config.isProduction) {
+  app.use("/api/seeder", seederRoutes);
+}
 app.use("/api/vendor", vendorDashboardRoutes);
 app.use("/api/vendor/settings", vendorSettingsRoutes);
 app.use("/api/vendor/support", vendorSupportRoutes);
@@ -289,8 +293,8 @@ app.use(
 // on the internet could trigger, cancel, or reset this job. Locked down now.
 app.get(
   "/run-popularity-job",
-  // authenticate,
-  // authorizeAdmin,
+  authenticate,
+  authorizeAdmin,
   async (_req, res) => {
     if (jobRunning) return res.json({ message: "Job is already running" });
 

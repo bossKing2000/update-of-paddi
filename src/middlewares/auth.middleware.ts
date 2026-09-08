@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import config from '../config/config';
-import { getUserSession } from '../lib/session';
+import { deleteAllUserSessions, getUserSession } from '../lib/session';
+import prisma from '../lib/prisma';
 import { UnauthorizedError, ForbiddenError } from '../errors/AppError';
 
 // Combined interface: supports user + multer file handling
@@ -52,6 +53,17 @@ export const authenticate = async (
   const session = await getUserSession(decoded.id, decoded.sessionId);
   if (!session) {
     throw new UnauthorizedError('Session expired or not found. Please log in again.');
+  }
+
+  // Backend enforcement of the admin block: a blocked user keeps no usable
+  // session even if a token was issued before the block (e.g. revocation
+  // raced a login) or the session was restored from the DB fallback.
+  const blocked = await prisma.user
+    .findUnique({ where: { id: decoded.id }, select: { isBlocked: true } })
+    .catch(() => null);
+  if (blocked?.isBlocked) {
+    await deleteAllUserSessions(decoded.id).catch(() => {});
+    throw new ForbiddenError('This account has been blocked.');
   }
 
   authReq.user = {

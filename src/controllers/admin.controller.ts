@@ -278,9 +278,37 @@ export const setUserRole = async (req: AuthRequest, res: Response) => {
   if (!role || !Object.values(Role).includes(role))
     throw new ValidationError("Invalid role");
 
+  // An admin cannot change their own role through this endpoint — that
+  // would allow accidental self-demotion (locking themselves out of the
+  // admin surface) or unchecked self-escalation.
+  if (req.user && id === req.user.id)
+    throw new ValidationError("You cannot change your own role");
+
+  const target = await prisma.user.findUnique({
+    where: { id },
+    select: { role: true },
+  });
+  if (!target) throw new NotFoundError("User");
+
+  // Never leave the platform with zero administrators: refusing to demote
+  // the final ADMIN keeps the admin surface recoverable.
+  if (
+    target.role === Role.ADMIN &&
+    role !== Role.ADMIN
+  ) {
+    const adminCount = await prisma.user.count({
+      where: { role: Role.ADMIN },
+    });
+    if (adminCount <= 1)
+      throw new ValidationError(
+        "Cannot demote the final administrator account",
+      );
+  }
+
   const user = await prisma.user.update({ where: { id }, data: { role } });
   await auditAdmin(req, "ADMIN_SET_USER_ROLE", {
     targetUserId: id,
+    oldRole: target.role,
     newRole: role,
   });
 
@@ -1539,6 +1567,49 @@ export const adminReactivatePromotion = async (
   }
 
   return sendSuccess(res, { promo: updated }, "Promotion reactivated");
+};
+
+// POST /admin/promotions/deactivate-all — bulk-deactivate every active
+// promotion across the platform (all scopes, all vendors, not only SEED_*).
+// Records are flipped to isActive=false, never deleted: historical
+// redemptions, orders, payments and products are untouched. A single
+// updateMany keeps the DB mutation atomic.
+export const adminDeactivateAllPromotions = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const result = await prisma.promotion.updateMany({
+    where: { isActive: true },
+    data: { isActive: false },
+  });
+
+  await auditAdmin(req, "ADMIN_DEACTIVATED_ALL_PROMOTIONS", {
+    deactivatedCount: result.count,
+  });
+
+  // Discovery embeds resolved promotions — sweep so the customer feed stops
+  // serving the old active list. Invalidation is best-effort, but unlike
+  // single-promo mutations we report its outcome so the admin can tell
+  // whether the feed may still serve stale data until TTLs expire.
+  let cachesInvalidated = true;
+  try {
+    await invalidateActiveProductPromosCache();
+    await invalidateMarketplaceDiscoveryCaches();
+  } catch (err) {
+    cachesInvalidated = false;
+    logger.warn({ err }, "bulk promotion deactivation cache sweep failed");
+  }
+
+  return sendSuccess(
+    res,
+    {
+      deactivatedCount: result.count,
+      cachesInvalidated,
+    },
+    result.count === 0
+      ? "No active promotions to deactivate"
+      : `Deactivated ${result.count} promotion(s)`,
+  );
 };
 
 // ==================== PRODUCTS ====================

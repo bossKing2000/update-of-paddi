@@ -10,7 +10,7 @@ import {
   getReportedReviews, resolveReviewReport,
   setDeliveryPersonStatus,
   getAuditLogs,
-  getAllPromotions, createPlatformPromotion, adminDeactivatePromotion, adminReactivatePromotion, adminUpdatePromotion,
+  getAllPromotions, createPlatformPromotion, adminDeactivatePromotion, adminReactivatePromotion, adminUpdatePromotion, adminDeactivateAllPromotions,
   getGrowthAnalytics,
   getKpis,
   getAllProducts, getProductById, adminUpdateProduct, adminDeleteProduct,
@@ -64,6 +64,8 @@ router.get("/audit-logs", getAuditLogs);
 
 router.get("/promotions", getAllPromotions);
 router.post("/promotions", createPlatformPromotion);
+// Static bulk path must precede any future "/promotions/:id" POST route.
+router.post("/promotions/deactivate-all", adminDeactivateAllPromotions);
 router.patch("/promotions/:id", adminUpdatePromotion);
 router.patch("/promotions/:id/deactivate", adminDeactivatePromotion);
 router.patch("/promotions/:id/reactivate", adminReactivatePromotion);
