@@ -34,7 +34,9 @@ export const updateUserSchema = z.object({
   // delivery only
   vehicleType: z.string().max(50).optional(),
   licensePlate: z.string().max(20).optional(),
-  status: z.enum(["AVAILABLE", "BUSY", "OFFLINE"]).optional(),
+  // NOTE: rider moderation status (DeliveryPersonStatus ACTIVE/SUSPENDED/
+  // INACTIVE) is admin-only via PATCH /api/admin/delivery/:userId/status and
+  // deliberately absent here — riders toggle availability via isOnline.
 });
 
  

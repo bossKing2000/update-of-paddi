@@ -47,3 +47,15 @@ export const cartSummaryRateLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+// AI endpoints that fan out to paid third-party calls per request
+// (recommendations issues one embedding call per catalog product).
+// search-correct is offline/local and intentionally left unlimited.
+export const aiRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  keyGenerator: (req: any) => req.user?.id || req.ip,
+  message: { success: false, code: 'RATE_LIMITED', message: 'Too many AI requests, please slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});

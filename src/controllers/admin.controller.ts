@@ -33,6 +33,7 @@ import {
   initiateTransfer,
 } from "../services/payoutService";
 import { calculatePayoutAmounts } from "./vendorDashboard.service";
+import { validatePromoDatesAndValue } from "./promoController";
 import { logger } from "../lib/logger";
 import { invalidateActiveProductPromosCache } from "../services/promotionPricing.service";
 import { invalidateMarketplaceDiscoveryCaches } from "../services/clearCaches";
@@ -134,7 +135,7 @@ export const getDashboardOverview = async (_req: Request, res: Response) => {
     prisma.user.findMany({
       take: 5,
       orderBy: { createdAt: "desc" },
-      select: { id: true, name: true, email: true, role: true, createdAt: true },
+      select: { id: true, name: true, email: true, role: true, isBlocked: true, isEmailVerified: true, createdAt: true },
     }),
     prisma.activity.findMany({
       take: 10,
@@ -306,6 +307,17 @@ export const setUserRole = async (req: AuthRequest, res: Response) => {
   }
 
   const user = await prisma.user.update({ where: { id }, data: { role } });
+
+  // A demoted admin's outstanding JWTs still carry role=ADMIN until they
+  // expire — revoke their sessions now so the old token stops passing
+  // authorizeAdmin on its very next request. Only the target's sessions
+  // are touched; the acting admin's session is unaffected.
+  if (target.role === Role.ADMIN && role !== Role.ADMIN) {
+    await deleteAllUserSessions(id).catch((err) =>
+      logger.warn({ err, userId: id }, "Failed to revoke sessions on demotion"),
+    );
+  }
+
   await auditAdmin(req, "ADMIN_SET_USER_ROLE", {
     targetUserId: id,
     oldRole: target.role,
@@ -618,6 +630,7 @@ export const getAllPayments = async (req: Request, res: Response) => {
         createdAt: true,
         orderId: true,
         userId: true,
+        user: { select: { id: true, name: true } },
       },
       orderBy: { createdAt: "desc" },
       skip,
@@ -1486,6 +1499,42 @@ export const adminUpdatePromotion = async (
   if (maxUsesPerUser !== undefined) updateData.maxUsesPerUser = maxUsesPerUser;
   if (minOrderAmount !== undefined) updateData.minOrderAmount = minOrderAmount;
   if (isActive !== undefined) updateData.isActive = isActive;
+
+  // Validate the final effective state (stored values fill in for fields
+  // the request omits), reusing the same invariants as the vendor update
+  // path: percentage cap applies to the promo's effective type, and date
+  // ordering applies to the effective window.
+  const effectiveType = (updateData.type as DiscountType) ?? promo.type;
+  const effectiveValue =
+    updateData.value !== undefined ? Number(updateData.value) : Number(promo.value);
+  const effectiveStartsAt =
+    updateData.startsAt !== undefined
+      ? (updateData.startsAt as Date | null)
+      : promo.startsAt;
+  const effectiveExpiresAt =
+    updateData.expiresAt !== undefined
+      ? (updateData.expiresAt as Date | null)
+      : promo.expiresAt;
+  validatePromoDatesAndValue({
+    type: effectiveType,
+    value: effectiveValue,
+    startsAt: effectiveStartsAt ?? undefined,
+    expiresAt: effectiveExpiresAt ?? undefined,
+  });
+
+  // Same expiry guard as the dedicated reactivate path: an expired
+  // promotion cannot be (or remain) active. Deactivation always works.
+  const effectiveIsActive =
+    updateData.isActive !== undefined ? Boolean(updateData.isActive) : promo.isActive;
+  if (
+    effectiveIsActive &&
+    effectiveExpiresAt &&
+    effectiveExpiresAt < new Date()
+  ) {
+    throw new ValidationError(
+      "Expired promotions cannot be reactivated; create a new promotion instead",
+    );
+  }
 
   const updated = await prisma.promotion.update({
     where: { id },

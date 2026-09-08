@@ -234,12 +234,15 @@ export const register = async (req: AuthRequest, res: Response) => {
     });
     await setRefreshJti(user.id, sessionId, refreshJti);
 
+    // Cookie Path must match the refresh endpoint's request path
+    // (/api/auth/refresh-token) or browsers will not send it back and web
+    // refresh silently breaks. All set/clear sites use this same path.
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
       maxAge: 7 * 24 * 60 * 60 * 1000,
-      path: "/refresh-token",
+      path: "/api/auth/refresh-token",
     });
 
     const onboarding = resolveOnboardingState({
@@ -361,7 +364,7 @@ export const login = async (req: Request, res: Response) => {
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
       maxAge: 7 * 24 * 60 * 60 * 1000,
-      path: "/refresh-token",
+      path: "/api/auth/refresh-token",
     });
 
     // If request is from mobile, also send refreshToken in JSON
@@ -461,17 +464,17 @@ export const refreshToken = async (req: Request, res: Response) => {
           if (existingSession) {
             await createUserSession(user.id, decoded.sessionId, { ...existingSession, lastRefreshedAt: new Date() });
           } else {
-            await createUserSession(user.id, decoded.sessionId, {
-              ip: undefined, userAgent: undefined, deviceId: undefined, geoCity: undefined, geoRegion: undefined, geoCountry: undefined,
-              lastLoginAt: new Date(), restoredAt: new Date(),
-            });
+            // Same rule as the main restore path below: no session in Redis
+            // or DB means explicit revocation, not expiry — do not resurrect.
+            await deleteRefreshJti(user.id, decoded.sessionId).catch(() => {});
+            return res.status(401).json({ message: "Please log in again" });
           }
           res.cookie("refreshToken", graceRefreshToken, {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
             sameSite: "strict",
             maxAge: 7 * 24 * 60 * 60 * 1000,
-            path: "/refresh-token",
+            path: "/api/auth/refresh-token",
           });
           return res.status(200).json({ accessToken: newAccessTokenGrace, refreshToken: graceRefreshToken });
         }
@@ -509,21 +512,15 @@ export const refreshToken = async (req: Request, res: Response) => {
         lastRefreshedAt: new Date(),
       });
     } else {
-      // Session in Redis has expired, but refresh token is still valid.
-      // This can happen if user was away for longer than session TTL
-      // but within refresh token lifetime. Recreate session from the
-      // valid refresh token (grace period for session restoration).
-      // We create a fresh session with the same sessionId.
-      await createUserSession(user.id, decoded.sessionId, {
-        ip: undefined,
-        userAgent: undefined,
-        deviceId: undefined,
-        geoCity: undefined,
-        geoRegion: undefined,
-        geoCountry: undefined,
-        lastLoginAt: new Date(),
-        restoredAt: new Date(),
-      });
+      // Session is gone from both Redis and the DB fallback. That means it
+      // was explicitly revoked (logout / admin block / demotion) — NOT mere
+      // cache expiry — because revocation deletes the DB row while expiry
+      // only lapses Redis (DB rows live 30d, refresh tokens only 7d).
+      // Refuse to resurrect it: the old refresh token dies with the session.
+      // (The legitimate Redis-loss case still restores, because then the DB
+      // row is still present and getUserSession above would have found it.)
+      await deleteRefreshJti(user.id, decoded.sessionId).catch(() => {});
+      return res.status(401).json({ message: "Please log in again" });
     }
 
     // Send refresh token as cookie (for web clients)
@@ -532,7 +529,7 @@ export const refreshToken = async (req: Request, res: Response) => {
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-      path: "/refresh-token",
+      path: "/api/auth/refresh-token",
     });
 
     // Also return refresh token in body for mobile apps
@@ -568,7 +565,7 @@ export const logout = async (req: AuthRequest, res: Response) => {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
-      path: "/refresh-token",
+      path: "/api/auth/refresh-token",
     });
 
     res.status(200).json({ message: "Logged out successfully" });
@@ -590,7 +587,7 @@ export const logoutAllDevices = async (req: AuthRequest, res: Response) => {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
-    path: "/refresh-token",
+    path: "/api/auth/refresh-token",
   });
   res.json({ message: "Logged out from all devices" });
 };
@@ -702,6 +699,7 @@ export const getProfile = async (req: AuthRequest, res: Response) => {
         brandName: true,
         brandLogo: true,
         kycStatus: true,
+        isEmailVerified: true,
         createdAt: true,
         deliveryPerson: {
           select: {
@@ -775,6 +773,22 @@ export const selectRole = async (req: AuthRequest, res: Response) => {
       where: { id: userId },
       data: { role: Role[role as keyof typeof Role] }, // ✅ Safe and typed
     });
+
+    // Same linked record as local DELIVERY registration creates — without
+    // it every rider endpoint fails at getDriver ("Rider profile" 404).
+    if (role === "DELIVERY") {
+      await prisma.deliveryPerson.upsert({
+        where: { userId },
+        update: {},
+        create: {
+          userId,
+          status: "ACTIVE",
+          isOnline: false,
+          rating: 0,
+          totalDeliveries: 0,
+        },
+      });
+    }
 
     const onboarding = resolveOnboardingState({
       role: updated.role,
@@ -1174,7 +1188,7 @@ export const googleLogin = async (req: Request, res: Response) => {
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
       maxAge: 7 * 24 * 60 * 60 * 1000,
-      path: "/refresh-token",
+      path: "/api/auth/refresh-token",
     });
 
     return res.status(200).json({
@@ -1310,14 +1324,14 @@ export const updateProfile = async (
       }
     }
 
-    // Delivery-specific updates
+    // Delivery-specific updates (vehicle details only — moderation status
+    // is admin-only and never writable here).
     if (userRole === "DELIVERY") {
       const deliveryUpdates: Record<string, any> = {};
       if (rawData.vehicleType)
         deliveryUpdates.vehicleType = rawData.vehicleType;
       if (rawData.licensePlate)
         deliveryUpdates.licensePlate = rawData.licensePlate;
-      if (rawData.status) deliveryUpdates.status = rawData.status;
 
       if (Object.keys(deliveryUpdates).length > 0) {
         await prisma.deliveryPerson.updateMany({

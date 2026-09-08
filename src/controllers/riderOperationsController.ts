@@ -343,6 +343,19 @@ export const processRiderWithdrawal = async (
         processedAt: new Date(),
       },
     });
+    await createAuditLog({
+      userId: req.user!.id,
+      action: "RIDER_WITHDRAWAL_TRANSFER_FAILED",
+      req,
+      metadata: {
+        withdrawalId,
+        reference,
+        amount: withdrawal.amount,
+        previousStatus: "PROCESSING",
+        newStatus: "FAILED",
+        failureReason: error?.message?.slice(0, 500) || "Transfer initiation failed",
+      },
+    });
     throw error;
   }
 };

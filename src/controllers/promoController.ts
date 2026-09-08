@@ -35,7 +35,7 @@ const createPromoSchema = z.object({
 
 const updatePromoSchema = createPromoSchema.partial();
 
-const validatePromoDatesAndValue = (data: { type?: DiscountType; value?: number; startsAt?: Date; expiresAt?: Date }) => {
+export const validatePromoDatesAndValue = (data: { type?: DiscountType; value?: number; startsAt?: Date; expiresAt?: Date }) => {
   if (data.type === DiscountType.PERCENTAGE && (data.value ?? 0) > 100) {
     throw new ValidationError("Percentage discount can't exceed 100");
   }
