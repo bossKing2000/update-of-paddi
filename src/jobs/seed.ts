@@ -10,6 +10,9 @@ import {
   SpecialOrderRequestStatus,
   SpecialOrderOfferStatus,
   ActivityType,
+  DiscountType,
+  PromotionScope,
+  ReferralRewardStatus,
 } from "@prisma/client";
 import { faker } from "@faker-js/faker";
 
@@ -600,6 +603,34 @@ function addMilliseconds(date: Date, milliseconds: number) {
   return new Date(date.getTime() + milliseconds);
 }
 
+const round2 = (v: number) => Number(v.toFixed(2));
+
+// Mirrors src/controllers/referralController.generateReferralCode:
+// 5-letter name prefix + 6 hex chars. Used so seeded referralCodes look
+// exactly like app-generated ones (not arbitrary SEED_ strings).
+function seedReferralCode(name: string): string {
+  const prefix =
+    name.replace(/[^A-Za-z]/g, "").slice(0, 5).toUpperCase() || "PADDI";
+  const suffix = faker.string
+    .hexadecimal({ length: 6, casing: "upper" })
+    .replace(/^0x/i, "");
+  return `${prefix}${suffix}`;
+}
+
+// Canonical marketplace-availability rule, mirrored from
+// src/services/vendorAvailability.service.ts:
+// orderable = vendor.isLive AND !archived AND (untracked OR stock > 0).
+// deliveryPreferences==null means accepting orders (Bulk seed leaves it null).
+function isSeedProductOrderable(
+  product: { archived: boolean; trackInventory: boolean | null; stock: number | null },
+  vendorIsLive: boolean,
+) {
+  if (!vendorIsLive) return false;
+  if (product.archived) return false;
+  if (product.trackInventory) return (product.stock ?? 0) > 0;
+  return true;
+}
+
 function pick<T>(values: T[]) {
   return values.length ? faker.helpers.arrayElement(values) : undefined;
 }
@@ -666,6 +697,29 @@ async function seedDatabase() {
   const deliveryUsers = await prisma.user.findMany({
     where: { role: Role.DELIVERY, deliveryPerson: null },
   });
+
+  // P1 — Vendor/KYC lifecycle coverage (small, controlled; volumes preserved).
+  // Bulk vendors above are VERIFIED+live. Flip 5 to cover the other valid
+  // states. nin/ninData intentionally left NULL: the app stores raw Dojah
+  // responses there, so we do not invent fake verification payloads.
+  if (vendors.length >= 5) {
+    const kycShowcase: { kycStatus: "PENDING" | "VERIFIED" | "REJECTED"; isLive: boolean }[] = [
+      { kycStatus: "PENDING", isLive: false },
+      { kycStatus: "PENDING", isLive: false },
+      { kycStatus: "VERIFIED", isLive: false },
+      { kycStatus: "VERIFIED", isLive: false },
+      { kycStatus: "REJECTED", isLive: false },
+    ];
+    for (let i = 0; i < kycShowcase.length; i++) {
+      const v = vendors[i];
+      await prisma.user.update({
+        where: { id: v.id },
+        data: { kycStatus: kycShowcase[i].kycStatus, isLive: false },
+      });
+      v.kycStatus = kycShowcase[i].kycStatus as unknown as typeof v.kycStatus;
+      v.isLive = false;
+    }
+  }
   const deliveryProfiles: Prisma.DeliveryPersonCreateManyInput[] =
     deliveryUsers.map((user) => ({
       userId: user.id,
@@ -751,6 +805,49 @@ async function seedDatabase() {
       },
     },
   });
+
+  // P1 — Product state coverage (small, controlled). Bulk products above are
+  // non-archived / untracked / isNew=true. Flip a handful to cover the other
+  // valid states. In-memory copies are patched too so later cart/order
+  // selection sees the same values as the DB.
+  if (savedProducts.length >= 15) {
+    const archivedIds = [savedProducts[0].id, savedProducts[1].id];
+    await prisma.product.updateMany({
+      where: { id: { in: archivedIds } },
+      data: { archived: true },
+    });
+    for (const p of savedProducts)
+      if (archivedIds.includes(p.id)) p.archived = true;
+
+    await prisma.product.update({
+      where: { id: savedProducts[2].id },
+      data: { trackInventory: true, stock: 25 },
+    });
+    savedProducts[2].trackInventory = true;
+    savedProducts[2].stock = 25;
+
+    await prisma.product.update({
+      where: { id: savedProducts[3].id },
+      data: { trackInventory: true, stock: 12 },
+    });
+    savedProducts[3].trackInventory = true;
+    savedProducts[3].stock = 12;
+
+    await prisma.product.update({
+      where: { id: savedProducts[4].id },
+      data: { trackInventory: true, stock: 0 },
+    });
+    savedProducts[4].trackInventory = true;
+    savedProducts[4].stock = 0;
+
+    const notNewIds = savedProducts.slice(5, 15).map((p) => p.id);
+    await prisma.product.updateMany({
+      where: { id: { in: notNewIds } },
+      data: { isNew: false },
+    });
+    for (const p of savedProducts)
+      if (notNewIds.includes(p.id)) p.isNew = false;
+  }
   const options: Prisma.ProductOptionCreateManyInput[] = [];
   for (const product of savedProducts) {
     for (
@@ -768,37 +865,52 @@ async function seedDatabase() {
     (data) => prisma.productOption.createMany({ data }),
     options,
   );
+  // P1 — a small number of disabled add-ons. Disabled options are rejected
+  // at cart/checkout but preserved on historical orders via snapshots.
+  const savedOptions = await prisma.productOption.findMany({
+    where: { productId: { in: savedProducts.map((p) => p.id) } },
+    select: { id: true },
+  });
+  const inactiveOptionIds = savedOptions
+    .filter((_, i) => i % 25 === 0)
+    .slice(0, 10)
+    .map((o) => o.id);
+  if (inactiveOptionIds.length) {
+    await prisma.productOption.updateMany({
+      where: { id: { in: inactiveOptionIds } },
+      data: { isActive: false },
+    });
+  }
   setProgress(
     35,
     `Created ${savedProducts.length} products and ${options.length} options`,
   );
 
-  // Stage 1: every seeded product is non-archived, i.e. orderable while its
-  // vendor is live + accepting orders. There is no scheduling anymore.
-  const liveProducts = savedProducts.filter((product) => !product.archived);
-
-  const productReviews: Prisma.ProductReviewCreateManyInput[] = [];
-  for (const product of savedProducts)
-    for (
-      let index = 0;
-      index < randomRange(SEED_CONFIG.productReviewsPerProduct);
-      index++
-    ) {
-      const customer = pick(customers);
-      if (customer)
-        productReviews.push({
-          productId: product.id,
-          customerId: customer.id,
-          rating: faker.number.int({ min: 3, max: 5 }),
-          comment: faker.lorem.sentence(),
-          images: [],
-          verifiedPurchase: true,
-        });
-    }
-  await createMany(
-    (data) => prisma.productReview.createMany({ data }),
-    productReviews,
+  // Canonical marketplace availability (see vendorAvailability.service.ts):
+  // vendor.isLive AND !archived AND (untracked OR stock > 0).
+  // NOTE on P0.4: the app intentionally supports MULTI-vendor carts —
+  // cartSummary groups by vendor, checkout creates one order per vendor,
+  // delivery fees are per-vendor (cartSummary.service.ts, cartController
+  // checkoutCart, deliveryFee.service.ts). The stale `Cart` model comment
+  // ("Ensure all items are from same vendor") is not enforced anywhere, so
+  // carts below keep sampling across vendors, with totals derived from the
+  // actual items (which is the real invariant).
+  const vendorLiveById = new Map(vendors.map((v) => [v.id, v.isLive]));
+  const orderableProducts = savedProducts.filter((product) =>
+    isSeedProductOrderable(
+      {
+        archived: product.archived,
+        trackInventory: product.trackInventory,
+        stock: product.stock,
+      },
+      vendorLiveById.get(product.vendorId) ?? false,
+    ),
   );
+  const liveProducts = orderableProducts;
+
+  // P0.5 — product reviews are seeded AFTER orders (see below) so that
+  // verifiedPurchase=true is only set when the reviewer really bought the
+  // product. Vendor reviews have no purchase requirement.
   const vendorReviews: Prisma.VendorReviewCreateManyInput[] = [];
   for (const vendor of vendors)
     for (
@@ -807,11 +919,12 @@ async function seedDatabase() {
       index++
     ) {
       const customer = pick(customers);
+      // P1 — realistic spread: include 1-2 star ratings, not just 3-5.
       if (customer)
         vendorReviews.push({
           vendorId: vendor.id,
           customerId: customer.id,
-          rating: faker.number.int({ min: 3, max: 5 }),
+          rating: faker.number.int({ min: 1, max: 5 }),
           comment: faker.lorem.sentence(),
         });
     }
@@ -840,8 +953,8 @@ async function seedDatabase() {
     const items: Prisma.CartItemCreateManyInput[] = cartProducts.map(
       (product) => {
         const quantity = faker.number.int({ min: 1, max: 3 });
-        const subtotal = product.price * quantity;
-        total += subtotal;
+        const subtotal = round2(product.price * quantity);
+        total = round2(total + subtotal);
         return {
           cartId: cart.id,
           productId: product.id,
@@ -863,14 +976,33 @@ async function seedDatabase() {
   const customerAddresses = await prisma.address.findMany({
     where: { userId: { in: customers.map((customer) => customer.id) } },
   });
-  const orders: Prisma.OrderCreateManyInput[] = [];
-  const orderDates = new Map<string, Date>();
+  // P0.1/P0.2/P0.3 — single-scenario order generation.
+  // The SAME chosen products/quantities feed Order.basePrice/totalPrice,
+  // OrderItems, and Payments; the SAME paymentStartedAt/paidAt feed
+  // Order.paidAt and Payment.completedAt; OrderItem timestamps derive from
+  // the order timeline (never wall-clock now() for historical orders).
+  const liveVendors = vendors.filter((v) => v.isLive);
+  const orderVendorPool = liveVendors.length ? liveVendors : vendors;
+  type BulkScenario = {
+    orderId: string;
+    customerId: string;
+    vendorId: string;
+    addressId?: string;
+    orderDate: Date;
+    paymentStartedAt: Date;
+    paidAt: Date | null;
+    isFutureOrder: boolean;
+    items: { productId: string; quantity: number; unitPrice: number; subtotal: number }[];
+    basePrice: number;
+    totalPrice: number;
+  };
+  const bulkScenarios: BulkScenario[] = [];
   const orderCount = randomRange(SEED_CONFIG.orders);
   for (let index = 0; index < orderCount; index++) {
     const customer = pick(customers);
-    const vendor = pick(vendors);
+    const vendor = pick(orderVendorPool);
     if (!customer || !vendor) break;
-    const vendorProducts = savedProducts.filter(
+    const vendorProducts = orderableProducts.filter(
       (product) => product.vendorId === vendor.id,
     );
     if (!vendorProducts.length) continue;
@@ -878,101 +1010,225 @@ async function seedDatabase() {
       vendorProducts,
       randomRange(SEED_CONFIG.orderItemsPerOrder),
     );
-    const basePrice = chosen.reduce((sum, product) => sum + product.price, 0);
+    if (!chosen.length) continue;
+    const items = chosen.map((product) => {
+      const quantity = faker.number.int({ min: 1, max: 3 });
+      const unitPrice = product.price;
+      return {
+        productId: product.id,
+        quantity,
+        unitPrice,
+        subtotal: round2(unitPrice * quantity),
+      };
+    });
+    const basePrice = round2(items.reduce((sum, i) => sum + i.subtotal, 0));
     const orderDate = randomSeedDate();
     const orderId = faker.string.uuid();
     const paymentStartedAt = addMilliseconds(
       orderDate,
       faker.number.int({ min: 1_000, max: 30_000 }),
     );
-    const paidAt = addMilliseconds(
-      paymentStartedAt,
-      faker.number.int({ min: 1_000, max: 60_000 }),
-    );
     const isFutureOrder = orderDate.getTime() > Date.now();
+    const paidAt = isFutureOrder
+      ? null
+      : addMilliseconds(
+          paymentStartedAt,
+          faker.number.int({ min: 1_000, max: 60_000 }),
+        );
     const address = pick(
       customerAddresses.filter((item) => item.userId === customer.id),
     );
-    orderDates.set(orderId, orderDate);
-    orders.push({
-      id: orderId,
+    bulkScenarios.push({
+      orderId,
       customerId: customer.id,
       vendorId: vendor.id,
       addressId: address?.id,
-      basePrice,
-      extraCharge: 250,
-      deliveryFee: 500,
-      totalPrice: basePrice + 750,
-      customerApproval: true,
-      status: isFutureOrder ? OrderStatus.PENDING : OrderStatus.COMPLETED,
-      paymentStatus: isFutureOrder
-        ? PaymentStatus.PENDING
-        : PaymentStatus.SUCCESS,
-      createdAt: orderDate,
-      updatedAt: orderDate,
-      paidAt: isFutureOrder ? undefined : paidAt,
+      orderDate,
       paymentStartedAt,
-      protectedUntil: addMilliseconds(orderDate, 15 * 60000),
-      paymentGraceMinutes: 15,
+      paidAt,
+      isFutureOrder,
+      items,
+      basePrice,
+      totalPrice: round2(basePrice + 250 + 500),
     });
   }
+  const orders: Prisma.OrderCreateManyInput[] = bulkScenarios.map((s) => ({
+    id: s.orderId,
+    customerId: s.customerId,
+    vendorId: s.vendorId,
+    addressId: s.addressId,
+    basePrice: s.basePrice,
+    extraCharge: 250,
+    deliveryFee: 500,
+    totalPrice: s.totalPrice,
+    customerApproval: true,
+    status: s.isFutureOrder ? OrderStatus.PENDING : OrderStatus.COMPLETED,
+    paymentStatus: s.isFutureOrder ? PaymentStatus.PENDING : PaymentStatus.SUCCESS,
+    createdAt: s.orderDate,
+    updatedAt: s.orderDate,
+    paidAt: s.paidAt ?? undefined,
+    paymentStartedAt: s.paymentStartedAt,
+    protectedUntil: addMilliseconds(s.orderDate, 15 * 60000),
+    paymentGraceMinutes: 15,
+  }));
   await createMany((data) => prisma.order.createMany({ data }), orders);
   const savedOrders = await prisma.order.findMany({
     orderBy: { createdAt: "desc" },
     take: orders.length,
   });
+  const scenarioByOrderId = new Map(bulkScenarios.map((s) => [s.orderId, s]));
   const orderItems: Prisma.OrderItemCreateManyInput[] = [];
   const payments: Prisma.PaymentCreateManyInput[] = [];
-  for (const order of savedOrders) {
-    const orderDate = orderDates.get(order.id) || order.createdAt;
-    const paymentStartedAt = addMilliseconds(
-      orderDate,
-      faker.number.int({ min: 1_000, max: 30_000 }),
-    );
-    const paymentCompletedAt =
-      order.status === OrderStatus.COMPLETED
-        ? addMilliseconds(
-            paymentStartedAt,
-            faker.number.int({ min: 1_000, max: 60_000 }),
-          )
-        : null;
-    const productsForOrder = take(
-      savedProducts.filter((product) => product.vendorId === order.vendorId),
-      randomRange(SEED_CONFIG.orderItemsPerOrder),
-    );
-    for (const product of productsForOrder)
+  for (const s of bulkScenarios) {
+    for (const item of s.items)
       orderItems.push({
-        orderId: order.id,
-        productId: product.id,
-        quantity: 1,
-        unitPrice: product.price,
-        subtotal: product.price,
+        orderId: s.orderId,
+        productId: item.productId,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        subtotal: item.subtotal,
+        createdAt: s.orderDate,
+        updatedAt: s.orderDate,
       });
     payments.push({
-      userId: order.customerId,
-      orderId: order.id,
-      amount: Math.round(order.totalPrice * 100),
+      userId: s.customerId,
+      orderId: s.orderId,
+      amount: Math.round(s.totalPrice * 100),
       reference: `SEED-${faker.string.alphanumeric(16).toUpperCase()}`,
-      status:
-        order.status === OrderStatus.COMPLETED
-          ? PaymentStatus.SUCCESS
-          : PaymentStatus.PENDING,
-      startedAt: paymentStartedAt,
-      completedAt: paymentCompletedAt,
-      expiresAt: addMilliseconds(orderDate, DAY_MS),
+      status: s.isFutureOrder ? PaymentStatus.PENDING : PaymentStatus.SUCCESS,
+      startedAt: s.paymentStartedAt,
+      completedAt: s.paidAt,
+      expiresAt: addMilliseconds(s.orderDate, DAY_MS),
       channel: "card",
       ipAddress: "127.0.0.1",
       userAgent: "seed-script",
-      createdAt: paymentStartedAt,
-      updatedAt: paymentCompletedAt || paymentStartedAt,
+      createdAt: s.paymentStartedAt,
+      updatedAt: s.paidAt ?? s.paymentStartedAt,
     });
   }
   await createMany((data) => prisma.orderItem.createMany({ data }), orderItems);
   await createMany((data) => prisma.payment.createMany({ data }), payments);
+  const orderDates = new Map(bulkScenarios.map((s) => [s.orderId, s.orderDate]));
+  void scenarioByOrderId;
   setProgress(
     65,
     `Created ${savedOrders.length} orders, ${orderItems.length} order items and ${payments.length} payments`,
   );
+
+  // P0.5 — verified reviews ONLY from real purchases.
+  // Build customer->products and product->customers maps from the seeded
+  // OrderItems (which are now guaranteed consistent with Order headers).
+  const purchasedProductsByCustomer = new Map<string, Set<string>>();
+  const purchasingCustomersByProduct = new Map<string, string[]>();
+  {
+    const orderCustomerById = new Map(savedOrders.map((o) => [o.id, o.customerId]));
+    for (const item of orderItems) {
+      const customerId = orderCustomerById.get(item.orderId);
+      if (!customerId) continue;
+      let set = purchasedProductsByCustomer.get(customerId);
+      if (!set) {
+        set = new Set();
+        purchasedProductsByCustomer.set(customerId, set);
+      }
+      set.add(item.productId);
+      const list = purchasingCustomersByProduct.get(item.productId) ?? [];
+      if (!list.includes(customerId)) {
+        list.push(customerId);
+        purchasingCustomersByProduct.set(item.productId, list);
+      }
+    }
+  }
+  const productReviews: Prisma.ProductReviewCreateManyInput[] = [];
+  for (const product of savedProducts) {
+    const buyers = purchasingCustomersByProduct.get(product.id) ?? [];
+    for (let index = 0; index < randomRange(SEED_CONFIG.productReviewsPerProduct); index++) {
+      // ~70% of reviews come from real buyers (verified), the rest are
+      // explicitly non-verified browse reviews. Ratings now span 1-5 (P1).
+      const useVerified = buyers.length > 0 && faker.datatype.boolean({ probability: 0.7 });
+      if (useVerified) {
+        const customerId = faker.helpers.arrayElement(buyers);
+        productReviews.push({
+          productId: product.id,
+          customerId,
+          rating: faker.number.int({ min: 1, max: 5 }),
+          comment: faker.lorem.sentence(),
+          images: [],
+          verifiedPurchase: true,
+        });
+      } else {
+        const customer = pick(customers);
+        if (!customer) continue;
+        const actuallyBought = purchasedProductsByCustomer.get(customer.id)?.has(product.id) ?? false;
+        productReviews.push({
+          productId: product.id,
+          customerId: customer.id,
+          rating: faker.number.int({ min: 1, max: 5 }),
+          comment: faker.lorem.sentence(),
+          images: [],
+          verifiedPurchase: actuallyBought,
+        });
+      }
+    }
+  }
+  await createMany(
+    (data) => prisma.productReview.createMany({ data }),
+    productReviews,
+  );
+
+  // P0.7 — denormalized product aggregates, canonical logic mirrored from
+  // src/jobs/workers jobs/updatePopularityScore.ts (Phase 1 + log-scaled
+  // Phase 2). Review aggregates come from the just-seeded reviews,
+  // order counts from the just-seeded order items.
+  {
+    const ratingSum = new Map<string, number>();
+    const ratingCount = new Map<string, number>();
+    for (const r of productReviews) {
+      ratingSum.set(r.productId, (ratingSum.get(r.productId) ?? 0) + r.rating);
+      ratingCount.set(r.productId, (ratingCount.get(r.productId) ?? 0) + 1);
+    }
+    const orderCountByProduct = new Map<string, number>();
+    for (const item of orderItems)
+      orderCountByProduct.set(item.productId, (orderCountByProduct.get(item.productId) ?? 0) + 1);
+    const nowMs = Date.now();
+    const scores = new Map<string, number>();
+    let maxScore = 0;
+    for (const p of savedProducts) {
+      const count = ratingCount.get(p.id) ?? 0;
+      const avg = count ? (ratingSum.get(p.id) ?? 0) / count : 0;
+      const orderCount = orderCountByProduct.get(p.id) ?? 0;
+      const totalViews = p.totalViews ?? 0;
+      const createdMs = new Date(p.createdAt).getTime();
+      const daysSinceCreation = Number.isFinite(createdMs) ? Math.max(0, (nowMs - createdMs) / DAY_MS) : 0;
+      const score =
+        totalViews * 0.1 + orderCount * 2 + avg * count * 5 + Math.max(0, 30 - daysSinceCreation);
+      scores.set(p.id, score);
+      if (score > maxScore) maxScore = score;
+    }
+    const denom = maxScore > 0 ? Math.log(maxScore + 1) : 0;
+    for (const p of savedProducts) {
+      const count = ratingCount.get(p.id) ?? 0;
+      const avg = count ? (ratingSum.get(p.id) ?? 0) / count : 0;
+      const score = scores.get(p.id) ?? 0;
+      const percent =
+        maxScore > 0 && denom > 0
+          ? Math.min(99.9, Number(((Math.log(score + 1) / denom) * 100).toFixed(2)))
+          : 0;
+      await prisma.product.update({
+        where: { id: p.id },
+        data: {
+          averageRating: round2(avg),
+          reviewCount: count,
+          popularityScore: round2(score),
+          popularityPercent: percent,
+          popularityUpdatedAt: new Date(),
+        },
+      });
+      p.averageRating = round2(avg);
+      p.reviewCount = count;
+      p.popularityScore = round2(score);
+      p.popularityPercent = percent;
+    }
+  }
 
   const deliveryProfilesSaved = await prisma.deliveryPerson.findMany();
   const assignments: Prisma.DeliveryAssignmentCreateManyInput[] = [];
@@ -981,19 +1237,225 @@ async function seedDatabase() {
     randomRange(SEED_CONFIG.assignments),
   )) {
     const deliveryPerson = pick(deliveryProfilesSaved);
-    if (deliveryPerson)
+    if (deliveryPerson) {
+      // Coherent timeline: assigned -> accepted -> started -> completed.
+      const acceptedAt = addMilliseconds(order.createdAt, faker.number.int({ min: 30_000, max: 120_000 }));
+      const startedAt = addMilliseconds(acceptedAt, faker.number.int({ min: 120_000, max: 300_000 }));
+      const completedAt = addMilliseconds(startedAt, faker.number.int({ min: 600_000, max: 1_800_000 }));
       assignments.push({
         orderId: order.id,
         deliveryPersonId: deliveryPerson.id,
         status: DeliveryStatus.DELIVERED,
         assignedAt: order.createdAt,
-        completedAt: order.createdAt,
+        acceptedAt,
+        startedAt,
+        completedAt,
       });
+    }
   }
   await createMany(
     (data) => prisma.deliveryAssignment.createMany({ data }),
     assignments,
   );
+
+  // P1 — small coherent showcase for missing Order/Payment/Delivery states.
+  // Each scenario reuses the single-scenario pattern (header/items/payment
+  // share one timeline). Volumes stay small (~14 orders) vs bulk 5-200.
+  const showcaseOrderIds: string[] = [];
+  {
+    type ShowcaseSpec = {
+      key: string;
+      orderStatus: OrderStatus;
+      paymentStatus: PaymentStatus;
+      paymentState: "pending" | "initiated" | "success" | "failed" | "expired" | "late" | "mismatch" | "refunded";
+      cancellationReason?: string;
+      assign?: { status: DeliveryStatus; extra?: "declined-history" | "cancelled-history" };
+    };
+    const specs: ShowcaseSpec[] = [
+      { key: "waiting-vendor", orderStatus: OrderStatus.WAITING_VENDOR_CONFIRMATION, paymentStatus: PaymentStatus.PENDING, paymentState: "pending" },
+      { key: "waiting-customer", orderStatus: OrderStatus.WAITING_CUSTOMER_APPROVAL, paymentStatus: PaymentStatus.PENDING, paymentState: "pending" },
+      { key: "awaiting-payment", orderStatus: OrderStatus.AWAITING_PAYMENT, paymentStatus: PaymentStatus.INITIATED, paymentState: "initiated" },
+      { key: "payment-confirmed", orderStatus: OrderStatus.PAYMENT_CONFIRMED, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.PICKED_UP } },
+      { key: "cooking", orderStatus: OrderStatus.COOKING, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.ASSIGNED, extra: "cancelled-history" } },
+      { key: "ready-pickup", orderStatus: OrderStatus.READY_FOR_PICKUP, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.ACCEPTED } },
+      { key: "out-delivery", orderStatus: OrderStatus.OUT_FOR_DELIVERY, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.EN_ROUTE, extra: "declined-history" } },
+      { key: "cancelled", orderStatus: OrderStatus.CANCELLED, paymentStatus: PaymentStatus.FAILED, paymentState: "failed", cancellationReason: "USER_CANCELLED" },
+      { key: "failed-delivery", orderStatus: OrderStatus.FAILED_DELIVERY, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.FAILED } },
+      { key: "payment-expired", orderStatus: OrderStatus.PAYMENT_EXPIRED, paymentStatus: PaymentStatus.EXPIRED, paymentState: "expired", cancellationReason: "PAYMENT_EXPIRED" },
+      { key: "cancelled-unpaid", orderStatus: OrderStatus.CANCELLED_UNPAID, paymentStatus: PaymentStatus.EXPIRED, paymentState: "expired", cancellationReason: "USER_CANCELLED" },
+      { key: "late-payment", orderStatus: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.LATE_PAYMENT, paymentState: "late" },
+      { key: "amount-mismatch", orderStatus: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.AMOUNT_MISMATCH, paymentState: "mismatch" },
+      { key: "refunded", orderStatus: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.REFUNDED, paymentState: "refunded", assign: { status: DeliveryStatus.RETURNED } },
+    ];
+    const showcaseOrders: Prisma.OrderCreateManyInput[] = [];
+    const showcaseItems: Prisma.OrderItemCreateManyInput[] = [];
+    const showcasePayments: Prisma.PaymentCreateManyInput[] = [];
+    const showcaseAssignments: Prisma.DeliveryAssignmentCreateManyInput[] = [];
+    for (const spec of specs) {
+      const customer = pick(customers);
+      const vendor = pick(orderVendorPool);
+      if (!customer || !vendor) continue;
+      const vendorProducts = orderableProducts.filter((p) => p.vendorId === vendor.id);
+      if (!vendorProducts.length) continue;
+      const chosen = take(vendorProducts, faker.number.int({ min: 1, max: 2 }));
+      if (!chosen.length) continue;
+      const items = chosen.map((product) => {
+        const quantity = faker.number.int({ min: 1, max: 2 });
+        return {
+          productId: product.id,
+          quantity,
+          unitPrice: product.price,
+          subtotal: round2(product.price * quantity),
+        };
+      });
+      const basePrice = round2(items.reduce((s, i) => s + i.subtotal, 0));
+      const totalPrice = round2(basePrice + 250 + 500);
+      const orderDate = randomSeedDate();
+      const paymentStartedAt = addMilliseconds(orderDate, faker.number.int({ min: 1_000, max: 30_000 }));
+      const protectedUntil = addMilliseconds(orderDate, 15 * 60000);
+      let completedAt: Date | null = null;
+      let expiresAt = addMilliseconds(orderDate, DAY_MS);
+      let amount = Math.round(totalPrice * 100);
+      let refundedAmount = 0;
+      if (spec.paymentState === "success" || spec.paymentState === "late" || spec.paymentState === "refunded") {
+        completedAt =
+          spec.paymentState === "late"
+            ? addMilliseconds(protectedUntil, 5 * 60000 + faker.number.int({ min: 0, max: 300_000 }))
+            : addMilliseconds(paymentStartedAt, faker.number.int({ min: 1_000, max: 60_000 }));
+        if (spec.paymentState === "refunded") refundedAmount = amount;
+      } else if (spec.paymentState === "mismatch") {
+        completedAt = addMilliseconds(paymentStartedAt, faker.number.int({ min: 1_000, max: 60_000 }));
+        amount = Math.round(totalPrice * 100) + 1000; // intentional +₦10 mismatch case
+      } else if (spec.paymentState === "initiated") {
+        expiresAt = addMilliseconds(paymentStartedAt, 30 * 60000);
+      }
+      const orderId = faker.string.uuid();
+      const address = pick(customerAddresses.filter((a) => a.userId === customer.id));
+      const needsCancelStamp =
+        spec.orderStatus === OrderStatus.CANCELLED ||
+        spec.orderStatus === OrderStatus.CANCELLED_UNPAID ||
+        spec.orderStatus === OrderStatus.PAYMENT_EXPIRED;
+      showcaseOrders.push({
+        id: orderId,
+        customerId: customer.id,
+        vendorId: vendor.id,
+        addressId: address?.id,
+        basePrice,
+        extraCharge: 250,
+        deliveryFee: 500,
+        totalPrice,
+        customerApproval:
+          spec.orderStatus === OrderStatus.WAITING_CUSTOMER_APPROVAL ? false : true,
+        status: spec.orderStatus,
+        paymentStatus: spec.paymentStatus,
+        createdAt: orderDate,
+        updatedAt: completedAt ?? orderDate,
+        paidAt: completedAt ?? undefined,
+        paymentStartedAt,
+        protectedUntil,
+        paymentGraceMinutes: 15,
+        cancelledAt: needsCancelStamp ? (completedAt ?? addMilliseconds(orderDate, 20 * 60000)) : undefined,
+        cancellationReason: spec.cancellationReason,
+      });
+      showcaseOrderIds.push(orderId);
+      orderDates.set(orderId, orderDate);
+      for (const item of items)
+        showcaseItems.push({
+          orderId,
+          productId: item.productId,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          subtotal: item.subtotal,
+          createdAt: orderDate,
+          updatedAt: orderDate,
+        });
+      showcasePayments.push({
+        userId: customer.id,
+        orderId,
+        amount,
+        reference: `SEED-${spec.key.toUpperCase()}-${faker.string.alphanumeric(8).toUpperCase()}`,
+        status: spec.paymentStatus,
+        startedAt: paymentStartedAt,
+        completedAt,
+        expiresAt,
+        channel: "card",
+        ipAddress: "127.0.0.1",
+        userAgent: "seed-script",
+        refundedAmount,
+        createdAt: paymentStartedAt,
+        updatedAt: completedAt ?? paymentStartedAt,
+      });
+      const driver = pick(deliveryProfilesSaved);
+      if (driver && spec.assign) {
+        const assignedAt = addMilliseconds(orderDate, faker.number.int({ min: 60_000, max: 300_000 }));
+        const buildTimeline = (status: DeliveryStatus) => {
+          if (status === DeliveryStatus.ASSIGNED) return { assignedAt } as const;
+          if (status === DeliveryStatus.ACCEPTED)
+            return {
+              assignedAt,
+              acceptedAt: addMilliseconds(assignedAt, 60_000),
+            } as const;
+          if (status === DeliveryStatus.PICKED_UP)
+            return {
+              assignedAt,
+              acceptedAt: addMilliseconds(assignedAt, 60_000),
+              startedAt: addMilliseconds(assignedAt, 180_000),
+            } as const;
+          const acceptedAt = addMilliseconds(assignedAt, 60_000);
+          const startedAt = addMilliseconds(acceptedAt, 180_000);
+          const completedAt2 = addMilliseconds(startedAt, 900_000);
+          if (status === DeliveryStatus.DECLINED)
+            return {
+              assignedAt,
+              declinedAt: addMilliseconds(assignedAt, 45_000),
+            } as const;
+          if (status === DeliveryStatus.CANCELLED)
+            return {
+              assignedAt,
+              declinedAt: addMilliseconds(assignedAt, 120_000),
+            } as const;
+          return { assignedAt, acceptedAt, startedAt, completedAt: completedAt2 } as const;
+        };
+        // History case: a first driver declined/cancelled, then reassigned.
+        if (spec.assign.extra === "declined-history") {
+          const first = pick(deliveryProfilesSaved) ?? driver;
+          showcaseAssignments.push({
+            orderId,
+            deliveryPersonId: first.id,
+            status: DeliveryStatus.DECLINED,
+            ...buildTimeline(DeliveryStatus.DECLINED),
+          });
+        }
+        if (spec.assign.extra === "cancelled-history") {
+          const first = pick(deliveryProfilesSaved) ?? driver;
+          showcaseAssignments.push({
+            orderId,
+            deliveryPersonId: first.id,
+            status: DeliveryStatus.CANCELLED,
+            ...buildTimeline(DeliveryStatus.CANCELLED),
+          });
+        }
+        showcaseAssignments.push({
+          orderId,
+          deliveryPersonId: driver.id,
+          status: spec.assign.status,
+          ...buildTimeline(spec.assign.status),
+        });
+      }
+    }
+    await createMany((data) => prisma.order.createMany({ data }), showcaseOrders);
+    await createMany((data) => prisma.orderItem.createMany({ data }), showcaseItems);
+    await createMany((data) => prisma.payment.createMany({ data }), showcasePayments);
+    await createMany(
+      (data) => prisma.deliveryAssignment.createMany({ data }),
+      showcaseAssignments,
+    );
+    // Make late/mismatch/refunded showcase payments discoverable for the
+    // second audit without rescanning the whole table.
+    console.log(
+      `Showcase: ${showcaseOrders.length} orders, ${showcasePayments.length} payments, ${showcaseAssignments.length} assignments`,
+    );
+  }
 
   const notifications: Prisma.NotificationCreateManyInput[] = [];
   for (let index = 0; index < randomRange(SEED_CONFIG.notifications); index++) {
@@ -1038,6 +1500,144 @@ async function seedDatabase() {
       });
   }
   await createMany((data) => prisma.promotion.createMany({ data }), promotions);
+
+  // P1 — representative promotion types/scopes + real usages.
+  // Uses prisma.promotion.create (not createMany) where the M-N `products`
+  // relation is needed. Usages reference real users/orders and bump
+  // usedCount so counts stay truthful.
+  const showcasePromoIds: string[] = [];
+  {
+    const promoVendor = pick(liveVendors);
+    const scopedProduct = pick(orderableProducts);
+    const now = new Date();
+    const weekAgo = new Date(now.getTime() - 7 * DAY_MS);
+    const monthOut = new Date(now.getTime() + 30 * DAY_MS);
+    const yesterday = new Date(now.getTime() - DAY_MS);
+    if (promoVendor) {
+      const fixed = await prisma.promotion.create({
+        data: {
+          vendorId: promoVendor.id,
+          code: `SEED_FIXED_${faker.string.alphanumeric(5).toUpperCase()}`,
+          name: "Seed fixed-amount promo",
+          description: "₦500 off vendor-wide (seed showcase)",
+          type: DiscountType.FIXED,
+          value: 500,
+          scope: PromotionScope.VENDOR_WIDE,
+          isActive: true,
+          startsAt: weekAgo,
+          expiresAt: monthOut,
+          usageLimit: 100,
+          maxUsesPerUser: 2,
+          minOrderAmount: 2000,
+        },
+      });
+      showcasePromoIds.push(fixed.id);
+      const auto = await prisma.promotion.create({
+        data: {
+          vendorId: promoVendor.id,
+          code: null,
+          name: "Seed automatic 15% off",
+          description: "Automatic vendor discount, no code required",
+          type: DiscountType.PERCENTAGE,
+          value: 15,
+          maxDiscount: 1500,
+          scope: PromotionScope.VENDOR_WIDE,
+          isActive: true,
+          startsAt: weekAgo,
+          expiresAt: monthOut,
+          maxUsesPerUser: 1,
+        },
+      });
+      showcasePromoIds.push(auto.id);
+      if (scopedProduct) {
+        // NOTE: schema.prisma declares the Promotion<->Product link as an
+        // implicit M-N (client expects `_PromotionProducts`) but migration
+        // 20260906000000_promotion_scope created an explicit
+        // `PromotionProducts(promotionId, productId)` table. prisma schema /
+        // migrations must NOT be changed in this pass, so the link is
+        // inserted with raw SQL into the real table instead of
+        // `products:{connect}` (which would require `_PromotionProducts`).
+        const single = await prisma.promotion.create({
+          data: {
+            vendorId: scopedProduct.vendorId,
+            code: `SEED_SINGLE_${faker.string.alphanumeric(5).toUpperCase()}`,
+            name: "Seed single-product promo",
+            description: "25% off one dish (seed showcase)",
+            type: DiscountType.PERCENTAGE,
+            value: 25,
+            maxDiscount: 1000,
+            scope: PromotionScope.SINGLE_PRODUCT,
+            isActive: true,
+            startsAt: weekAgo,
+            expiresAt: monthOut,
+            maxUsesPerUser: 1,
+          },
+        });
+        await prisma.$executeRaw`
+          INSERT INTO "PromotionProducts" ("promotionId", "productId")
+          VALUES (${single.id}, ${scopedProduct.id})
+          ON CONFLICT DO NOTHING
+        `;
+        showcasePromoIds.push(single.id);
+      }
+      // Expired-but-active-flag promo: getActivePromotions filters by
+      // expiresAt, so this exercises the expired path without inventing a
+      // new status.
+      const expired = await prisma.promotion.create({
+        data: {
+          vendorId: null,
+          code: `SEED_DLV_${faker.string.alphanumeric(5).toUpperCase()}`,
+          name: "Seed expired delivery promo",
+          description: "Platform delivery promo, now expired",
+          type: DiscountType.DELIVERY,
+          value: 100,
+          scope: PromotionScope.VENDOR_WIDE,
+          isActive: true,
+          startsAt: weekAgo,
+          expiresAt: yesterday,
+          maxUsesPerUser: 1,
+        },
+      });
+      showcasePromoIds.push(expired.id);
+
+      // Usages tied to real COMPLETED bulk orders of the same vendor.
+      const vendorCompletedOrders = savedOrders.filter(
+        (o) => o.vendorId === promoVendor.id && o.status === OrderStatus.COMPLETED,
+      );
+      const usageTargets = vendorCompletedOrders.slice(0, 2);
+      const fixedPromo = await prisma.promotion.findFirst({
+        where: { id: { in: showcasePromoIds }, type: DiscountType.FIXED },
+      });
+      const singlePromo = await prisma.promotion.findFirst({
+        where: { id: { in: showcasePromoIds }, scope: PromotionScope.SINGLE_PRODUCT },
+      });
+      const usageRows: Prisma.PromotionUsageCreateManyInput[] = [];
+      if (fixedPromo && usageTargets[0])
+        usageRows.push({
+          promotionId: fixedPromo.id,
+          userId: usageTargets[0].customerId,
+          orderIds: [usageTargets[0].id],
+          promoCode: fixedPromo.code!,
+          discount: 500,
+        });
+      if (singlePromo && usageTargets[1])
+        usageRows.push({
+          promotionId: singlePromo.id,
+          userId: usageTargets[1].customerId,
+          orderIds: [usageTargets[1].id],
+          promoCode: singlePromo.code!,
+          discount: 250,
+        });
+      if (usageRows.length) {
+        await createMany((data) => prisma.promotionUsage.createMany({ data }), usageRows);
+        for (const row of usageRows)
+          await prisma.promotion.update({
+            where: { id: row.promotionId },
+            data: { usedCount: { increment: 1 } },
+          });
+      }
+    }
+  }
   const supportTickets: Prisma.VendorSupportTicketCreateManyInput[] = [];
   for (const vendor of vendors)
     for (
@@ -1114,27 +1714,152 @@ async function seedDatabase() {
     specialOffers,
   );
 
-  const referralRewards: Prisma.ReferralRewardCreateManyInput[] = [];
-  const referralRewardCount = randomRange(SEED_CONFIG.referralRewards);
-  for (
-    let index = 0;
-    index < referralRewardCount && customers.length > 1;
-    index++
-  ) {
-    const referrer = customers[index % customers.length];
-    const referred = customers[(index + 1) % customers.length];
-    if (referrer.id !== referred.id)
-      referralRewards.push({
-        referrerId: referrer.id,
-        referredId: referred.id,
-        amount: 500,
-        status: "PENDING",
+  // P1 — one coherent special-order journey: PENDING request -> ACCEPTED
+  // offer (+ REJECTED sibling) -> real Order via specialOrderOfferId.
+  // Mirrors orderController.acceptSpecialOrderOffer (AWAITING_PAYMENT order,
+  // single line, basePrice=offer.price). Quantity is 1 so
+  // subtotal (=offer.price) stays consistent with the app's own math.
+  {
+    const customer = pick(customers);
+    const product = pick(orderableProducts);
+    if (customer && product) {
+      const address = pick(customerAddresses.filter((a) => a.userId === customer.id));
+      const request = await prisma.specialOrderRequest.create({
+        data: {
+          customerId: customer.id,
+          vendorId: product.vendorId,
+          productId: product.id,
+          quantity: 1,
+          message: "Seed showcase: jollof for 20 guests, please quote.",
+          status: SpecialOrderRequestStatus.ACCEPTED,
+        },
       });
+      const acceptedOffer = await prisma.specialOrderOffer.create({
+        data: {
+          requestId: request.id,
+          vendorId: product.vendorId,
+          price: round2(product.price * 18),
+          message: "We can cater this for you.",
+          status: SpecialOrderOfferStatus.ACCEPTED,
+        },
+      });
+      await prisma.specialOrderOffer.create({
+        data: {
+          requestId: request.id,
+          vendorId: product.vendorId,
+          price: round2(product.price * 22),
+          message: "Alternative quote.",
+          status: SpecialOrderOfferStatus.REJECTED,
+        },
+      });
+      await prisma.specialOrderRequest.update({
+        where: { id: request.id },
+        data: { status: SpecialOrderRequestStatus.ACCEPTED },
+      });
+      const orderDate = randomSeedDate();
+      const offerOrderId = faker.string.uuid();
+      await prisma.order.create({
+        data: {
+          id: offerOrderId,
+          customerId: customer.id,
+          vendorId: product.vendorId,
+          addressId: address?.id,
+          basePrice: acceptedOffer.price,
+          extraCharge: 250,
+          deliveryFee: 500,
+          totalPrice: round2(acceptedOffer.price + 750),
+          status: OrderStatus.AWAITING_PAYMENT,
+          paymentStatus: PaymentStatus.PENDING,
+          specialOrderOfferId: acceptedOffer.id,
+          createdAt: orderDate,
+          updatedAt: orderDate,
+          paymentStartedAt: addMilliseconds(orderDate, 5_000),
+          protectedUntil: addMilliseconds(orderDate, 15 * 60000),
+          paymentGraceMinutes: 15,
+          items: {
+            create: [
+              {
+                productId: product.id,
+                quantity: 1,
+                unitPrice: acceptedOffer.price,
+                subtotal: acceptedOffer.price,
+                createdAt: orderDate,
+                updatedAt: orderDate,
+              },
+            ],
+          },
+        },
+      });
+      orderDates.set(offerOrderId, orderDate);
+    }
   }
-  await createMany(
-    (data) => prisma.referralReward.createMany({ data, skipDuplicates: true }),
-    referralRewards,
-  );
+
+  // P0.6+P1 — connected referrals mirroring referralController:
+  // referralCode on referrer (app format), referredByUserId on invitee,
+  // ReferralReward.referrerId/referredId matching that edge, orderId (when
+  // set) = the referred user's own COMPLETED order (first one, per
+  // creditReferralRewardIfEligible). Small lifecycle sample: PENDING + one
+  // PAID + one CANCELLED (admin-settled states).
+  {
+    const rewardCount = randomRange(SEED_CONFIG.referralRewards);
+    const pairCount = Math.min(rewardCount + 2, Math.floor(customers.length / 2));
+    const usedReferralCodes = new Set<string>();
+    const pairs: { referrerId: string; referredId: string; orderId: string | null }[] = [];
+    const completedOrderByCustomer = new Map<string, string>();
+    for (const o of savedOrders)
+      if (o.status === OrderStatus.COMPLETED && !completedOrderByCustomer.has(o.customerId))
+        completedOrderByCustomer.set(o.customerId, o.id);
+    for (const showcaseId of showcaseOrderIds) {
+      // showcaseOrderIds are bulk-external; their customers are already in
+      // completedOrderByCustomer if COMPLETED, so nothing extra needed here.
+      void showcaseId;
+    }
+    for (let i = 0; i < pairCount; i++) {
+      const referrer = customers[i * 2];
+      const referred = customers[i * 2 + 1];
+      if (!referrer || !referred || referrer.id === referred.id) continue;
+      // Referrer code (unique, app format).
+      let code = seedReferralCode(referrer.name);
+      let guard = 0;
+      while (usedReferralCodes.has(code) && guard++ < 5)
+        code = seedReferralCode(`${referrer.name}${guard}`);
+      usedReferralCodes.add(code);
+      try {
+        await prisma.user.update({ where: { id: referrer.id }, data: { referralCode: code } });
+      } catch {
+        continue; // collision with pre-existing data: skip this pair
+      }
+      await prisma.user.update({
+        where: { id: referred.id },
+        data: { referredByUserId: referrer.id },
+      });
+      // Only the first `rewardCount` pairs earn a reward row (volumes
+      // preserved); extra pairs just exercise the referral edge.
+      if (pairs.length < rewardCount) {
+        pairs.push({
+          referrerId: referrer.id,
+          referredId: referred.id,
+          orderId: completedOrderByCustomer.get(referred.id) ?? null,
+        });
+      }
+    }
+    const referralRewards: Prisma.ReferralRewardCreateManyInput[] = pairs.map((p, idx) => ({
+      referrerId: p.referrerId,
+      referredId: p.referredId,
+      orderId: p.orderId,
+      amount: 500,
+      status:
+        idx === 0 && p.orderId
+          ? ReferralRewardStatus.PAID
+          : idx === 1
+            ? ReferralRewardStatus.CANCELLED
+            : ReferralRewardStatus.PENDING,
+    }));
+    await createMany(
+      (data) => prisma.referralReward.createMany({ data, skipDuplicates: true }),
+      referralRewards,
+    );
+  }
 
   const activities: Prisma.ActivityCreateManyInput[] = savedOrders
     .slice(0, 10)
