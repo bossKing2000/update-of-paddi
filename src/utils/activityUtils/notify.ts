@@ -1,4 +1,5 @@
 import prisma from "../../config/prismaClient";
+import { Role } from "@prisma/client";
 import { redisNotifications } from "../../lib/redis";
 import { scanKeys } from "../../lib/redisScan";
 import { getIO } from "../../socket";
@@ -88,7 +89,7 @@ export async function notifyRole(
   payload: Omit<NotifyOptions, "userId">
 ) {
   const recipients = await prisma.user.findMany({
-    where: { role },
+    where: { roles: { has: role as Role } },
     select: { id: true },
   });
 
