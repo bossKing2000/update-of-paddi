@@ -669,6 +669,7 @@ async function seedDatabase() {
         username: `${prefix}_${index}_${faker.string.alphanumeric(5).toLowerCase()}`,
         password: faker.internet.password(),
         role,
+        roles: [role],
         preferences: take(["JOLLOF", "SUYA", "OFADA", "AMALA", "BOLI", "EGUSI"], 2),
         authProviders: ["local"],
         bio: faker.lorem.sentence(),

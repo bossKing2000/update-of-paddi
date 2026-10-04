@@ -44,6 +44,7 @@ export const createUser = async (
       email,
       password: hashedPassword,
       role,
+      roles: [role],
       preferences,
       phoneNumber,
       avatarUrl,

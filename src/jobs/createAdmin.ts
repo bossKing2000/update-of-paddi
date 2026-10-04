@@ -42,7 +42,7 @@ async function createAdmin() {
 
     await prisma.user.update({
       where: { email },
-      data: { role: "ADMIN" },
+      data: { role: "ADMIN", roles: ["ADMIN"] },
     });
     logger.info({ email }, "Existing user promoted to ADMIN");
     process.exit(0);
@@ -56,6 +56,7 @@ async function createAdmin() {
       email,
       password: hashedPassword,
       role: "ADMIN",
+      roles: ["ADMIN"],
     },
   });
 

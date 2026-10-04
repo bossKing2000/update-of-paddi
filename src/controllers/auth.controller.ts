@@ -184,7 +184,11 @@ export const register = async (req: AuthRequest, res: Response) => {
       emailVerificationExpiresAt: emailExpires,
     };
     if (username) data.username = username;
-    if (role) data.role = Role[role as keyof typeof Role];
+    if (role) {
+      const assigned = Role[role as keyof typeof Role];
+      data.role = assigned;
+      data.roles = [assigned];
+    }
     if (phoneNumber) data.phoneNumber = phoneNumber;
     if (avatarUrl) data.avatarUrl = avatarUrl;
     if (brandName) data.brandName = brandName;
@@ -766,12 +770,13 @@ export const selectRole = async (req: AuthRequest, res: Response) => {
   try {
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) return res.status(404).json({ message: "User not found" });
-    if (user.role)
+    if ((user.roles && user.roles.length > 0) || user.role)
       return res.status(400).json({ message: "Role already selected" });
 
+    const assigned = Role[role as keyof typeof Role];
     const updated = await prisma.user.update({
       where: { id: userId },
-      data: { role: Role[role as keyof typeof Role] }, // ✅ Safe and typed
+      data: { role: assigned, roles: [assigned] }, // ✅ Safe and typed
     });
 
     // Same linked record as local DELIVERY registration creates — without
