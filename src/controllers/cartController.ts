@@ -429,7 +429,15 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
   // should always send a stable Idempotency-Key header per checkout
   // attempt (e.g. generated once when the user taps "Pay" and reused on
   // any automatic retry of that same tap).
-  const idempotencyKey = String(req.headers["idempotency-key"] || uuidv4());
+  const idempotencyKey = req.headers["idempotency-key"]
+    ? String(req.headers["idempotency-key"])
+    : null;
+
+  if (!idempotencyKey) {
+    return res.status(400).json({
+      message: "idempotency-key header is required"
+    });
+  }
 
   if (req.headers["idempotency-key"]) {
     const existingOrders = await prisma.order.findMany({ where: { idempotencyKey, customerId: userId } });

@@ -446,6 +446,16 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
   const updateData: Prisma.OrderUpdateInput = { status };
 
   if (status === OrderStatus.CANCELLED) {
+    if (
+      !isVendor &&
+      (currentStatus === OrderStatus.COOKING ||
+        currentStatus === OrderStatus.READY_FOR_PICKUP ||
+        currentStatus === OrderStatus.OUT_FOR_DELIVERY)
+    ) {
+      throw new ForbiddenError(
+        "Order cannot be cancelled after preparation has started",
+      );
+    }
     updateData.cancelledAt = new Date();
     updateData.cancellationReason = isVendor
       ? "VENDOR_REJECTED"
@@ -456,6 +466,28 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
     where: { id: orderId },
     data: updateData,
   });
+
+  if (status === OrderStatus.CANCELLED && order.paymentStatus === "SUCCESS") {
+    const payment = await prisma.payment.findFirst({
+      where: {
+        idempotencyKey: order.idempotencyKey,
+        status: "SUCCESS",
+      },
+    });
+
+    if (payment) {
+      await prisma.refundRequest
+        .create({
+          data: {
+            userId: order.customerId,
+            paymentRef: payment.reference,
+            reason: "Order cancelled after payment",
+            status: "PENDING",
+          },
+        })
+        .catch(() => {}); // best effort, do not fail cancellation
+    }
+  }
 
   // Cancelling an unpaid order releases its checkout-time stock
   // reservation back on sale. Paid orders never restore — portions are
