@@ -992,7 +992,10 @@ export const getPendingPayouts = async (_req: Request, res: Response) => {
       brandName: true,
       commissionRate: true,
       bankName: true,
+      bankCode: true,
       bankAccountNumber: true,
+      paystackRecipientCode: true,
+      vendorStatus: true,
     },
   });
 
@@ -1007,6 +1010,12 @@ export const getPendingPayouts = async (_req: Request, res: Response) => {
       ],
       vendor?.commissionRate ?? 0.15,
     );
+    // Phase 1C payout holds: skipped vendors stay listed (with a reason)
+    // but are never auto-paid; their orders keep payoutId null so nothing
+    // is lost. NOTE: a missing paystackRecipientCode alone does NOT hold —
+    // the code is created on first transfer, so holding on it would make
+    // first payouts impossible.
+    const hold = payoutHoldReason(vendor ?? null);
     return {
       vendorId: v.vendorId,
       vendorName: vendor?.brandName || vendor?.name,
@@ -1015,11 +1024,35 @@ export const getPendingPayouts = async (_req: Request, res: Response) => {
       commission,
       netAmount: netAvailable,
       bankOnFile: !!(vendor?.bankName && vendor?.bankAccountNumber),
+      transferVerified: !!vendor?.paystackRecipientCode,
+      held: hold !== null,
+      heldReason: hold,
     };
   });
 
   return sendSuccess(res, { pending }, "Pending payouts retrieved");
 };
+
+/**
+ * Phase 1C payout hold reasons. Returns null when the vendor may be paid.
+ * SUSPENDED vendors and vendors without bank details are skipped; their
+ * orders stay unpaid (payoutId null) until the hold clears.
+ */
+function payoutHoldReason(
+  vendor: {
+    vendorStatus?: string | null;
+    bankName?: string | null;
+    bankCode?: string | null;
+    bankAccountNumber?: string | null;
+  } | null,
+): string | null {
+  if (!vendor) return "vendor not found";
+  if (vendor.vendorStatus === "SUSPENDED") return "vendor suspended";
+  if (!vendor.bankName || !vendor.bankCode || !vendor.bankAccountNumber) {
+    return "no verified bank details";
+  }
+  return null;
+}
 
 // GET /admin/payouts
 export const getAllPayouts = async (req: Request, res: Response) => {
@@ -1170,6 +1203,14 @@ export const processPayout = async (req: AuthRequest, res: Response) => {
     if (!payout) throw new NotFoundError("Payout");
     if (payout.status !== PayoutStatus.FAILED)
       throw new ConflictError("Only failed payouts can be retried");
+    const retryHold = payoutHoldReason(payout.vendor);
+    if (retryHold) {
+      return sendSuccess(
+        res,
+        { payout, skipped: { vendorId: payout.vendorId, reason: retryHold } },
+        "Payout retry skipped — vendor is on payout hold",
+      );
+    }
     const updated = await initiateVendorPayoutTransfer(
       req,
       payout,
@@ -1185,6 +1226,17 @@ export const processPayout = async (req: AuthRequest, res: Response) => {
 
   const vendor = await prisma.user.findUnique({ where: { id: vendorId! } });
   if (!vendor || !vendor.roles.includes(Role.VENDOR)) throw new NotFoundError("Vendor");
+
+  // Phase 1C payout hold: held vendors are skipped, never recorded — their
+  // orders keep payoutId null so nothing is lost.
+  const hold = payoutHoldReason(vendor);
+  if (hold) {
+    return sendSuccess(
+      res,
+      { payout: null, skipped: { vendorId: vendor.id, reason: hold } },
+      "Payout skipped — vendor is on payout hold",
+    );
+  }
 
   const payout = await prisma.$transaction(
     async (tx) => {
