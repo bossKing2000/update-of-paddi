@@ -3,10 +3,14 @@ import { Router } from "express";
 import { authenticate, authorizeVendor } from "../middlewares/auth.middleware";
 import { dashboardController } from "../controllers/vendorDashboard.controller";
 import { getPayoutSummary, setBankDetails, getBankDetails, getBankList } from "../controllers/payoutController";
+import { getVendorOnboarding } from "../controllers/vendorOnboardingController";
 
 const router = Router();
 router.use(authenticate);
 router.use(authorizeVendor);
+
+// Onboarding status (Phase 1C lifecycle)
+router.get("/onboarding", getVendorOnboarding);
 
 // Main dashboard endpoint (NEW - recommended)
 router.get("/dashboard", dashboardController.getDashboardData);
