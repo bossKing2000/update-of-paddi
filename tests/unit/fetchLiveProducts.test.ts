@@ -39,7 +39,7 @@ const vendorRow = (overrides: Record<string, unknown> = {}) => ({
   name: "Mama Put",
   brandName: "Mama Put",
   avatarUrl: null,
-  isLive: true,
+  isLive: true, vendorStatus: "ACTIVE",
   deliveryPreferences: { acceptingOrders: true },
   ...overrides,
 });

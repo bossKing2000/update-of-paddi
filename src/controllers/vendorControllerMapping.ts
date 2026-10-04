@@ -49,6 +49,7 @@ export async function findNearbyVendors(lat: number, lng: number, radiusKm: numb
       brandLogo: true,
       avatarUrl: true,
       isLive: true,
+      vendorStatus: true,
       deliveryPreferences: true,
       addresses: { where: { isDefault: true } },
     },

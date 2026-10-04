@@ -453,6 +453,7 @@ export const getProductById = async (req: AuthRequest, res: Response) => {
             brandName: true,
             brandLogo: true,
             isLive: true,
+            vendorStatus: true,
             deliveryPreferences: true,
           },
         },
@@ -1178,10 +1179,11 @@ export const searchProducts = async (req: Request, res: Response) => {
   // Base params $1..$4; filter params continue at $5+.
   const baseParams: unknown[] = [corrected, `%${corrected}%`, limit, offset];
 
-  // Orderability for ranking: vendor live + accepting + not archived +
-  // in stock. Relevance still wins — availability only breaks ties below
-  // dish/name matches (a closer-but-irrelevant dish must never outrank).
-  const orderableExpr = `(v."isLive" = true AND COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') <> 'false' AND p.archived = false AND (NOT p."trackInventory" OR COALESCE(p.stock, 0) > 0))`;
+  // Orderability for ranking: ACTIVE vendor + live + accepting + not
+  // archived + in stock. Relevance still wins — availability only breaks
+  // ties below dish/name matches (a closer-but-irrelevant dish must never
+  // outrank).
+  const orderableExpr = `(v."vendorStatus" = 'ACTIVE' AND v."isLive" = true AND COALESCE(v."deliveryPreferences" ->> 'acceptingOrders', 'true') <> 'false' AND p.archived = false AND (NOT p."trackInventory" OR COALESCE(p.stock, 0) > 0))`;
 
   const fullTextResults = await prisma.$queryRawUnsafe<any[]>(
     `

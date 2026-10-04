@@ -161,7 +161,7 @@ describe("checkoutCart wiring", () => {
           trackInventory: false,
           stock: null,
           vendorId: "vendor-9",
-          vendor: { id: "vendor-9", isLive: true, deliveryPreferences: { acceptingOrders: true } },
+          vendor: { id: "vendor-9", isLive: true, vendorStatus: "ACTIVE", deliveryPreferences: { acceptingOrders: true } },
         },
       },
     ],
@@ -191,7 +191,7 @@ describe("checkoutCart wiring", () => {
       Promise.resolve(
         args?.where?.id === "cust-1"
           ? { email: "c@test.com", name: "C" }
-          : { id: "vendor-9", isLive: true, deliveryPreferences: { acceptingOrders: true } },
+          : { id: "vendor-9", isLive: true, vendorStatus: "ACTIVE", deliveryPreferences: { acceptingOrders: true } },
       ),
     );
     db.cart.findFirst.mockResolvedValue(cartWithOtherVendorsProduct());
@@ -239,7 +239,7 @@ describe("checkoutCart wiring", () => {
       Promise.resolve(
         args?.where?.id === "cust-1"
           ? { email: "c@test.com", name: "C" }
-          : { id: "vendor-9", isLive: true, deliveryPreferences: { acceptingOrders: true } },
+          : { id: "vendor-9", isLive: true, vendorStatus: "ACTIVE", deliveryPreferences: { acceptingOrders: true } },
       ),
     );
     db.cart.findFirst.mockResolvedValue(cartWithOtherVendorsProduct());

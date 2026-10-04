@@ -8,17 +8,25 @@ import { ValidationError } from "../errors/AppError";
 // home feed, cart, checkout and payment flows. Nothing here mutates state.
 //
 // Semantics:
-//   Vendor operating      = vendor.isLive AND deliveryPreferences does not
-//                           explicitly disable acceptingOrders
+//   Vendor operating      = vendor.isLive AND vendorStatus is ACTIVE AND
+//                           deliveryPreferences does not explicitly disable
+//                           acceptingOrders
 //   Product available     = NOT archived AND in stock
 //                           (untracked products are always in stock;
 //                           tracked products need stock > 0)
 //   Marketplace available = vendor operating AND product available
+//
+// Phase 1C: a vendor is orderable only while vendorStatus === ACTIVE. NEW
+// vendors may list (prepare) products but nothing is orderable; SUSPENDED
+// vendors sell nothing. vendorStatus is deliberately REQUIRED (not
+// optional-chained): every loader must select it, otherwise vendors read
+// as closed rather than slipping through open.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface VendorOperatingState {
   id: string;
   isLive: boolean;
+  vendorStatus?: string | null;
   kycStatus?: string | null;
   deliveryPreferences?: unknown;
 }
@@ -52,9 +60,14 @@ export function isVendorAcceptingOrders(deliveryPreferences: unknown): boolean {
 /** Vendor is currently operating on the marketplace. */
 export function isVendorOperating(vendor: {
   isLive: boolean;
+  vendorStatus?: string | null;
   deliveryPreferences?: unknown;
 }): boolean {
-  return vendor.isLive === true && isVendorAcceptingOrders(vendor.deliveryPreferences);
+  return (
+    vendor.isLive === true &&
+    vendor.vendorStatus === "ACTIVE" &&
+    isVendorAcceptingOrders(vendor.deliveryPreferences)
+  );
 }
 
 /**
@@ -84,6 +97,7 @@ export async function loadVendorOperatingState(
     select: {
       id: true,
       isLive: true,
+      vendorStatus: true,
       deliveryPreferences: true,
     },
   });
@@ -101,6 +115,12 @@ export function assertVendorAvailableForOrdering(
 ): void {
   if (!vendor || vendor.isLive !== true) {
     throw new ValidationError(`${vendorName} is currently offline and cannot accept new orders.`);
+  }
+  if (vendor.vendorStatus === "SUSPENDED") {
+    throw new ValidationError(`${vendorName} is currently suspended and cannot accept new orders.`);
+  }
+  if (vendor.vendorStatus !== "ACTIVE") {
+    throw new ValidationError(`${vendorName} is not yet approved for orders.`);
   }
   if (!isVendorAcceptingOrders(vendor.deliveryPreferences)) {
     throw new ValidationError(`${vendorName} has paused new orders and cannot accept them right now.`);

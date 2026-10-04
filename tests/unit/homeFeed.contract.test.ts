@@ -150,8 +150,9 @@ describe("home feed contract surface", () => {
     assert.match(cleanupJob, /vendorOffline/);
 
     // vendors control their own state via settings; going live requires KYC
+    // + ACTIVE status, and suspended vendors cannot write settings
     const settingsRoutes = read("src", "routes", "vendorSettings.routes.ts");
-    assert.match(settingsRoutes, /router\.patch\("\/live", updateVendorLive\)/);
+    assert.match(settingsRoutes, /router\.patch\("\/live", requireVendorNotSuspended, updateVendorLive\)/);
     const settingsController = read("src", "controllers", "vendorSettingsController.ts");
     assert.match(settingsController, /KYC verification is required before going live/);
     // toggle invalidates discovery caches via the shared helper

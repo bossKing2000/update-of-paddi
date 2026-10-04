@@ -380,6 +380,8 @@ export async function fetchProductPage(opts: {
   if (vendorMustBeOperating || availableOnly) {
     where.vendor = {
       isLive: true,
+      // Phase 1C: orderable listings require an ACTIVE vendor.
+      vendorStatus: "ACTIVE",
       AND: [
         {
           OR: [
@@ -449,6 +451,7 @@ export async function fetchProductPage(opts: {
             brandName: true,
             avatarUrl: true,
             isLive: true,
+            vendorStatus: true,
             deliveryPreferences: true,
           },
         },
@@ -496,6 +499,8 @@ export async function fetchProductPage(opts: {
 
 const vendorOperatingWhere: Prisma.ProductWhereInput["vendor"] = {
   isLive: true,
+  // Phase 1C: orderable listings require an ACTIVE vendor.
+  vendorStatus: "ACTIVE",
   AND: [
     {
       OR: [
@@ -529,6 +534,7 @@ const productListSelect = {
       brandName: true,
       avatarUrl: true,
       isLive: true,
+      vendorStatus: true,
       deliveryPreferences: true,
     },
   },

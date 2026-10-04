@@ -1030,7 +1030,7 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
       archived: true,
       trackInventory: true,
       stock: true,
-      vendor: { select: { isLive: true, deliveryPreferences: true } },
+      vendor: { select: { isLive: true, vendorStatus: true, deliveryPreferences: true } },
     },
   });
   if (!requestedProduct || requestedProduct.archived) {

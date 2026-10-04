@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { authenticate, authorizeVendor } from "../middlewares/auth.middleware";
+import { requireVendorNotSuspended } from "../middlewares/vendorStatus.middleware";
 import {
   getVendorSettings,
   updateVendorLive,
@@ -12,8 +13,8 @@ router.use(authenticate);
 router.use(authorizeVendor);
 
 router.get("/", getVendorSettings);
-router.patch("/live", updateVendorLive);
-router.patch("/delivery-preferences", updateDeliveryPreferences);
-router.put("/service-areas", updateServiceAreas);
+router.patch("/live", requireVendorNotSuspended, updateVendorLive);
+router.patch("/delivery-preferences", requireVendorNotSuspended, updateDeliveryPreferences);
+router.put("/service-areas", requireVendorNotSuspended, updateServiceAreas);
 
 export default router;

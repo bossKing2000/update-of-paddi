@@ -43,7 +43,7 @@ function makeCartItem(overrides: any = {}) {
       vendorId: "vendor-1",
       // Fixtures default to an operating vendor so the
       // marketplace-availability gate passes unless a test opts out.
-      vendor: { name: "Mama Put", isLive: true, deliveryPreferences: { acceptingOrders: true } },
+      vendor: { name: "Mama Put", isLive: true, vendorStatus: "ACTIVE", deliveryPreferences: { acceptingOrders: true } },
       ...(overrides.product || {}),
     },
   };
@@ -97,7 +97,7 @@ describe("cartSummaryService", () => {
           id: "b",
           quantity: 1,
           unitPrice: 500,
-          product: { vendorId: "vendor-2", vendor: { name: "Suya Spot", isLive: true, deliveryPreferences: { acceptingOrders: true } } },
+          product: { vendorId: "vendor-2", vendor: { name: "Suya Spot", isLive: true, vendorStatus: "ACTIVE", deliveryPreferences: { acceptingOrders: true } } },
         }),
       ],
     });

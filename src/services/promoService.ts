@@ -347,6 +347,7 @@ export async function getActivePromotionsForCustomer(userId?: string | null) {
           brandName: true,
           brandLogo: true,
           isLive: true,
+          vendorStatus: true,
           deliveryPreferences: true,
         },
       },
@@ -471,6 +472,7 @@ export async function getActivePromotionsForCustomer(userId?: string | null) {
     const orderable =
       isVendorOperating({
         isLive: promo.vendor?.isLive ?? false,
+        vendorStatus: promo.vendor?.vendorStatus ?? null,
         deliveryPreferences: promo.vendor?.deliveryPreferences,
       }) &&
       isProductCurrentlyAvailable({

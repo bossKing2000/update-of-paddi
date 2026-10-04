@@ -112,6 +112,7 @@ export const cartSummaryService = async ({
     if (product.archived) return false;
     const vendorOperating = isVendorOperating(item.product.vendor as {
       isLive: boolean;
+      vendorStatus?: string | null;
       deliveryPreferences?: unknown;
     });
     return (

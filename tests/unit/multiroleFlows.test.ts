@@ -282,7 +282,7 @@ describe("dual-role discoverability in CUSTOMER mode", () => {
           brandName: "Dual Foods",
           brandLogo: null,
           avatarUrl: null,
-          isLive: true,
+          isLive: true, vendorStatus: "ACTIVE",
           deliveryPreferences: { acceptingOrders: true },
           addresses: [{ isDefault: true, latitude: 6.5, longitude: 3.3 }],
         },

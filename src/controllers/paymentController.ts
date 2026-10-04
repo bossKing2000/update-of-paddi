@@ -113,6 +113,7 @@ async function assertVendorsStillOperating(
       name: true,
       brandName: true,
       isLive: true,
+      vendorStatus: true,
       deliveryPreferences: true,
     },
   });

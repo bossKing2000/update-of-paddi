@@ -622,6 +622,7 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
   const liveItems = cart.items.filter((item) => {
     const vendorOperating = isVendorOperating(item.product.vendor as {
       isLive: boolean;
+      vendorStatus?: string | null;
       deliveryPreferences?: unknown;
     });
     const fresh = freshById.get(item.productId);
@@ -920,7 +921,7 @@ async function getEnhancedCart(cartId: string) {
           product: {
             include: {
               options: true,
-              vendor: { select: { id: true, name: true, isLive: true, deliveryPreferences: true } },
+              vendor: { select: { id: true, name: true, isLive: true, vendorStatus: true, deliveryPreferences: true } },
             },
           },
           options: { include: { productOption: true } },
@@ -949,7 +950,7 @@ async function getEnhancedCart(cartId: string) {
     // Marketplace-orderable right now = vendor live + accepting orders AND
     // product not archived and in stock.
     const productonline =
-      isVendorOperating(product.vendor as { isLive: boolean; deliveryPreferences?: unknown }) &&
+      isVendorOperating(product.vendor as { isLive: boolean; vendorStatus?: string | null; deliveryPreferences?: unknown }) &&
       isProductCurrentlyAvailable({
         archived: product.archived,
         trackInventory: product.trackInventory,

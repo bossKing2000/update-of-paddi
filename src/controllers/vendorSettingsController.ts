@@ -69,11 +69,19 @@ export const updateVendorLive = async (req: AuthRequest, res: Response) => {
   }
   const { isLive } = parsed.data;
 
-  // KYC status lives on the User row, not in the JWT — load it fresh.
+  // KYC status and onboarding state live on the User row, not in the JWT.
   const vendor = await prisma.user.findUnique({
     where: { id: req.user!.id },
-    select: { kycStatus: true },
+    select: { kycStatus: true, vendorStatus: true },
   });
+  // Phase 1C: going live requires an ACTIVE vendor (requirements met) plus
+  // KYC verification. Going offline is always allowed.
+  if (isLive && vendor?.vendorStatus === "SUSPENDED") {
+    throw new ValidationError("Suspended vendors cannot go live. Contact support.");
+  }
+  if (isLive && vendor?.vendorStatus !== "ACTIVE") {
+    throw new ValidationError("Complete vendor onboarding before going live.");
+  }
   if (isLive && vendor?.kycStatus !== "VERIFIED") {
     throw new ValidationError("KYC verification is required before going live.");
   }

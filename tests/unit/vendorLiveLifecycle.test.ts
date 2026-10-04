@@ -161,7 +161,7 @@ describe("PATCH /api/vendor/settings/live — lifecycle", () => {
     });
 
   it("offline → live: flips state, invalidates marketplace caches, audits", async () => {
-    db.user.findUnique.mockResolvedValue({ kycStatus: "VERIFIED" });
+    db.user.findUnique.mockResolvedValue({ kycStatus: "VERIFIED", vendorStatus: "ACTIVE" });
     db.user.update.mockResolvedValue({ isLive: true });
     mockedScanKeys.mockResolvedValue(["home:feed:x"]);
 
@@ -224,7 +224,7 @@ describe("addToCart — vendor live gate", () => {
     db.product.findUnique.mockResolvedValue(product);
     db.user.findUnique.mockResolvedValue({
       id: "vendor-1",
-      isLive: true,
+      isLive: true, vendorStatus: "ACTIVE",
       deliveryPreferences: { acceptingOrders: false },
     });
 
@@ -238,7 +238,7 @@ describe("addToCart — vendor live gate", () => {
     db.product.findUnique.mockResolvedValue(product);
     db.user.findUnique.mockResolvedValue({
       id: "vendor-1",
-      isLive: true,
+      isLive: true, vendorStatus: "ACTIVE",
       deliveryPreferences: { acceptingOrders: true },
     });
     db.cart.findFirst.mockResolvedValue({ id: "cart-1", customerId: "cust-1", items: [] });
@@ -329,7 +329,7 @@ describe("checkoutCart — vendor live invariant", () => {
   it("blocks checkout when the vendor goes offline AFTER the snapshot/filter — stale client state cannot bypass the fresh DB revalidation", async () => {
     // Cart snapshot taken while vendor appeared online…
     checkoutBase([
-      cartItemFrom({ id: "vendor-1", name: "Mama Put", isLive: true, deliveryPreferences: {} }),
+      cartItemFrom({ id: "vendor-1", name: "Mama Put", isLive: true, vendorStatus: "ACTIVE", deliveryPreferences: {} }),
     ]);
     // …lock acquired, pricing unchanged…
     db.cart.updateMany.mockResolvedValue({ count: 1 });
@@ -357,7 +357,7 @@ describe("checkoutCart — vendor live invariant", () => {
 
   it("proceeds past the per-vendor revalidation when the fresh DB read shows the vendor operating", async () => {
     checkoutBase([
-      cartItemFrom({ id: "vendor-1", name: "Mama Put", isLive: true, deliveryPreferences: {} }),
+      cartItemFrom({ id: "vendor-1", name: "Mama Put", isLive: true, vendorStatus: "ACTIVE", deliveryPreferences: {} }),
     ]);
     db.cart.updateMany.mockResolvedValue({ count: 1 });
     mockedSummary.mockResolvedValue({
@@ -369,7 +369,7 @@ describe("checkoutCart — vendor live invariant", () => {
       Promise.resolve(
         args?.where?.id === "cust-1"
           ? { email: "c@test.com", name: "Test Customer" }
-          : { id: "vendor-1", isLive: true, deliveryPreferences: { acceptingOrders: true } },
+          : { id: "vendor-1", isLive: true, vendorStatus: "ACTIVE", deliveryPreferences: { acceptingOrders: true } },
       ),
     );
 
@@ -426,7 +426,7 @@ describe("initiateOrderPayment — vendor live gate on every payment path", () =
     const online = payableOrder(true);
     db.order.findMany.mockResolvedValue([online]);
     db.user.findMany.mockResolvedValue([
-      { id: "vendor-1", name: "Mama Put", brandName: null, isLive: true, deliveryPreferences: {} },
+      { id: "vendor-1", name: "Mama Put", brandName: null, isLive: true, vendorStatus: "ACTIVE", deliveryPreferences: {} },
     ]);
     db.user.findUnique.mockResolvedValue({ email: "c@test.com" });
     db.order.updateMany.mockResolvedValue({ count: 1 });

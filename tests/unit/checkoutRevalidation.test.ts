@@ -117,7 +117,7 @@ const cartItem = (overrides: any = {}) => ({
     id: "prod-1",
     archived: false,
     vendorId: "vendor-1",
-    vendor: { id: "vendor-1", name: "Mama Put", isLive: true, deliveryPreferences: { acceptingOrders: true } },
+    vendor: { id: "vendor-1", name: "Mama Put", isLive: true, vendorStatus: "ACTIVE", deliveryPreferences: { acceptingOrders: true } },
   },
   ...overrides,
 });
@@ -151,7 +151,7 @@ function baseMocks() {
     Promise.resolve(
       args?.where?.id === "cust-1"
         ? ({ email: "c@test.com", name: "C" } as any)
-        : ({ id: "vendor-1", isLive: true, deliveryPreferences: { acceptingOrders: true } } as any),
+        : ({ id: "vendor-1", isLive: true, vendorStatus: "ACTIVE", deliveryPreferences: { acceptingOrders: true } } as any),
     ),
   );
   db.product.findMany.mockResolvedValue([freshProduct()]);

@@ -14,6 +14,7 @@ import {
   getDishTypes,
 } from "../controllers/productController";
 import { authenticate, authorizeVendor } from "../middlewares/auth.middleware";
+import { requireVendorNotSuspended } from "../middlewares/vendorStatus.middleware";
 import { upload } from "../utils/multer";
 
 const router = Router();
@@ -30,16 +31,16 @@ router.get("/p/most", getMostPopularProducts);
 router.get("/p/new", getNewProducts);
 router.get("/:id", getProductById); // also tracks the view internally
 
-// Vendor-only management endpoints
-router.post("/", authenticate, authorizeVendor, uploadFields, createProduct);
-router.patch("/:id", authenticate, authorizeVendor, uploadFields, updateProduct);
+// Vendor-only management endpoints (SUSPENDED vendors cannot write)
+router.post("/", authenticate, authorizeVendor, requireVendorNotSuspended, uploadFields, createProduct);
+router.patch("/:id", authenticate, authorizeVendor, requireVendorNotSuspended, uploadFields, updateProduct);
 // Was registered with no handler at all (just authenticate, authorizeVendor
 // and nothing after) — any request would hang until timeout, never
 // actually archiving anything. Also had a wrong, double-prefixed path
 // ("/api/products/:id/archive" on a router already mounted at
 // "/api/product") that wouldn't have matched real requests even if a
 // handler had been attached.
-router.patch("/:id/archive", authenticate, authorizeVendor, archiveProduct);
-router.delete("/:id", authenticate, authorizeVendor, deleteProduct);
+router.patch("/:id/archive", authenticate, authorizeVendor, requireVendorNotSuspended, archiveProduct);
+router.delete("/:id", authenticate, authorizeVendor, requireVendorNotSuspended, deleteProduct);
 
 export default router;
