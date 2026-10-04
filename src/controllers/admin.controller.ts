@@ -12,7 +12,10 @@ import {
   ActivityType,
   DiscountType,
   PromotionScope,
+  VendorStatus,
 } from "@prisma/client";
+import { z } from "zod";
+import { changeVendorStatus } from "../services/vendorStatus.service";
 import prisma from "../lib/prisma";
 import { AuthRequest } from "../middlewares/auth.middleware";
 import { ensureString } from "../utils/paramUtils";
@@ -464,10 +467,19 @@ export const unblockUser = async (req: AuthRequest, res: Response) => {
 // GET /admin/vendors
 export const getAllVendors = async (req: Request, res: Response) => {
   const { page, limit, skip } = getPagination(req);
+  const status = req.query.status as string | undefined;
+  if (status && !Object.values(VendorStatus).includes(status as VendorStatus)) {
+    throw new ValidationError("Invalid vendor status filter", { status });
+  }
+
+  const where = {
+    roles: { has: Role.VENDOR },
+    ...(status && { vendorStatus: status as VendorStatus }),
+  };
 
   const [vendors, total] = await Promise.all([
     prisma.user.findMany({
-      where: { roles: { has: Role.VENDOR } },
+      where,
       select: {
         id: true,
         name: true,
@@ -475,6 +487,9 @@ export const getAllVendors = async (req: Request, res: Response) => {
         brandName: true,
         brandLogo: true,
         kycStatus: true,
+        vendorStatus: true,
+        vendorStatusReason: true,
+        vendorStatusChangedAt: true,
         isBlocked: true,
         commissionRate: true,
         createdAt: true,
@@ -484,7 +499,7 @@ export const getAllVendors = async (req: Request, res: Response) => {
       skip,
       take: limit,
     }),
-    prisma.user.count({ where: { roles: { has: Role.VENDOR } } }),
+    prisma.user.count({ where }),
   ]);
 
   return sendSuccess(res, { vendors }, "Vendors retrieved", 200, {
@@ -493,6 +508,56 @@ export const getAllVendors = async (req: Request, res: Response) => {
     total,
     totalPages: Math.ceil(total / limit),
   });
+};
+
+// PATCH /admin/vendors/:id/status
+const setVendorStatusSchema = z.object({
+  status: z.enum(["NEW", "PENDING_REVIEW", "ACTIVE", "SUSPENDED"]),
+  reason: z.string().trim().max(500).optional(),
+});
+
+const OPEN_ORDER_STATUSES: OrderStatus[] = [
+  OrderStatus.PENDING,
+  OrderStatus.WAITING_VENDOR_CONFIRMATION,
+  OrderStatus.WAITING_CUSTOMER_APPROVAL,
+  OrderStatus.AWAITING_PAYMENT,
+  OrderStatus.PAYMENT_CONFIRMED,
+  OrderStatus.COOKING,
+  OrderStatus.READY_FOR_PICKUP,
+  OrderStatus.OUT_FOR_DELIVERY,
+];
+
+export const setVendorStatus = async (req: AuthRequest, res: Response) => {
+  const id = ensureString(req.params.id);
+  const parsed = setVendorStatusSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new ValidationError("Invalid vendor status change", parsed.error.flatten().fieldErrors);
+  }
+
+  const updated = await changeVendorStatus(id, parsed.data.status as VendorStatus, parsed.data.reason, req.user!.id);
+
+  // Suspending takes the storefront offline immediately, but open orders
+  // are deliberately NOT auto-cancelled — they keep their lifecycle and
+  // are reported so ops can handle them manually.
+  let openOrders = 0;
+  if (parsed.data.status === "SUSPENDED") {
+    await prisma.user.update({ where: { id }, data: { isLive: false } });
+    openOrders = await prisma.order.count({
+      where: { vendorId: id, status: { in: OPEN_ORDER_STATUSES } },
+    });
+  }
+
+  return sendSuccess(
+    res,
+    {
+      id: updated.id,
+      vendorStatus: updated.vendorStatus,
+      vendorStatusReason: updated.vendorStatusReason,
+      vendorStatusChangedAt: updated.vendorStatusChangedAt,
+      ...(parsed.data.status === "SUSPENDED" && { openOrders }),
+    },
+    "Vendor status updated",
+  );
 };
 
 // PATCH /admin/vendors/:id/commission-rate
@@ -1822,6 +1887,9 @@ export const getVendorById = async (req: Request, res: Response) => {
       brandLogo: true,
       kycStatus: true,
       roles: true,
+      vendorStatus: true,
+      vendorStatusReason: true,
+      vendorStatusChangedAt: true,
       isBlocked: true,
       blockedReason: true,
       blockedAt: true,

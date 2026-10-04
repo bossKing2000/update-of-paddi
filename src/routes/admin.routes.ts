@@ -3,7 +3,7 @@ import { authenticate, authorizeAdmin } from "../middlewares/auth.middleware";
 import {
   getDashboardOverview,
   getAllUsers, getUserById, setUserRole, setKycStatus, blockUser, unblockUser,
-  getAllVendors, getVendorById, setVendorCommissionRate,
+  getAllVendors, getVendorById, setVendorCommissionRate, setVendorStatus,
   getAllOrders, getOrderById, adminUpdateOrderStatus, getTodaysOrders,
   getAllPayments, getRefundRequests, updateRefundStatus,
   getPendingPayouts, getAllPayouts, processPayout, markPayoutPaid,
@@ -34,6 +34,7 @@ router.patch("/users/:id/unblock", unblockUser);
 router.get("/vendors", getAllVendors);
 router.get("/vendors/:id", getVendorById);
 router.patch("/vendors/:id/commission-rate", setVendorCommissionRate);
+router.patch("/vendors/:id/status", setVendorStatus);
 
 router.get("/orders", getAllOrders);
 router.get("/orders/today", getTodaysOrders);
