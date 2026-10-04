@@ -39,7 +39,7 @@ export const authenticate = async (
 
   let decoded: { id: string; role: string; sessionId: string };
   try {
-    decoded = jwt.verify(token, config.jwtSecret) as typeof decoded;
+    decoded = jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] }) as typeof decoded;
   } catch {
     throw new UnauthorizedError('Invalid or expired token');
   }
