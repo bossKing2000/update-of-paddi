@@ -94,6 +94,7 @@ export interface OnboardingState {
 
 export type OnboardingUser = {
   role: Role | null;
+  roles?: Role[] | null;
   kycStatus: import("@prisma/client").KycStatus;
   phoneNumber: string | null;
   brandName: string | null;
@@ -107,6 +108,12 @@ function onboardingField(step: OnboardingStepKey, name: string) {
 export function resolveOnboardingState(user: OnboardingUser): OnboardingState {
   const role = user.role ?? null;
   const kyc = user.kycStatus ?? "PENDING";
+  // Phase 1B: KYC / profile requirements derive from HELD roles so a
+  // dual-role CUSTOMER+VENDOR account still completes vendor onboarding
+  // while its active role is CUSTOMER. ROLE step stays active-role based.
+  const held: Role[] = user.roles ?? (role ? [role] : []);
+  const holdsVendor = held.includes(Role.VENDOR);
+  const holdsDelivery = held.includes(Role.DELIVERY);
 
   const steps: OnboardingStep[] = [];
 
@@ -119,7 +126,7 @@ export function resolveOnboardingState(user: OnboardingUser): OnboardingState {
   });
 
   // STEP 2: KYC — only VENDOR and DELIVERY need NIN verification
-  const needsKyc = role === "VENDOR" || role === "DELIVERY";
+  const needsKyc = holdsVendor || holdsDelivery;
   const kycDone = !needsKyc ? true : kyc === "VERIFIED";
   steps.push({
     key: "KYC",
@@ -130,12 +137,12 @@ export function resolveOnboardingState(user: OnboardingUser): OnboardingState {
   // STEP 3: PROFILE — role-specific required fields
   const missingFields: string[] = [];
 
-  if (role === "VENDOR" || role === "DELIVERY") {
+  if (holdsVendor || holdsDelivery) {
     if (!user.phoneNumber)
       missingFields.push(onboardingField("PROFILE", "phoneNumber"));
   }
 
-  if (role === "VENDOR") {
+  if (holdsVendor) {
     if (!user.brandName)
       missingFields.push(onboardingField("PROFILE", "brandName"));
     if (!user.brandLogo)
@@ -255,6 +262,7 @@ export const register = async (req: AuthRequest, res: Response) => {
 
     const onboarding = resolveOnboardingState({
       role: user.role,
+      roles: user.roles,
       kycStatus: user.kycStatus,
       phoneNumber: user.phoneNumber,
       brandName: user.brandName,
@@ -391,6 +399,7 @@ export const login = async (req: Request, res: Response) => {
 
     const onboarding = resolveOnboardingState({
       role: user.role,
+      roles: user.roles,
       kycStatus: user.kycStatus,
       phoneNumber: user.phoneNumber,
       brandName: user.brandName,
@@ -718,6 +727,7 @@ export const getProfile = async (req: AuthRequest, res: Response) => {
         name: true,
         email: true,
         role: true,
+        roles: true,
         phoneNumber: true,
         avatarUrl: true,
         bio: true,
@@ -752,6 +762,7 @@ export const getProfile = async (req: AuthRequest, res: Response) => {
 
     const onboarding = resolveOnboardingState({
       role: user.role,
+      roles: user.roles,
       kycStatus: user.kycStatus,
       phoneNumber: user.phoneNumber,
       brandName: user.brandName,
@@ -820,6 +831,7 @@ export const selectRole = async (req: AuthRequest, res: Response) => {
 
     const onboarding = resolveOnboardingState({
       role: updated.role,
+      roles: updated.roles,
       kycStatus: updated.kycStatus,
       phoneNumber: updated.phoneNumber,
       brandName: updated.brandName,
@@ -1450,6 +1462,7 @@ export const updateProfile = async (
         bio: true,
         preferences: true,
         role: true,
+        roles: true,
         addresses: true,
         brandName: true,
         brandLogo: true,
@@ -1498,6 +1511,7 @@ export const updateProfile = async (
 
     const onboarding = resolveOnboardingState({
       role: updated.role,
+      roles: updated.roles,
       kycStatus: updated.kycStatus,
       phoneNumber: updated.phoneNumber,
       brandName: updated.brandName,

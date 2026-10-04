@@ -90,10 +90,10 @@ export const getDashboardOverview = async (_req: Request, res: Response) => {
     paymentStatusBreakdown,
   ] = await Promise.all([
     prisma.user.count(),
-    prisma.user.count({ where: { role: Role.VENDOR } }),
-    prisma.user.count({ where: { role: Role.CUSTOMER } }),
-    prisma.user.count({ where: { role: Role.DELIVERY } }),
-    prisma.user.count({ where: { role: Role.ADMIN } }),
+    prisma.user.count({ where: { roles: { has: Role.VENDOR } } }),
+    prisma.user.count({ where: { roles: { has: Role.CUSTOMER } } }),
+    prisma.user.count({ where: { roles: { has: Role.DELIVERY } } }),
+    prisma.user.count({ where: { roles: { has: Role.ADMIN } } }),
     prisma.user.count({ where: { isBlocked: true } }),
     prisma.order.count(),
     prisma.order.count({ where: { status: OrderStatus.PENDING } }),
@@ -115,7 +115,7 @@ export const getDashboardOverview = async (_req: Request, res: Response) => {
     prisma.user.count({
       where: {
         kycStatus: KycStatus.PENDING,
-        role: { in: [Role.VENDOR, Role.DELIVERY] },
+        roles: { hasSome: [Role.VENDOR, Role.DELIVERY] },
       },
     }),
     prisma.refundRequest.count({ where: { status: RefundStatus.PENDING } }),
@@ -208,7 +208,7 @@ export const getAllUsers = async (req: Request, res: Response) => {
   const search = req.query.search as string | undefined;
 
   const where = {
-    ...(role && { role }),
+    ...(role && Object.values(Role).includes(role) && { roles: { has: role } }),
     ...(search && {
       OR: [
         { name: { contains: search, mode: "insensitive" as const } },
@@ -225,6 +225,7 @@ export const getAllUsers = async (req: Request, res: Response) => {
         name: true,
         email: true,
         role: true,
+        roles: true,
         kycStatus: true,
         isBlocked: true,
         isEmailVerified: true,
@@ -257,6 +258,7 @@ export const getUserById = async (req: Request, res: Response) => {
         email: true,
         phoneNumber: true,
         role: true,
+        roles: true,
         kycStatus: true,
         isBlocked: true,
         blockedReason: true,
@@ -287,7 +289,7 @@ export const setUserRole = async (req: AuthRequest, res: Response) => {
 
   const target = await prisma.user.findUnique({
     where: { id },
-    select: { role: true },
+    select: { role: true, roles: true },
   });
   if (!target) throw new NotFoundError("User");
 
@@ -298,7 +300,7 @@ export const setUserRole = async (req: AuthRequest, res: Response) => {
     role !== Role.ADMIN
   ) {
     const adminCount = await prisma.user.count({
-      where: { role: Role.ADMIN },
+      where: { roles: { has: Role.ADMIN } },
     });
     if (adminCount <= 1)
       throw new ValidationError(
@@ -306,7 +308,9 @@ export const setUserRole = async (req: AuthRequest, res: Response) => {
       );
   }
 
-  const user = await prisma.user.update({ where: { id }, data: { role } });
+  // Admin sets the account to exactly one role: active role and held roles
+  // stay in sync (single-role invariant for admin-managed accounts).
+  const user = await prisma.user.update({ where: { id }, data: { role, roles: [role] } });
 
   // A demoted admin's outstanding JWTs still carry role=ADMIN until they
   // expire — revoke their sessions now so the old token stops passing
@@ -326,7 +330,7 @@ export const setUserRole = async (req: AuthRequest, res: Response) => {
 
   return sendSuccess(
     res,
-    { id: user.id, role: user.role },
+    { id: user.id, role: user.role, roles: user.roles },
     "User role updated",
   );
 };
@@ -437,7 +441,7 @@ export const getAllVendors = async (req: Request, res: Response) => {
 
   const [vendors, total] = await Promise.all([
     prisma.user.findMany({
-      where: { role: Role.VENDOR },
+      where: { roles: { has: Role.VENDOR } },
       select: {
         id: true,
         name: true,
@@ -454,7 +458,7 @@ export const getAllVendors = async (req: Request, res: Response) => {
       skip,
       take: limit,
     }),
-    prisma.user.count({ where: { role: Role.VENDOR } }),
+    prisma.user.count({ where: { roles: { has: Role.VENDOR } } }),
   ]);
 
   return sendSuccess(res, { vendors }, "Vendors retrieved", 200, {
@@ -484,9 +488,9 @@ export const setVendorCommissionRate = async (
 
   const vendor = await prisma.user.findUnique({
     where: { id },
-    select: { role: true },
+    select: { role: true, roles: true },
   });
-  if (!vendor || vendor.role !== Role.VENDOR) throw new NotFoundError("Vendor");
+  if (!vendor || !vendor.roles.includes(Role.VENDOR)) throw new NotFoundError("Vendor");
 
   const updated = await prisma.user.update({
     where: { id },
@@ -1089,7 +1093,7 @@ export const processPayout = async (req: AuthRequest, res: Response) => {
   }
 
   const vendor = await prisma.user.findUnique({ where: { id: vendorId! } });
-  if (!vendor || vendor.role !== Role.VENDOR) throw new NotFoundError("Vendor");
+  if (!vendor || !vendor.roles.includes(Role.VENDOR)) throw new NotFoundError("Vendor");
 
   const payout = await prisma.$transaction(
     async (tx) => {
@@ -1781,8 +1785,8 @@ export const adminDeleteProduct = async (req: AuthRequest, res: Response) => {
 // GET /admin/vendors/:id
 export const getVendorById = async (req: Request, res: Response) => {
   const id = ensureString(req.params.id);
-  const vendor = await prisma.user.findUnique({
-    where: { id, role: Role.VENDOR },
+  const vendor = await prisma.user.findFirst({
+    where: { id, roles: { has: Role.VENDOR } },
     select: {
       id: true,
       name: true,
@@ -1791,6 +1795,7 @@ export const getVendorById = async (req: Request, res: Response) => {
       brandName: true,
       brandLogo: true,
       kycStatus: true,
+      roles: true,
       isBlocked: true,
       blockedReason: true,
       blockedAt: true,
@@ -2111,12 +2116,12 @@ export const getKpis = async (_req: Request, res: Response) => {
       where: { status: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.SUCCESS },
       _avg: { totalPrice: true },
     }),
-    prisma.user.count({ where: { role: Role.CUSTOMER } }),
+    prisma.user.count({ where: { roles: { has: Role.CUSTOMER } } }),
     prisma.user.count({
-      where: { role: Role.CUSTOMER, createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
+      where: { roles: { has: Role.CUSTOMER }, createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
     }),
     prisma.user.count({
-      where: { role: Role.CUSTOMER, customerOrders: { some: { status: OrderStatus.COMPLETED } } },
+      where: { roles: { has: Role.CUSTOMER }, customerOrders: { some: { status: OrderStatus.COMPLETED } } },
     }),
     prisma.$queryRaw<Array<{ dish_type_id: string; count: bigint }>>`
       SELECT p."dishTypeId" as dish_type_id, COUNT(DISTINCT o.id) as "count"

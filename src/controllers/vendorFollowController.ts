@@ -27,8 +27,8 @@ export const followVendor = async (req: AuthRequest, res: Response) => {
   // — a customer could "follow" another customer, or an id that doesn't
   // exist at all, producing junk follow records with no vendor to ever
   // show up against.
-  const targetVendor = await prisma.user.findUnique({ where: { id: vendorId }, select: { id: true, role: true } });
-  if (!targetVendor || targetVendor.role !== "VENDOR") throw new NotFoundError("Vendor");
+  const targetVendor = await prisma.user.findUnique({ where: { id: vendorId }, select: { id: true, role: true, roles: true } });
+  if (!targetVendor || !targetVendor.roles.includes("VENDOR")) throw new NotFoundError("Vendor");
 
   const existing = await prisma.vendorFollower.findUnique({ where: { vendorId_customerId: { vendorId, customerId } } });
   if (existing) throw new ConflictError("You already follow this vendor.");

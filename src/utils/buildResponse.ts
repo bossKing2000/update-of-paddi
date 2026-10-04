@@ -8,6 +8,7 @@ export const buildAuthResponse = (user: User & { addresses?: any[] }, accessToke
       username: user.username,
       email: user.email,
       role: user.role,
+      roles: user.roles,
       phoneNumber: user.phoneNumber,
       avatarUrl: user.avatarUrl,
       preferences: user.preferences,

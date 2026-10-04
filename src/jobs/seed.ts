@@ -691,12 +691,12 @@ async function seedDatabase() {
   await createMany((data) => prisma.user.createMany({ data }), users);
   setProgress(10, `Created ${users.length} users`);
 
-  const vendors = await prisma.user.findMany({ where: { role: Role.VENDOR } });
+  const vendors = await prisma.user.findMany({ where: { roles: { has: Role.VENDOR } } });
   const customers = await prisma.user.findMany({
-    where: { role: Role.CUSTOMER },
+    where: { roles: { has: Role.CUSTOMER } },
   });
   const deliveryUsers = await prisma.user.findMany({
-    where: { role: Role.DELIVERY, deliveryPerson: null },
+    where: { roles: { has: Role.DELIVERY }, deliveryPerson: null },
   });
 
   // P1 — Vendor/KYC lifecycle coverage (small, controlled; volumes preserved).

@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { Role } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { isVendorOperating } from "../services/vendorAvailability.service";
 
@@ -40,7 +41,7 @@ export async function getNearbyVendors(req: Request, res: Response) {
 
 export async function findNearbyVendors(lat: number, lng: number, radiusKm: number) {
   const vendors = await prisma.user.findMany({
-    where: { role: "VENDOR" },
+    where: { roles: { has: Role.VENDOR } },
     select: {
       id: true,
       name: true,

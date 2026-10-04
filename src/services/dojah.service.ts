@@ -57,6 +57,7 @@ export const verifyNINService = async (
       select: {
         id: true,
         role: true,
+        roles: true,
         nin: true,
         kycStatus: true,
         phoneNumber: true,
@@ -71,8 +72,10 @@ export const verifyNINService = async (
     }
 
     // ── 4. ROLE CHECK ───────────────────────────
-    // Only VENDOR and DELIVERY require KYC
-    if (currentUser.role !== "VENDOR" && currentUser.role !== "DELIVERY") {
+    // Only VENDOR and DELIVERY require KYC (checked against held roles so a
+    // dual-role CUSTOMER+VENDOR account can verify while in CUSTOMER mode)
+    const heldRoles = currentUser.roles ?? [];
+    if (!heldRoles.includes("VENDOR") && !heldRoles.includes("DELIVERY")) {
       res.status(403).json({
         message: "KYC verification is not required for this account type",
       });
@@ -85,6 +88,7 @@ export const verifyNINService = async (
         message: "KYC already completed",
         onboarding: resolveOnboardingState({
           role: currentUser.role,
+          roles: currentUser.roles,
           kycStatus: currentUser.kycStatus,
           phoneNumber: currentUser.phoneNumber,
           brandName: currentUser.brandName,
@@ -146,6 +150,7 @@ export const verifyNINService = async (
         username: true,
         email: true,
         role: true,
+        roles: true,
         phoneNumber: true,
         avatarUrl: true,
         bio: true,
@@ -160,6 +165,7 @@ export const verifyNINService = async (
     // ── 10. RECOMPUTE ONBOARDING ────────────────
     const onboarding = resolveOnboardingState({
       role: updatedUser.role,
+      roles: updatedUser.roles,
       kycStatus: updatedUser.kycStatus,
       phoneNumber: updatedUser.phoneNumber,
       brandName: updatedUser.brandName,
