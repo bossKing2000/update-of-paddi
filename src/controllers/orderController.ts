@@ -803,6 +803,10 @@ export const createSpecialRequest = async (req: AuthRequest, res: Response) => {
   const product = await prisma.product.findUnique({ where: { id: productId } });
   if (!product) throw new NotFoundError("Product");
 
+  // Phase 1B self-dealing guard: cannot request a special order for your own product.
+  if (product.vendorId === userId)
+    throw new ForbiddenError("You cannot request a special order for your own product.");
+
   const request = await prisma.specialOrderRequest.create({
     data: { customerId: userId, productId, quantity, message: details },
   });
@@ -892,6 +896,10 @@ export const createSpecialOffer = async (req: AuthRequest, res: Response) => {
     where: { id: requestId },
   });
   if (!request) throw new NotFoundError("Special request");
+
+  // Phase 1B self-dealing guard: a vendor cannot bid on their own request.
+  if (request.customerId === vendorId)
+    throw new ForbiddenError("You cannot make an offer on your own request.");
   if (
     request.status === "ACCEPTED" ||
     request.status === "CANCELLED" ||
@@ -943,6 +951,10 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
     throw new ForbiddenError("This isn't your request");
   if (offer.request.status !== "OFFER_MADE")
     throw new ConflictError("This offer can no longer be accepted");
+
+  // Phase 1B self-dealing guard: cannot accept (and order from) your own offer.
+  if (offer.vendorId === userId)
+    throw new ForbiddenError("You cannot order from your own store.");
 
   const address = await prisma.address.findFirst({
     where: { id: addressId, userId },

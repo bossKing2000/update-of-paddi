@@ -8,7 +8,7 @@ import { addToCartSchema, updateCartItemSchema } from "../validations/cartSchema
 import { z } from "zod";
 import { ShopCartRedis } from "../lib/redis";
 import { sendSuccess, sendCreated } from "../utils/apiResponse";
-import { AppError, NotFoundError, ValidationError, ConflictError } from "../errors/AppError";
+import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from "../errors/AppError";
 import { cartSummaryService } from "../services/cartSummary.service";
 import {
   loadActiveProductPromos,
@@ -98,6 +98,11 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
   });
   if (!product) throw new NotFoundError("Product");
   if (product.archived) throw new ValidationError("Product is no longer available");
+
+  // Phase 1B self-dealing guard: a vendor cannot buy their own product,
+  // even while operating in CUSTOMER mode.
+  if (product.vendorId === req.user!.id)
+    throw new ForbiddenError("You cannot purchase from your own store.");
 
   // Availability gate — a product can only be ADDED to a cart while its
   // vendor is live + accepting orders and the product itself is not
@@ -466,6 +471,11 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
   });
 
   if (!cart || cart.items.length === 0) throw new ValidationError("Your cart is empty");
+
+  // Phase 1B self-dealing guard (checkout-time backstop — addToCart already
+  // rejects own products, but carts predating the vendor upgrade may hold them).
+  if (cart.items.some((i) => i.product.vendorId === userId))
+    throw new ForbiddenError("You cannot purchase from your own store.");
 
   // Re-read every product and its ACTIVE add-ons straight from the
   // database. The cart stores quoted prices; the database is the truth.

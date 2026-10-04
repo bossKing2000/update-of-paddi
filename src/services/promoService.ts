@@ -143,6 +143,12 @@ export async function applyPromoService({
 
   if (!promo) return emptyResult(promoCode, "Promo code not found");
 
+  // Phase 1B self-dealing guard: a vendor cannot use their own vendor
+  // promotion (cart/checkout already blocks buying from your own store;
+  // this closes the promo path directly).
+  if (promo.vendorId && promo.vendorId === userId)
+    return emptyResult(code, "You cannot use your own vendor promotion", promo.id, promo.type);
+
   const now = new Date();
   if (promo.startsAt && now < promo.startsAt)
     return emptyResult(

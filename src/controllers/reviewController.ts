@@ -69,6 +69,14 @@ export const reviewProduct = async (req: AuthRequest, res: Response) => {
   });
   if (existing) throw new ConflictError("You already reviewed this product");
 
+  // Phase 1B self-dealing guard: vendors cannot review their own products.
+  const reviewedProduct = await prisma.product.findUnique({
+    where: { id: parsed.data.productId },
+    select: { vendorId: true },
+  });
+  if (reviewedProduct && reviewedProduct.vendorId === req.user.id)
+    throw new ForbiddenError("You cannot review your own product");
+
   // `verifiedPurchase` existed on the schema but was never set or checked
   // anywhere — any CUSTOMER-role account could review any product without
   // ever having ordered it, and even a genuine buyer's review was never
@@ -454,6 +462,10 @@ export const reviewVendor = async (req: AuthRequest, res: Response) => {
     where: { vendorId: parsed.data.vendorId, customerId: req.user.id },
   });
   if (existing) throw new ConflictError("You already reviewed this vendor");
+
+  // Phase 1B self-dealing guard: vendors cannot review their own store.
+  if (parsed.data.vendorId === req.user.id)
+    throw new ForbiddenError("You cannot review your own store");
 
   // Same verified-purchase requirement as product reviews — previously
   // anyone with a CUSTOMER account could review any vendor without ever
