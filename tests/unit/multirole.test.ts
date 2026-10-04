@@ -20,7 +20,7 @@ import {
 jest.mock("../../src/lib/prisma", () => ({
   __esModule: true,
   default: {
-    user: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
+    user: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(async () => ({ count: 0 })) },
     deliveryPerson: { create: jest.fn(), upsert: jest.fn() },
   },
 }));

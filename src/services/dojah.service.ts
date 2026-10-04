@@ -4,6 +4,7 @@ import { Response } from "express";
 import prisma from "../lib/prisma";
 import { AuthRequest } from "../middlewares/auth.middleware";
 import { handlePrismaError, resolveOnboardingState } from "../controllers/auth.controller";
+import { evaluateVendorStatus } from "./vendorStatus.service";
 import config from "../config/config";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,6 +172,13 @@ export const verifyNINService = async (
       brandName: updatedUser.brandName,
       brandLogo: updatedUser.brandLogo,
     });
+
+    // Phase 1C: a fresh VERIFIED KYC may complete the vendor requirements.
+    if (updatedUser.roles.includes("VENDOR")) {
+      await evaluateVendorStatus(userId).catch((err) =>
+        console.error("[KYC] evaluateVendorStatus failed:", err?.message ?? err),
+      );
+    }
 
     // ── 11. SUCCESS RESPONSE ────────────────────
     res.status(200).json({

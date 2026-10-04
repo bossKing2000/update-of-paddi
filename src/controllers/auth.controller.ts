@@ -28,6 +28,7 @@ import {
 } from "../validations/authSchema";
 import { generateResetToken } from "../utils/generateResetToken";
 import { hasRole, assertRoleCombination } from "../utils/roles";
+import { ensureVendorStatusNew, evaluateVendorStatus } from "../services/vendorStatus.service";
 import { ensureString } from "../utils/paramUtils";
 import { logger } from "../lib/logger";
 import { redisPayments } from "../lib/redis";
@@ -268,6 +269,12 @@ export const register = async (req: AuthRequest, res: Response) => {
       brandName: user.brandName,
       brandLogo: user.brandLogo,
     });
+
+    // Phase 1C: VENDOR accounts enter the onboarding lifecycle as NEW.
+    if (user.role === Role.VENDOR) {
+      await ensureVendorStatusNew(user.id);
+      await evaluateVendorStatus(user.id);
+    }
 
     res.status(201).json({
       message: "User registered successfully",
@@ -829,6 +836,12 @@ export const selectRole = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    // Phase 1C: VENDOR accounts enter the onboarding lifecycle as NEW.
+    if (updated.role === Role.VENDOR) {
+      await ensureVendorStatusNew(userId);
+      await evaluateVendorStatus(userId);
+    }
+
     const onboarding = resolveOnboardingState({
       role: updated.role,
       roles: updated.roles,
@@ -926,6 +939,10 @@ export const becomeVendor = async (req: AuthRequest, res: Response) => {
       select: { id: true, role: true, roles: true },
     });
     if (!updated) return res.status(404).json({ message: "User not found" });
+
+    // Phase 1C: the account now holds VENDOR — enter the lifecycle as NEW.
+    await ensureVendorStatusNew(userId);
+    await evaluateVendorStatus(userId);
 
     return res.status(200).json({
       message: "VENDOR role added. Switch to it via POST /api/auth/switch-role.",
@@ -1514,6 +1531,13 @@ export const updateProfile = async (
       } catch (e) {
         logger.warn({ err: e, userId }, "Failed to send verification email after email change");
       }
+    }
+
+    // Phase 1C: a completed profile may satisfy the vendor requirements.
+    if (("brandName" in data || "phoneNumber" in data) && updated.roles.includes("VENDOR")) {
+      await evaluateVendorStatus(userId).catch((err) =>
+        logger.warn({ err, userId }, "evaluateVendorStatus failed after profile update"),
+      );
     }
 
     // Delivery-specific updates (vehicle details only — moderation status

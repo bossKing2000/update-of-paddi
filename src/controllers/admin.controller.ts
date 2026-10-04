@@ -33,6 +33,7 @@ import {
   initiateTransfer,
 } from "../services/payoutService";
 import { calculatePayoutAmounts } from "./vendorDashboard.service";
+import { evaluateVendorStatus } from "../services/vendorStatus.service";
 import { validatePromoDatesAndValue } from "./promoController";
 import { logger } from "../lib/logger";
 import { encrypt, decrypt } from "../utils/encrypt";
@@ -365,6 +366,13 @@ export const setKycStatus = async (req: AuthRequest, res: Response) => {
     targetUserId: id,
     newStatus: kycStatus,
   });
+
+  // Phase 1C: an admin VERIFIED flip may complete the vendor requirements.
+  if (kycStatus === KycStatus.VERIFIED) {
+    await evaluateVendorStatus(id).catch((err) =>
+      logger.error({ err, userId: id }, "evaluateVendorStatus failed after admin KYC approval"),
+    );
+  }
 
   await recordActivityBundle({
     actorId: req.user!.id,
