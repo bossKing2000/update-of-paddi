@@ -36,6 +36,19 @@ jest.mock("../../src/lib/redis", () => ({
   redisProducts: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
   redisSearch: { get: jest.fn(), set: jest.fn() },
   ShopCartRedis: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+  // In-memory idempotency store with real SET NX semantics.
+  redisPayments: (() => {
+    const store = new Map<string, string>();
+    return {
+      get: jest.fn(async (key: string) => store.get(key) ?? null),
+      set: jest.fn(async (key: string, value: string, opts?: { NX?: boolean; EX?: number }) => {
+        if (opts?.NX && store.has(key)) return null;
+        store.set(key, value);
+        return "OK";
+      }),
+      del: jest.fn(async (key: string) => (store.delete(key) ? 1 : 0)),
+    };
+  })(),
 }));
 
 jest.mock("../../src/lib/redisScan", () => ({
@@ -77,7 +90,9 @@ const res: any = () => {
 
 const req = (overrides: Partial<any> = {}): any =>
   ({
-    headers: {},
+    // Mandatory idempotency key — unique per call so the in-memory
+    // idempotency store from the redis mock never leaks between tests.
+    headers: { "idempotency-key": `reval-${++reqKeySeq}` },
     body: { summaryId: "snap-1", addressId: "addr-1" },
     params: {},
     query: {},
@@ -89,6 +104,7 @@ const req = (overrides: Partial<any> = {}): any =>
   }) as any;
 
 const OPT_ID = "11111111-1111-4111-8111-111111111111";
+let reqKeySeq = 0;
 
 const cartItem = (overrides: any = {}) => ({
   id: "item-1",

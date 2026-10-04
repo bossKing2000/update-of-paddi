@@ -55,6 +55,7 @@ jest.mock("../../src/lib/redis", () => {
   // releaseLock code paths, rather than stubbing them out.
   const store = new Map<string, string>();
   const redisPayments = {
+    get: jest.fn(async (key: string) => store.get(key) ?? null),
     set: jest.fn(async (key: string, value: string, opts?: { NX?: boolean; EX?: number }) => {
       if (opts?.NX && store.has(key)) return null;
       store.set(key, value);
@@ -127,10 +128,13 @@ const res: any = () => {
 };
 
 const PRODUCT_UUID = "11111111-1111-4111-8111-111111111111";
+let reqKeySeq = 0;
 
 const req = (overrides: Partial<any> = {}): any =>
   ({
-    headers: {},
+    // Mandatory idempotency key — unique per call so the in-memory
+    // idempotency store from the redis mock never leaks between tests.
+    headers: { "idempotency-key": `lifecycle-${++reqKeySeq}` },
     body: {},
     params: {},
     query: {},

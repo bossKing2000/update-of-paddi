@@ -8,7 +8,7 @@ import { addToCartSchema, updateCartItemSchema } from "../validations/cartSchema
 import { z } from "zod";
 import { ShopCartRedis } from "../lib/redis";
 import { sendSuccess, sendCreated } from "../utils/apiResponse";
-import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from "../errors/AppError";
+import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnprocessableEntityError } from "../errors/AppError";
 import { cartSummaryService } from "../services/cartSummary.service";
 import {
   loadActiveProductPromos,
@@ -24,6 +24,12 @@ import {
   assertQuantityAvailable,
   reserveStockForItems,
 } from "../services/inventory.service";
+import {
+  claimCheckoutKey,
+  completeCheckoutKey,
+  releaseCheckoutKey,
+  checkoutPayloadHash,
+} from "../services/checkoutIdempotency.service";
 import { clearProductCache } from "../services/clearCaches";
 import { logger } from "../lib/logger";
 
@@ -440,7 +446,7 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
   }
 
   if (req.headers["idempotency-key"]) {
-    const existingOrders = await prisma.order.findMany({ where: { idempotencyKey, customerId: userId } });
+    const existingOrders = (await prisma.order.findMany({ where: { idempotencyKey, customerId: userId } })) ?? [];
     if (existingOrders.length > 0) {
       return sendSuccess(res, { orders: existingOrders }, "Checkout already processed", 200);
     }
@@ -643,7 +649,31 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     throw new ConflictError("Checkout already in progress");
   }
 
+  // Idempotency-claim state lives outside the try so the finally can see
+  // it (block scoping): released on failure, kept-complete on success.
+  let idemClaimed = false;
+  let idemCompleted = false;
   try {
+    // Mandatory idempotency-key claim (Redis SET NX, 24h TTL — see
+    // checkoutIdempotency.service). Same key + same cart summary/address
+    // replays the stored response; same key + different payload is 422;
+    // a still-running attempt is 409. Failures release the claim so the
+    // key is never poisoned.
+    const payloadHash = checkoutPayloadHash({ summaryId, addressId });
+    const claim = await claimCheckoutKey(userId, idempotencyKey, payloadHash);
+    if (claim.action === "replay") {
+      return sendSuccess(res, claim.response, "Checkout already processed", 200);
+    }
+    if (claim.action === "mismatch") {
+      throw new UnprocessableEntityError(
+        "This idempotency key was already used for a different checkout. Generate a new key when the cart changes.",
+        { idempotencyKey },
+      );
+    }
+    if (claim.action === "conflict") {
+      throw new ConflictError("Checkout already in progress for this key. Please wait, then retry with the same key.");
+    }
+    idemClaimed = claim.action === "proceed";
     // Revalidate pricing against the live cart — if anything changed
     // since the snapshot was taken (price edit, vendor went offline,
     // moved out of delivery range), reject rather than silently charging
@@ -853,6 +883,11 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
 
     // Promo was already claimed inside the transaction — no post-commit redeem needed
 
+    // Record the completed checkout for same-key replays (24h). If this
+    // write fails, the DB idempotencyKey lookup still dedups retries.
+    await completeCheckoutKey(userId, idempotencyKey, payloadHash, { orders: createdOrders });
+    idemCompleted = true;
+
     const updatedCart = offlineItems.length > 0 ? await getEnhancedCart(cart.id) : { id: null, items: [], basePrice: 0, totalPrice: 0 };
     try {
       await ShopCartRedis.set(cacheKey, JSON.stringify(updatedCart), { EX: CART_TTL_SECONDS });
@@ -862,6 +897,11 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
 
     return sendCreated(res, { orders: createdOrders, cart: updatedCart }, "Checkout successful");
   } finally {
+    // Release the idempotency claim on failure so the same key can be
+    // retried; on success the key stays complete for 24h replays.
+    if (idemClaimed && !idemCompleted) {
+      await releaseCheckoutKey(userId, idempotencyKey);
+    }
     // Always release the lock, whether checkout succeeded, failed
     // validation, or threw unexpectedly.
     await prisma.cart.updateMany({ where: { id: cart.id }, data: { isLocked: false } }).catch((err) => {
