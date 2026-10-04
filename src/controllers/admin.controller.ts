@@ -35,6 +35,7 @@ import {
 import { calculatePayoutAmounts } from "./vendorDashboard.service";
 import { validatePromoDatesAndValue } from "./promoController";
 import { logger } from "../lib/logger";
+import { encrypt, decrypt } from "../utils/encrypt";
 import { invalidateActiveProductPromosCache } from "../services/promotionPricing.service";
 import { invalidateMarketplaceDiscoveryCaches } from "../services/clearCaches";
 import { clearProductCache } from "../services/clearCaches";
@@ -341,6 +342,23 @@ export const setKycStatus = async (req: AuthRequest, res: Response) => {
   const { kycStatus } = req.body as { kycStatus?: KycStatus };
   if (!kycStatus || !Object.values(KycStatus).includes(kycStatus))
     throw new ValidationError("Invalid kycStatus");
+
+  const existingUser = await prisma.user.findUnique({
+    where: { id },
+    select: { kycStatus: true },
+  });
+  if (!existingUser) throw new NotFoundError("User");
+
+  const KYC_ORDER = ["PENDING", "VERIFIED", "REJECTED"];
+  const currentKyc = existingUser.kycStatus;
+  const currentIndex = KYC_ORDER.indexOf(currentKyc);
+  const newIndex = KYC_ORDER.indexOf(kycStatus);
+
+  if (newIndex < currentIndex) {
+    return res.status(400).json({
+      message: `Cannot move KYC status backward from ${currentKyc} to ${kycStatus}`,
+    });
+  }
 
   const user = await prisma.user.update({ where: { id }, data: { kycStatus } });
   await auditAdmin(req, "ADMIN_SET_KYC_STATUS", {
@@ -993,7 +1011,7 @@ async function initiateVendorPayoutTransfer(
     if (!recipientCode) {
       const createdRecipient = await createTransferRecipient({
         name: vendor.bankAccountName || vendor.name || "Vendor",
-        accountNumber: vendor.bankAccountNumber,
+        accountNumber: decrypt(vendor.bankAccountNumber),
         bankCode: vendor.bankCode,
       });
       const saved = await prisma.user.updateMany({
