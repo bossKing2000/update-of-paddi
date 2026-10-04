@@ -462,32 +462,47 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
       : "USER_CANCELLED";
   }
 
-  const updatedOrder = await prisma.order.update({
-    where: { id: orderId },
-    data: updateData,
-  });
-
-  if (status === OrderStatus.CANCELLED && order.paymentStatus === "SUCCESS") {
-    const payment = await prisma.payment.findFirst({
-      where: {
-        idempotencyKey: order.idempotencyKey,
-        status: "SUCCESS",
-      },
+  // Status change + paid-cancel refund filing happen in ONE transaction:
+  // no external API calls inside, and a RefundRequest failure rolls the
+  // whole cancellation back (loud failure) instead of vanishing silently.
+  // The open-request guard makes double-cancel idempotent: one
+  // cancellation can only ever file one refund request per payment.
+  const updatedOrder = await prisma.$transaction(async (tx) => {
+    const updated = await tx.order.update({
+      where: { id: orderId },
+      data: updateData,
     });
 
-    if (payment) {
-      await prisma.refundRequest
-        .create({
-          data: {
-            userId: order.customerId,
+    if (status === OrderStatus.CANCELLED && order.paymentStatus === "SUCCESS") {
+      const payment = await tx.payment.findFirst({
+        where: {
+          idempotencyKey: order.idempotencyKey,
+          status: "SUCCESS",
+        },
+      });
+
+      if (payment) {
+        const existing = await tx.refundRequest.findFirst({
+          where: {
             paymentRef: payment.reference,
-            reason: "Order cancelled after payment",
-            status: "PENDING",
+            status: { in: ["PENDING", "APPROVED", "PROCESSING"] },
           },
-        })
-        .catch(() => {}); // best effort, do not fail cancellation
+        });
+        if (!existing) {
+          await tx.refundRequest.create({
+            data: {
+              userId: order.customerId,
+              paymentRef: payment.reference,
+              reason: "Order cancelled after payment",
+              status: "PENDING",
+            },
+          });
+        }
+      }
     }
-  }
+
+    return updated;
+  });
 
   // Cancelling an unpaid order releases its checkout-time stock
   // reservation back on sale. Paid orders never restore — portions are
