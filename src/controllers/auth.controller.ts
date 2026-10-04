@@ -23,8 +23,11 @@ import {
   secureResetSchema,
   updateUserSchema,
   createAddressSchema,
+  becomeVendorSchema,
+  switchRoleSchema,
 } from "../validations/authSchema";
 import { generateResetToken } from "../utils/generateResetToken";
+import { hasRole, assertRoleCombination } from "../utils/roles";
 import { ensureString } from "../utils/paramUtils";
 import { logger } from "../lib/logger";
 import { redisPayments } from "../lib/redis";
@@ -831,6 +834,130 @@ export const selectRole = async (req: AuthRequest, res: Response) => {
     res
       .status(500)
       .json({ message: "Something went wrong while setting role" });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1B multi-role: POST /api/auth/become-vendor
+// A CUSTOMER adds VENDOR to their held roles without changing the active
+// role. KYC / isLive flow stays exactly as is (new vendors start offline).
+// ─────────────────────────────────────────────────────────────────────────────
+export const becomeVendor = async (req: AuthRequest, res: Response) => {
+  const parsed = becomeVendorSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(422).json({ errors: parsed.error.flatten().fieldErrors });
+  }
+
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ message: "Not authenticated" });
+
+  try {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.isBlocked)
+      return res.status(403).json({ message: "This account has been blocked." });
+
+    const held = user.roles ?? [];
+    if (held.includes(Role.ADMIN) || held.includes(Role.DELIVERY)) {
+      return res
+        .status(403)
+        .json({ message: "ADMIN and DELIVERY accounts cannot become vendors" });
+    }
+    if (!held.includes(Role.CUSTOMER)) {
+      return res
+        .status(403)
+        .json({ message: "Only CUSTOMER accounts can become vendors" });
+    }
+    if (held.includes(Role.VENDOR)) {
+      return res.status(400).json({ message: "Account already holds VENDOR role" });
+    }
+    if (!user.isEmailVerified) {
+      return res
+        .status(403)
+        .json({ message: "Please verify your email before becoming a vendor." });
+    }
+
+    const nextRoles = [...held, Role.VENDOR];
+    try {
+      assertRoleCombination(nextRoles);
+    } catch (e) {
+      return res
+        .status(403)
+        .json({ message: e instanceof Error ? e.message : "Invalid role combination" });
+    }
+
+    const data: Record<string, unknown> = {
+      roles: nextRoles,
+      brandName: parsed.data.brandName,
+    };
+    if (parsed.data.phoneNumber !== undefined) data.phoneNumber = parsed.data.phoneNumber;
+    if (parsed.data.brandLogo !== undefined) data.brandLogo = parsed.data.brandLogo;
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data,
+      select: { id: true, role: true, roles: true },
+    });
+
+    return res.status(200).json({
+      message: "VENDOR role added. Switch to it via POST /api/auth/switch-role.",
+      role: updated.role,
+      roles: updated.roles,
+    });
+  } catch (error) {
+    return handlePrismaError(error, res);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1B multi-role: POST /api/auth/switch-role
+// Switch the ACTIVE role between held CUSTOMER/VENDOR roles and mint a fresh
+// access token for the new active role. Refresh tokens/sessions unchanged.
+// ─────────────────────────────────────────────────────────────────────────────
+export const switchRole = async (req: AuthRequest, res: Response) => {
+  const parsed = switchRoleSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(422).json({ errors: parsed.error.flatten().fieldErrors });
+  }
+
+  const userId = req.user?.id;
+  const sessionId = req.user?.sessionId;
+  if (!userId || !sessionId)
+    return res.status(401).json({ message: "Not authenticated" });
+
+  try {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.isBlocked) {
+      await deleteAllUserSessions(user.id).catch(() => {});
+      return res
+        .status(403)
+        .json({ message: "This account has been blocked." });
+    }
+
+    const target = Role[parsed.data.role as keyof typeof Role];
+    if (!hasRole(user, target)) {
+      return res
+        .status(403)
+        .json({ message: "Account does not hold the requested role" });
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { role: target },
+      select: { id: true, role: true, roles: true },
+    });
+
+    const accessToken = generateAccessToken(user.id, target, sessionId);
+
+    return res.status(200).json({
+      accessToken,
+      role: updated.role,
+      roles: updated.roles,
+    });
+  } catch (error) {
+    console.error("Switch role error:", error);
+    return res.status(500).json({ message: "Something went wrong while switching role" });
   }
 };
 

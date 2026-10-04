@@ -74,3 +74,15 @@ export const createAddressSchema = z.object({
   isDefault: z.boolean().optional(),
 });
 
+// Phase 1B multi-role: CUSTOMER adds VENDOR without changing active role.
+export const becomeVendorSchema = z.object({
+  brandName: z.string().min(2),
+  phoneNumber: z.string().min(10).optional(),
+  brandLogo: z.string().min(1).nullable().optional(),
+});
+
+// Phase 1B multi-role: switch active role between held CUSTOMER/VENDOR roles.
+export const switchRoleSchema = z.object({
+  role: z.enum(["CUSTOMER", "VENDOR"]),
+});
+

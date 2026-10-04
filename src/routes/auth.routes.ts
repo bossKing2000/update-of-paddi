@@ -11,6 +11,8 @@ import {
   forgotPassword,
   getProfile,
   selectRole,
+  becomeVendor,
+  switchRole,
   verifyResetCode,
   secureResetPassword,
   verifyEmail,
@@ -157,6 +159,28 @@ router.post(
   authenticate,
   async (req: Request, res: Response) => {
     await selectRole(req, res);
+  },
+);
+
+//  POST /become-vendor
+//  Phase 1B: CUSTOMER adds VENDOR to held roles (active role unchanged)
+//  access Private
+router.post(
+  "/become-vendor",
+  authenticate,
+  async (req: Request, res: Response) => {
+    await becomeVendor(req, res);
+  },
+);
+
+//  POST /switch-role
+//  Phase 1B: switch active role between held CUSTOMER/VENDOR roles
+//  access Private
+router.post(
+  "/switch-role",
+  authenticate,
+  async (req: Request, res: Response) => {
+    await switchRole(req, res);
   },
 );
 
