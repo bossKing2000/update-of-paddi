@@ -17,6 +17,12 @@ if (!process.env.CLOUDINARY_URL)
 if (!process.env.OPENSEARCH_NODE)
   throw new Error("Missing environment variable: OPENSEARCH_NODE");
 
+// Bank account numbers are stored AES-256-CBC encrypted (see
+// src/utils/encrypt.ts) — refuse to boot without a 32-char key rather
+// than failing on the first payout or silently writing plaintext.
+if (!process.env.ENCRYPTION_KEY || Buffer.from(process.env.ENCRYPTION_KEY).length !== 32)
+  throw new Error("Missing or invalid environment variable: ENCRYPTION_KEY (must be exactly 32 characters)");
+
 export default {
   port: process.env.PORT ? Number(process.env.PORT) : 5000,
 
