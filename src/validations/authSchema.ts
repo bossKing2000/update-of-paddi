@@ -50,10 +50,10 @@ export const updateUserSchema = z.object({
  
 export const loginSchema = z.object({
   email: z.email(),
-  password: z
-    .string()
-    .min(8, { message: "Password must be at least 8 characters" })
-    ,
+  // Login must accept any non-empty password: strength rules apply only at
+  // registration / password-(re)set time. Legacy and weak stored passwords
+  // (e.g. "abc123") must still be able to log in.
+  password: z.string().min(1, { message: "Password is required" }),
 });
 
 
