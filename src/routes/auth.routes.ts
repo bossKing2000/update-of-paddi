@@ -210,7 +210,9 @@ router.get("/verify-email", verifyEmail);
 //  POST /resend-verification
 //  Resends email verification link if token expired or lost
 //  access Public
-router.post("/resend-verification", resendVerificationEmail);
+router.post("/resend-verification", authRateLimiter, async (req: Request, res: Response) => {
+  await resendVerificationEmail(req, res);
+});
 
 //  POST /verify-reset-code
 //  Verifies email + reset code before allowing password reset
@@ -233,7 +235,7 @@ router.post("/secure-reset-password", async (req: Request, res: Response) => {
 });
 
 // post /google-login
-router.post("/google-login", async (req: Request, res: Response) => {
+router.post("/google-login", authRateLimiter, async (req: Request, res: Response) => {
   await googleLogin(req, res);
 });
 
@@ -247,6 +249,8 @@ router.get("/nearby", getNearbyVendors);
 //  POST /kyc/verify-nin
 //  Verify a VENDOR or DELIVERY user's NIN via Dojah, flips kycStatus to VERIFIED
 //  access Private (authenticated VENDOR/DELIVERY only — enforced in the service)
-router.post("/kyc/verify-nin", authenticate, verifyNINService);
+router.post("/kyc/verify-nin", authRateLimiter, authenticate, async (req: Request, res: Response) => {
+  await verifyNINService(req, res);
+});
 
 export default router;

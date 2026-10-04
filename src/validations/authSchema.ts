@@ -5,7 +5,15 @@ export const registerSchema = z.object({
   username: z.string().min(2).optional(), // ✅ Optional
   name: z.string().min(2),                // ✅ Required
   email: z.string().email(),
-  password: z.string().min(6),
+  password: z
+    .string()
+    .min(8, { message: "Password must be at least 8 characters" })
+    .max(128)
+    .refine((value) => /[A-Z]/.test(value), { message: "Password must contain at least one uppercase letter" })
+    .refine((value) => /[a-z]/.test(value), { message: "Password must contain at least one lowercase letter" })
+    .refine((value) => /[0-9]/.test(value), { message: "Password must contain at least one number" })
+    .refine((value) => /[@$!%*?&#^()_+\-=/]/.test(value), { message: "Password must contain at least one special character" })
+  ,
   phoneNumber: z.string().min(10).optional(),
   // Public registration must never mint a privileged role. ADMIN accounts
   // are created only via the create-admin CLI job or by an existing admin
@@ -42,20 +50,39 @@ export const updateUserSchema = z.object({
  
 export const loginSchema = z.object({
   email: z.email(),
-  password: z.string().min(6),
+  password: z
+    .string()
+    .min(8, { message: "Password must be at least 8 characters" })
+    ,
 });
 
 
 export const resetSchema = z.object({
   email: z.string().email(),
   code: z.string().length(6),
-  newPassword: z.string().min(6),
+  newPassword: z
+    .string()
+    .min(8, { message: "Password must be at least 8 characters" })
+    .max(128)
+    .refine((value) => /[A-Z]/.test(value), { message: "Password must contain at least one uppercase letter" })
+    .refine((value) => /[a-z]/.test(value), { message: "Password must contain at least one lowercase letter" })
+    .refine((value) => /[0-9]/.test(value), { message: "Password must contain at least one number" })
+    .refine((value) => /[@$!%*?&#^()_+\-=/]/.test(value), { message: "Password must contain at least one special character" })
+  ,
 });
 
 
 export const secureResetSchema = z.object({
   resetToken: z.string(),
-  newPassword: z.string().min(6),
+  newPassword: z
+    .string()
+    .min(8, { message: "Password must be at least 8 characters" })
+    .max(128)
+    .refine((value) => /[A-Z]/.test(value), { message: "Password must contain at least one uppercase letter" })
+    .refine((value) => /[a-z]/.test(value), { message: "Password must contain at least one lowercase letter" })
+    .refine((value) => /[0-9]/.test(value), { message: "Password must contain at least one number" })
+    .refine((value) => /[@$!%*?&#^()_+\-=/]/.test(value), { message: "Password must contain at least one special character" })
+  ,
 });
 
 
