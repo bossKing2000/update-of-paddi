@@ -27,6 +27,7 @@ import {
 import { generateResetToken } from "../utils/generateResetToken";
 import { ensureString } from "../utils/paramUtils";
 import { logger } from "../lib/logger";
+import { redisPayments } from "../lib/redis";
 import {
   deleteUserSession,
   deleteAllUserSessions,
@@ -278,16 +279,27 @@ export const login = async (req: Request, res: Response) => {
 
   const { email, password } = parsed.data;
 
-  try {
+    // Track failed login attempts per email
+    const attemptsKey = `login_attempts:${email.toLowerCase()}`;
+    const attemptsStr = await redisPayments.get(attemptsKey);
+    const attempts = attemptsStr ? parseInt(attemptsStr, 10) : 0;
+    if (attempts >= 5) {
+      return res.status(429).json({ message: "Too many failed attempts. Try again in 15 minutes." });
+    }
+
+    try {
     const user = await findUserByEmail(email);
 
-    if (
-      !user ||
-      !user.password ||
-      !(await comparePasswords(password, user.password))
-    ) {
-      return res.status(401).json({ message: "Invalid credentials" });
-    }
+  if (
+    !user ||
+    !user.password ||
+    !(await comparePasswords(password, user.password))
+  ) {
+    // Increment failed attempts
+    const newAttempts = attempts + 1;
+    await redisPayments.set(attemptsKey, newAttempts.toString(), { EX: 900 });
+    return res.status(401).json({ message: "Invalid credentials" });
+  }
 
     if (!user.isEmailVerified) {
       return res
@@ -380,7 +392,10 @@ export const login = async (req: Request, res: Response) => {
       phoneNumber: user.phoneNumber,
       brandName: user.brandName,
       brandLogo: user.brandLogo,
-    });
+      });
+
+    // Delete the login attempt counter upon successful login
+    await redisPayments.del(attemptsKey);
 
     res.status(200).json({
       message: "Login successful",
@@ -390,7 +405,8 @@ export const login = async (req: Request, res: Response) => {
       ...(isMobile ? { refreshToken } : {}),
     });
   } catch (error) {
-    console.error("Login error:", error);
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("Login error:", err.message);
     res.status(500).json({ message: "Something went wrong during login" });
   }
 };
@@ -542,7 +558,8 @@ export const refreshToken = async (req: Request, res: Response) => {
       refreshToken: newRefreshToken, // mobile clients will use this
     });
   } catch (error) {
-    console.error("Refresh token error:", error);
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("Refresh token error:", err.message);
     return res
       .status(401)
       .json({ message: "Invalid or expired refresh token" });
@@ -574,7 +591,8 @@ export const logout = async (req: AuthRequest, res: Response) => {
 
     res.status(200).json({ message: "Logged out successfully" });
   } catch (error) {
-    console.error("Logout error:", error);
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("Logout error:", err.message);
     res.status(500).json({ message: "Something went wrong during logout" });
   }
 };
@@ -662,9 +680,11 @@ export const forgotPassword = async (req: Request, res: Response) => {
     });
 
     // await sendResetEmail(req, email, resetToken);
-    // 👇 For testing only — logs the reset code to console
     if (process.env.NODE_ENV !== "production") {
-      console.log(`🧪 Reset code for ${email}: ${resetToken}`);
+      console.log("Reset code for testing:", { 
+        email, 
+        resetToken: "***" 
+      });
     }
     res.status(200).json({ message: "Reset code sent to your email" });
   } catch (error) {
@@ -933,7 +953,8 @@ export const secureResetPassword = async (req: Request, res: Response) => {
         "Password has been reset successfully. You have been logged out of all devices for security.",
     });
   } catch (error) {
-    console.error("Secure reset password error:", error);
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("Secure reset password error:", err.message);
     return res.status(407).json({ message: "Invalid or expired reset token" });
   }
 };
@@ -944,7 +965,7 @@ export const verifyEmail = async (
   res: Response,
 ): Promise<void> => {
   const { token } = req.query;
-  console.log("Verify email called with token:", token);
+  console.log('Verify email called with token:', '***');
 
   if (!token || typeof token !== "string") {
     console.log("Invalid token format");
@@ -991,7 +1012,7 @@ export const verifyEmail = async (
       },
     });
 
-    console.log("Email verified for user:", user.email);
+    console.log('Email verified for user:', '***');
     res.status(200).send(`
       <html>
         <head><title>Email Verified</title></head>
@@ -1056,7 +1077,8 @@ export const resendVerificationEmail = async (
 
     res.status(200).json({ message: "Verification email resent successfully" });
   } catch (error) {
-    console.error("[resendVerificationEmail]", error);
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("[resendVerificationEmail]", err.message);
     res.status(500).json({ message: "Internal server error" });
   }
 };
@@ -1076,7 +1098,8 @@ export const googleLogin = async (req: Request, res: Response) => {
         audience: process.env.GOOGLE_CLIENT_ID,
       });
     } catch (verifyError) {
-      console.error("[Google Token Verification Failed]", verifyError);
+      const verr = verifyError instanceof Error ? verifyError : new Error(String(verifyError));
+      console.error("[Google Token Verification Failed]", verr.message);
       return res.status(401).json({
         message: "Invalid or expired Google token. Please sign in again.",
       });
