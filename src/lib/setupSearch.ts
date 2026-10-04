@@ -1,136 +1,81 @@
 import prisma from "./prisma";
 
 /**
- * Sets up full-text search and trigram search on the "Product" table.
- * - Ensures pg_trgm extension
- * - Adds tsvector column if missing
- * - Creates GIN indexes for full-text and trigram search
- * - Creates trigger function to auto-update tsvector column
- * - Attaches trigger to the table
- * - Backfills existing rows
+ * Verifies full-text + trigram search objects on the "Product" table.
+ *
+ * Verify-only: all DDL now lives in migration
+ * 20261004010000_drift_capture (idempotent). This function only CHECKS that
+ * the column, indexes, trigger function and trigger exist, and reports how
+ * many rows still have a NULL tsvector_col — it never creates or backfills
+ * anything, so a partially-provisioned database fails loudly at boot
+ * instead of silently degrading search (or half-creating objects).
  */
 export async function setupSearch() {
-  console.log("🔧 Starting full-text + trigram search setup...");
+  console.log("🔧 Verifying full-text + trigram search setup...");
 
-  try {
-    // 0️⃣ Ensure pg_trgm extension
-    console.log("➡️ Step 0: Checking pg_trgm extension...");
-    await prisma.$executeRawUnsafe(`CREATE EXTENSION IF NOT EXISTS pg_trgm;`);
-    console.log("✅ pg_trgm extension ready");
+  const problems: string[] = [];
 
-    // 1️⃣ Add tsvector column if it does not exist
-    console.log("➡️ Step 1: Checking for tsvector_col column...");
-    await prisma.$executeRawUnsafe(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'Product' AND column_name = 'tsvector_col'
-        ) THEN
-          ALTER TABLE "Product" ADD COLUMN tsvector_col tsvector;
-        END IF;
-      END$$;
-    `);
-    console.log("✅ tsvector_col ensured");
+  // 0️⃣ pg_trgm extension present?
+  const ext = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(`
+    SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') AS "exists";
+  `).catch((e) => {
+    problems.push(`pg_trgm check failed: ${(e as Error).message}`);
+    return [{ exists: false }];
+  });
+  if (!ext[0]?.exists) problems.push("pg_trgm extension is missing");
 
-    // 2️⃣ Create GIN index for full-text search
-    console.log("➡️ Step 2: Checking for FTS GIN index...");
-    await prisma.$executeRawUnsafe(`
-      CREATE INDEX IF NOT EXISTS product_tsv_idx
-      ON "Product" USING GIN(tsvector_col);
-    `);
-    console.log("✅ FTS GIN index ready");
+  // 1️⃣ tsvector column present?
+  const col = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'Product' AND column_name = 'tsvector_col'
+    ) AS "exists";
+  `).catch((e) => {
+    problems.push(`tsvector_col check failed: ${(e as Error).message}`);
+    return [{ exists: false }];
+  });
+  if (!col[0]?.exists) problems.push("Product.tsvector_col column is missing");
 
-    // 3️⃣ Create Trigram indexes for fuzzy search
-    console.log("➡️ Step 3: Checking trigram indexes...");
-
-    // Trigram index for product name
-    await prisma.$executeRawUnsafe(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1
-          FROM pg_class c
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE c.relname = 'product_name_trgm_idx'
-            AND n.nspname = 'public'
-        ) THEN
-          CREATE INDEX product_name_trgm_idx
-          ON "Product" USING gin (name gin_trgm_ops);
-        END IF;
-      END$$;
-    `);
-
-    // Trigram index for product description
-    await prisma.$executeRawUnsafe(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1
-          FROM pg_class c
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE c.relname = 'product_description_trgm_idx'
-            AND n.nspname = 'public'
-        ) THEN
-          CREATE INDEX product_description_trgm_idx
-          ON "Product" USING gin (description gin_trgm_ops);
-        END IF;
-      END$$;
-    `);
-
-    console.log("✅ Trigram indexes ready");
-
-    // 4️⃣ Create trigger function to auto-update tsvector column
-    console.log("➡️ Step 4: Creating trigger function...");
-    await prisma.$executeRawUnsafe(`
-      CREATE OR REPLACE FUNCTION update_tsvector_col() RETURNS trigger AS $$
-      BEGIN
-        NEW.tsvector_col := to_tsvector(
-          'english',
-          coalesce(NEW.name,'') || ' ' || coalesce(NEW.description,'')
-        );
-        RETURN NEW;
-      END
-      $$ LANGUAGE plpgsql;
-    `);
-    console.log("✅ Trigger function ready");
-
-    // 5️⃣ Attach trigger to Product table
-    console.log("➡️ Step 5: Attaching trigger...");
-    await prisma.$executeRawUnsafe(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_trigger WHERE tgname = 'trigger_update_tsvector_col'
-        ) THEN
-          CREATE TRIGGER trigger_update_tsvector_col
-          BEFORE INSERT OR UPDATE ON "Product"
-          FOR EACH ROW EXECUTE FUNCTION update_tsvector_col();
-        END IF;
-      END$$;
-    `);
-    console.log("✅ Trigger attached");
-
-    // 6️⃣ Backfill existing rows with tsvector data
-    console.log("➡️ Step 6: Backfilling data...");
-    const updated = await prisma.$executeRawUnsafe<number>(`
-      UPDATE "Product"
-      SET tsvector_col = to_tsvector(
-        'english',
-        coalesce(name,'') || ' ' || coalesce(description,'')
-      )
-      WHERE tsvector_col IS NULL;
-    `);
-    console.log(`✅ Backfill complete (${updated} rows updated)`);
-
-    console.log("🎉 Search setup finished successfully!");
-  } catch (error) {
-    console.error("❌ Error during setupSearch:", error);
-    if (require.main === module) process.exit(1); // only exit if script is run directly
-    else throw error; // re-throw if imported
-  } finally {
-    await prisma.$disconnect();
+  // 2️⃣ indexes present?
+  for (const idx of ["product_tsv_idx", "product_name_trgm_idx", "product_description_trgm_idx"]) {
+    const found = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(`
+      SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = '${idx}') AS "exists";
+    `).catch(() => [{ exists: false }]);
+    if (!found[0]?.exists) problems.push(`index ${idx} is missing`);
   }
+
+  // 3️⃣ trigger function + trigger present?
+  const fn = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(`
+    SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'update_tsvector_col') AS "exists";
+  `).catch(() => [{ exists: false }]);
+  if (!fn[0]?.exists) problems.push("trigger function update_tsvector_col() is missing");
+
+  const trg = await prisma.$queryRawUnsafe<Array<{ exists: boolean }>>(`
+    SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trigger_update_tsvector_col') AS "exists";
+  `).catch(() => [{ exists: false }]);
+  if (!trg[0]?.exists) problems.push("trigger trigger_update_tsvector_col is missing");
+
+  // 4️⃣ any rows never vectorised?
+  try {
+    const rows = await prisma.$queryRawUnsafe<Array<{ count: bigint }>>(`
+      SELECT COUNT(*)::bigint AS "count" FROM "Product" WHERE tsvector_col IS NULL;
+    `);
+    const pending = Number(rows[0]?.count ?? 0);
+    if (pending > 0) problems.push(`${pending} Product row(s) have NULL tsvector_col`);
+  } catch (e) {
+    problems.push(`tsvector backfill check failed: ${(e as Error).message}`);
+  }
+
+  if (problems.length > 0) {
+    console.error("❌ Search setup verification FAILED:");
+    for (const p of problems) console.error(`   - ${p}`);
+    console.error("   Run migration 20261004010000_drift_capture (or re-run it — it is idempotent).");
+    throw new Error(`Search setup incomplete: ${problems.join("; ")}`);
+  }
+
+  console.log("✅ Search setup verified (column, indexes, trigger, backfill)");
+
+  await prisma.$disconnect().catch(() => {});
 }
 
 // ✅ Run only if called directly from command line
@@ -139,5 +84,4 @@ if (require.main === module) {
 }
 
 // Usage:
-// npx ts-node src/lib\setupSearch.ts
-
+// npx ts-node src/lib/setupSearch.ts
