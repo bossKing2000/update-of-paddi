@@ -110,6 +110,13 @@ model User {
   isBlocked                  Boolean             @default(false)
   blockedReason              String?
   blockedAt                  DateTime?
+  // Phase 1C vendor onboarding lifecycle. Null for non-vendors.
+  // NEW = holds VENDOR but requirements unmet; ACTIVE = may go live;
+  // PENDING_REVIEW = requirements met, manual approval needed (only when
+  // VENDOR_AUTO_APPROVE=false); SUSPENDED = admin-set, cannot sell.
+  vendorStatus               VendorStatus?
+  vendorStatusReason         String?
+  vendorStatusChangedAt      DateTime?
   emailVerificationToken     String?
   emailVerificationExpiresAt DateTime?
   passwordResetToken         PasswordResetToken? @relation("UserPasswordResetToken")
@@ -548,6 +555,14 @@ enum KycStatus {
   PENDING
   VERIFIED
   REJECTED
+}
+
+// Phase 1C vendor onboarding lifecycle (see User.vendorStatus).
+enum VendorStatus {
+  NEW
+  PENDING_REVIEW
+  ACTIVE
+  SUSPENDED
 }
 
 enum SpecialOrderRequestStatus {
