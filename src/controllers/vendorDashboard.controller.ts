@@ -135,7 +135,10 @@ export class DashboardController {
       if (!req.user) return res.status(401).json({ success: false, message: "Unauthorized" });
 
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 20;
+      const limit = Math.min(
+        parseInt(req.query.limit as string) || 20,
+        100
+      );
 
       // Call the updated service function
       const vendorService = new VendorDashboardService(req.user.id);
@@ -194,7 +197,10 @@ export class DashboardController {
 
       // Get query parameters
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 20;
+      const limit = Math.min(
+        parseInt(req.query.limit as string) || 20,
+        100
+      );
       const skip = (page - 1) * limit;
 
       // Create service instance

@@ -24,8 +24,8 @@ export const registerValidator = [
     .normalizeEmail(),
 
   body('password')
-    .isLength({ min: 6 })
-    .withMessage('Password must be at least 6 characters'),
+    .isLength({ min: 8 })
+    .withMessage('Password must be at least 8 characters'),
 
   body('role')
     .optional()

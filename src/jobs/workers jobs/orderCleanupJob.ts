@@ -82,55 +82,82 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
       if (batch.length === 0) break;
 
       for (const order of batch) {
-        const latestPayment = order.payments[0];
+        try {
+          const latestPayment = order.payments[0];
 
-        const productOffline = order.items.some((item) => item.product.archived);
+          const productOffline = order.items.some((item) => item.product.archived);
 
-        // Vendor offline / paused orders blocks the unpaid purchase flow
-        // exactly like product-offline does.
-        const vendorOffline =
-          !order.vendor.isLive ||
-          ((order.vendor.deliveryPreferences as Record<string, unknown> | null)?.acceptingOrders === false);
+          // Vendor offline / paused orders blocks the unpaid purchase flow
+          // exactly like product-offline does.
+          const vendorOffline =
+            !order.vendor.isLive ||
+            ((order.vendor.deliveryPreferences as Record<string, unknown> | null)?.acceptingOrders === false);
 
-        const paymentExpired = latestPayment?.expiresAt
-          ? isAfterUtc(now, latestPayment.expiresAt)
-          : true;
+          const paymentExpired = latestPayment?.expiresAt
+            ? isAfterUtc(now, latestPayment.expiresAt)
+            : true;
 
-        // Protect against finalization race — skip if payment is actively being processed
-        const isProcessing = order.payments.some((p) => (p as any).isProcessing === true);
-        if (isProcessing) {
-          logger.info({ orderId: order.id }, "Skipping order cleanup — payment isProcessing=true");
-          continue;
-        }
-
-        const offline = productOffline || vendorOffline;
-        if (!latestPayment || (offline && paymentExpired)) {
-          // Atomic: only cancel if still AWAITING_PAYMENT and no SUCCESS payment inserted concurrently
-          const updated = await prisma.order.updateMany({
-            where: {
-              id: order.id,
-              status: OrderStatus.AWAITING_PAYMENT,
-              payments: { none: { status: "SUCCESS" as any } },
-            },
-            data: {
-              status: OrderStatus.CANCELLED,
-              cancelledAt: now,
-              cancellationReason: productOffline
-                ? "PRODUCT_WENT_OFFLINE_BEFORE_PAYMENT"
-                : vendorOffline
-                  ? "VENDOR_WENT_OFFLINE_BEFORE_PAYMENT"
-                  : "PAYMENT_EXPIRED",
-              paymentStatus: "FAILED",
-            },
-          });
-          if (updated.count > 0) {
-            offlineUpdated++;
-            // Release the checkout-time stock reservation (see
-            // expireAwaitingPaymentJob — same winner-takes-restore rule).
-            await restoreStockForOrders(prisma, [order.id]).catch((err) =>
-              logger.error({ err, orderId: order.id }, "Failed to restore stock for cleaned-up order"),
-            );
+          // Protect against finalization race — skip if payment is actively being processed
+          const isProcessing = order.payments.some((p) => (p as any).isProcessing === true);
+          if (isProcessing) {
+            logger.info({ orderId: order.id }, "Skipping order cleanup — payment isProcessing=true");
+            continue;
           }
+
+          const offline = productOffline || vendorOffline;
+          if (!latestPayment || (offline && paymentExpired)) {
+            // Atomic: only cancel if still AWAITING_PAYMENT and no SUCCESS payment inserted concurrently
+            const updated = await prisma.order.updateMany({
+              where: {
+                id: order.id,
+                status: OrderStatus.AWAITING_PAYMENT,
+                payments: { none: { status: "SUCCESS" as any } },
+              },
+              data: {
+                status: OrderStatus.CANCELLED,
+                cancelledAt: now,
+                cancellationReason: productOffline
+                  ? "PRODUCT_WENT_OFFLINE_BEFORE_PAYMENT"
+                  : vendorOffline
+                    ? "VENDOR_WENT_OFFLINE_BEFORE_PAYMENT"
+                    : "PAYMENT_EXPIRED",
+                paymentStatus: "FAILED",
+              },
+            });
+            if (updated.count > 0) {
+              offlineUpdated++;
+              // Release the checkout-time stock reservation (see
+              // expireAwaitingPaymentJob — same winner-takes-restore rule).
+              await restoreStockForOrders(prisma, [order.id]).catch((err) =>
+                logger.error({ err, orderId: order.id }, "Failed to restore stock for cleaned-up order"),
+              );
+              await prisma.auditLog
+                .create({
+                  data: {
+                    action: "ORDER_AUTO_CANCELLED",
+                    ipAddress: "system",
+                    userAgent: "orderCleanupJob",
+                    path: "/jobs/orderCleanup",
+                    details: {
+                      reason: "PAYMENT_EXPIRED",
+                      orderId: order.id,
+                      cancellationReason: productOffline
+                        ? "PRODUCT_WENT_OFFLINE_BEFORE_PAYMENT"
+                        : vendorOffline
+                          ? "VENDOR_WENT_OFFLINE_BEFORE_PAYMENT"
+                          : "PAYMENT_EXPIRED",
+                    },
+                  },
+                })
+                .catch((err) =>
+                  logger.error({ err, orderId: order.id }, "Failed to write audit log for cleaned-up order"),
+                );
+            }
+          }
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          logger.error(`orderCleanupJob: failed to process order ${order.id}: ${err.message}`);
+          // continue to next order
         }
       }
 

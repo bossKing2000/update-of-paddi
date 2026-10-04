@@ -7,6 +7,7 @@ import { resolveBankAccount, listBanks } from "../services/payoutService";
 import { sendSuccess } from "../utils/apiResponse";
 import { ValidationError } from "../errors/AppError";
 import { createAuditLog } from "../utils/auditLog.service";
+import { encrypt, decrypt } from "../utils/encrypt";
 
 // GET /vendor/payouts
 export const getPayoutSummary = async (req: AuthRequest, res: Response) => {
@@ -33,7 +34,7 @@ export const getBankDetails = async (req: AuthRequest, res: Response) => {
       bankCode: vendor.bankCode,
       bankAccountName: vendor.bankAccountName,
       bankAccountNumber: vendor.bankAccountNumber
-        ? `******${vendor.bankAccountNumber.slice(-4)}`
+        ? `******${decrypt(vendor.bankAccountNumber).slice(-4)}`
         : null,
     },
     "Bank details retrieved",
@@ -77,7 +78,7 @@ export const setBankDetails = async (req: AuthRequest, res: Response) => {
     data: {
       bankName,
       bankCode,
-      bankAccountNumber,
+      bankAccountNumber: encrypt(bankAccountNumber),
       bankAccountName: resolved.account_name,
       paystackRecipientCode: null, // re-created fresh on the next payout with these new details
     },

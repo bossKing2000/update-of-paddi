@@ -26,6 +26,7 @@ import {
   riderVehicleSchema,
   riderWithdrawalSchema,
 } from "../validations/riderOperationsSchema";
+import { encrypt, decrypt } from "../utils/encrypt";
 
 const getDriver = async (userId: string) => {
   const driver = await prisma.deliveryPerson.findUnique({
@@ -113,14 +114,14 @@ export const getRiderPayoutSummary = async (
       bankOnFile: account
         ? {
             ...account,
-            accountNumber: `••••••${account.accountNumber.slice(-4)}`,
+            accountNumber: `••••••${decrypt(account.accountNumber).slice(-4)}`,
           }
         : null,
       withdrawals: withdrawals.map(({ payoutAccount, ...withdrawal }) => ({
         ...withdrawal,
         payoutAccount: {
           ...payoutAccount,
-          accountNumber: `••••••${payoutAccount.accountNumber.slice(-4)}`,
+          accountNumber: `••••••${decrypt(payoutAccount.accountNumber).slice(-4)}`,
         },
       })),
     },
@@ -157,14 +158,14 @@ export const setRiderBankDetails = async (req: AuthRequest, res: Response) => {
       deliveryPersonId: driver.id,
       bankName,
       bankCode,
-      accountNumber,
+      accountNumber: encrypt(accountNumber),
       accountName: resolved.account_name,
       recipientCode: null,
     },
     update: {
       bankName,
       bankCode,
-      accountNumber,
+      accountNumber: encrypt(accountNumber),
       accountName: resolved.account_name,
       recipientCode: null,
       verifiedAt: new Date(),
@@ -181,7 +182,7 @@ export const setRiderBankDetails = async (req: AuthRequest, res: Response) => {
     {
       accountName: account.accountName,
       bankName: account.bankName,
-      last4: account.accountNumber.slice(-4),
+      last4: decrypt(account.accountNumber).slice(-4),
     },
     "Bank details verified and saved",
   );
@@ -271,7 +272,7 @@ export const requestRiderWithdrawal = async (
         ...withdrawal,
         payoutAccount: {
           ...withdrawal.payoutAccount,
-          accountNumber: `••••••${withdrawal.payoutAccount.accountNumber.slice(-4)}`,
+          accountNumber: `••••••${decrypt(withdrawal.payoutAccount.accountNumber).slice(-4)}`,
         },
       },
     },
@@ -308,7 +309,7 @@ export const processRiderWithdrawal = async (
     if (!recipientCode) {
       recipientCode = await createTransferRecipient({
         name: withdrawal.payoutAccount.accountName,
-        accountNumber: withdrawal.payoutAccount.accountNumber,
+        accountNumber: decrypt(withdrawal.payoutAccount.accountNumber),
         bankCode: withdrawal.payoutAccount.bankCode,
       });
       await prisma.riderPayoutAccount.update({
