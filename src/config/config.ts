@@ -43,11 +43,9 @@ export default {
   allowedOrigins: [
     "https://ui-food-paddi.onrender.com",
     "https://ceeb2aee.food-paddi-website.pages.dev",
-    "http://10.0.2.2:5000",
-    "http://127.0.0.1:5500",
-    "http://127.0.0.1:60308",
-    ...(process.env.CLIENT_URL ? [process.env.CLIENT_URL] : []),
-    ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim()) : []),
+...(process.env.NODE_ENV !== "production" 
+  ? ["http://10.0.2.2:5000", "http://127.0.0.1:5500", "http://127.0.0.1:60308"] 
+  : []),
   ],
 
   emailUser: process.env.EMAIL_USER!,
