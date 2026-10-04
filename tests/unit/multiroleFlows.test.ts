@@ -16,7 +16,7 @@ import { ForbiddenError, ValidationError } from "../../src/errors/AppError";
 jest.mock("../../src/lib/prisma", () => ({
   __esModule: true,
   default: {
-    user: { findUnique: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
+    user: { findUnique: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     product: { findUnique: jest.fn() },
     productReview: { findFirst: jest.fn() },
     vendorReview: { findFirst: jest.fn(), groupBy: jest.fn(async () => []) },
@@ -60,7 +60,7 @@ jest.mock("../../src/lib/session", () => ({
   deleteUserSession: jest.fn(async () => {}),
   deleteAllUserSessions: jest.fn(async () => {}),
   listUserSessions: jest.fn(async () => []),
-  getUserSession: jest.fn(async () => null),
+  getUserSession: jest.fn(async () => ({})),
 }));
 
 jest.mock("../../src/jobs/workers jobs/vendorFollowWorker", () => ({
@@ -111,12 +111,10 @@ describe("become-vendor", () => {
   };
 
   it("adds VENDOR to held roles without changing the active role", async () => {
-    db.user.findUnique.mockResolvedValue({ ...customer });
-    db.user.update.mockImplementation(async (args: any) => ({
-      id: "cust-1",
-      role: "CUSTOMER",
-      roles: ["CUSTOMER", "VENDOR"],
-    }));
+    db.user.findUnique
+      .mockResolvedValueOnce({ ...customer })
+      .mockResolvedValueOnce({ id: "cust-1", role: "CUSTOMER", roles: ["CUSTOMER", "VENDOR"] });
+    db.user.updateMany.mockResolvedValue({ count: 1 });
 
     const r = res();
     await becomeVendor(
@@ -125,10 +123,15 @@ describe("become-vendor", () => {
     );
 
     expect(r.status).toHaveBeenCalledWith(200);
-    const updateArgs = db.user.update.mock.calls[0][0];
-    expect(updateArgs.data.roles).toEqual(["CUSTOMER", "VENDOR"]);
-    expect(updateArgs.data.role).toBeUndefined(); // active role untouched
-    expect(updateArgs.data.brandName).toBe("Dual Foods");
+    // Conditional atomic update: only wins when VENDOR not already held.
+    expect(db.user.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "cust-1" }),
+        data: expect.objectContaining({ brandName: "Dual Foods" }),
+      }),
+    );
+    const cond = db.user.updateMany.mock.calls[0][0].where;
+    expect(JSON.stringify(cond)).toContain("VENDOR");
     expect(r.json).toHaveBeenCalledWith(
       expect.objectContaining({ role: "CUSTOMER", roles: ["CUSTOMER", "VENDOR"] }),
     );
@@ -142,7 +145,22 @@ describe("become-vendor", () => {
       r,
     );
     expect(r.status).toHaveBeenCalledWith(400);
-    expect(db.user.update).not.toHaveBeenCalled();
+    expect(db.user.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("loses a concurrent VENDOR-add race cleanly (conditional update claims nothing)", async () => {
+    db.user.findUnique
+      .mockResolvedValueOnce({ ...customer })
+      .mockResolvedValueOnce({ id: "cust-1", roles: ["CUSTOMER", "VENDOR"] });
+    db.user.updateMany.mockResolvedValue({ count: 0 });
+
+    const r = res();
+    await becomeVendor(
+      { ...authed("cust-1", "CUSTOMER"), body: { brandName: "X Foods" } } as any,
+      r,
+    );
+
+    expect(r.status).toHaveBeenCalledWith(409);
   });
 
   it("rejects ADMIN / DELIVERY / non-CUSTOMER / unverified / blocked", async () => {
@@ -162,7 +180,7 @@ describe("become-vendor", () => {
       );
       expect(r.status).not.toHaveBeenCalledWith(200);
     }
-    expect(db.user.update).not.toHaveBeenCalled();
+    expect(db.user.updateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -222,6 +240,18 @@ describe("switch-role", () => {
     const r = res();
     await switchRole({ ...authed("dual-1", "CUSTOMER"), body: { role: "VENDOR" } } as any, r);
     expect(r.status).toHaveBeenCalledWith(403);
+  });
+
+  it("rejects a revoked session even with a valid held role", async () => {
+    const { getUserSession } = require("../../src/lib/session") as { getUserSession: jest.Mock };
+    getUserSession.mockResolvedValueOnce(null);
+    db.user.findUnique.mockResolvedValue({ ...dual });
+
+    const r = res();
+    await switchRole({ ...authed("dual-1", "CUSTOMER"), body: { role: "VENDOR" } } as any, r);
+
+    expect(r.status).toHaveBeenCalledWith(401);
+    expect(db.user.update).not.toHaveBeenCalled();
   });
 });
 

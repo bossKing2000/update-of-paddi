@@ -898,18 +898,34 @@ export const becomeVendor = async (req: AuthRequest, res: Response) => {
         .json({ message: e instanceof Error ? e.message : "Invalid role combination" });
     }
 
+    // Conditional atomic update: only writers that still don't hold VENDOR
+    // win the row. A concurrent become-vendor (or admin role change) that
+    // lands between our read above and this write yields count 0 instead
+    // of silently pushing a duplicate entry.
     const data: Record<string, unknown> = {
-      roles: nextRoles,
       brandName: parsed.data.brandName,
     };
     if (parsed.data.phoneNumber !== undefined) data.phoneNumber = parsed.data.phoneNumber;
     if (parsed.data.brandLogo !== undefined) data.brandLogo = parsed.data.brandLogo;
 
-    const updated = await prisma.user.update({
+    const claimed = await prisma.user.updateMany({
+      where: { id: userId, NOT: { roles: { has: Role.VENDOR } } },
+      data: { ...data, roles: { push: Role.VENDOR } },
+    });
+    if (claimed.count === 0) {
+      const fresh = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, roles: true },
+      });
+      if (!fresh) return res.status(404).json({ message: "User not found" });
+      return res.status(409).json({ message: "Account already holds VENDOR role" });
+    }
+
+    const updated = await prisma.user.findUnique({
       where: { id: userId },
-      data,
       select: { id: true, role: true, roles: true },
     });
+    if (!updated) return res.status(404).json({ message: "User not found" });
 
     return res.status(200).json({
       message: "VENDOR role added. Switch to it via POST /api/auth/switch-role.",
@@ -952,6 +968,14 @@ export const switchRole = async (req: AuthRequest, res: Response) => {
       return res
         .status(403)
         .json({ message: "Account does not hold the requested role" });
+    }
+
+    // The authenticate middleware already verified this session, but the
+    // token must also be rejected if the session was revoked between the
+    // middleware check and now (logout-all-devices racing a switch).
+    const session = await getUserSession(userId, sessionId);
+    if (!session) {
+      return res.status(401).json({ message: "Session expired. Please log in again." });
     }
 
     const updated = await prisma.user.update({
