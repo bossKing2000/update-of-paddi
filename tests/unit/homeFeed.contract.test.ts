@@ -99,13 +99,21 @@ describe("home feed contract surface", () => {
     const fs2 = require("node:fs");
     const path2 = require("node:path");
     const migrationsDir = path2.join(__dirname, "..", "..", "prisma", "migrations");
-    const vendorMigration = fs2
+    // Single clean baseline (1B.3): the flag is created with the table.
+    // (Pre-baseline history created it via ADD COLUMN + backfill instead.)
+    const allMigrations = fs2
       .readdirSync(migrationsDir)
-      .filter((d: string) => d.includes("vendor_live"))
-      .map((d: string) => fs2.readFileSync(path2.join(migrationsDir, d, "migration.sql"), "utf8"))
+      .filter((d: string) => !d.startsWith("."))
+      .map((d: string) => {
+        const p = path2.join(migrationsDir, d, "migration.sql");
+        try {
+          return fs2.readFileSync(p, "utf8");
+        } catch {
+          return "";
+        }
+      })
       .join("\n");
-    assert.match(vendorMigration, /ADD COLUMN "isLive"/);
-    assert.match(vendorMigration, /SET "isLive" = true WHERE "role" = 'VENDOR'/);
+    assert.match(allMigrations, /"isLive" BOOLEAN/);
 
     // availability service exists and exposes the single rule
     const availability = read("src", "services", "vendorAvailability.service.ts");

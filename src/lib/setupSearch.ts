@@ -69,7 +69,7 @@ export async function setupSearch() {
   if (problems.length > 0) {
     console.error("❌ Search setup verification FAILED:");
     for (const p of problems) console.error(`   - ${p}`);
-    console.error("   Run migration 20261004010000_drift_capture (or re-run it — it is idempotent).");
+    console.error("   Run the baseline migration (it is idempotent).");
     throw new Error(`Search setup incomplete: ${problems.join("; ")}`);
   }
 

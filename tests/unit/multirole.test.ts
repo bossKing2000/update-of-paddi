@@ -117,16 +117,16 @@ describe("onboarding derived from held roles", () => {
 });
 
 describe("migration backfill + schema", () => {
-  it("migration backfills roles from role", () => {
-    const sql = fs.readFileSync(
-      path.join(
-        __dirname,
-        "../../prisma/migrations/20261004000000_user_roles_multirole/migration.sql",
-      ),
-      "utf8",
-    );
-    expect(sql).toMatch(/ADD COLUMN "roles"/);
-    expect(sql).toMatch(/UPDATE "User" SET "roles" = ARRAY\["role"\] WHERE "role" IS NOT NULL/);
+  it("baseline migration creates the roles column with an empty-array default", () => {
+    const dir = path.join(__dirname, "../../prisma/migrations");
+    const baseline = fs
+      .readdirSync(dir)
+      .filter((d) => d.endsWith("_baseline"))
+      .sort()
+      .pop();
+    expect(baseline).toBeTruthy();
+    const sql = fs.readFileSync(path.join(dir, baseline!, "migration.sql"), "utf8");
+    expect(sql).toMatch(/"roles" "Role"\[\] DEFAULT ARRAY\[\]::"Role"\[\]/);
   });
 
   it("User model has roles Role[] with default", () => {

@@ -14,13 +14,13 @@ CREATE TYPE "SpecialOrderRequestStatus" AS ENUM ('PENDING', 'OFFER_MADE', 'ACCEP
 CREATE TYPE "SpecialOrderOfferStatus" AS ENUM ('PENDING', 'ACCEPTED', 'REJECTED');
 
 -- CreateEnum
-CREATE TYPE "Category" AS ENUM ('BREAKFAST', 'LUNCH', 'DINNER', 'DESSERT', 'DRINK');
-
--- CreateEnum
 CREATE TYPE "OrderStatus" AS ENUM ('PENDING', 'WAITING_VENDOR_CONFIRMATION', 'WAITING_CUSTOMER_APPROVAL', 'AWAITING_PAYMENT', 'PAYMENT_CONFIRMED', 'COOKING', 'READY_FOR_PICKUP', 'OUT_FOR_DELIVERY', 'COMPLETED', 'CANCELLED', 'FAILED_DELIVERY', 'PAYMENT_EXPIRED', 'CANCELLED_UNPAID');
 
 -- CreateEnum
 CREATE TYPE "DiscountType" AS ENUM ('PERCENTAGE', 'FIXED', 'DELIVERY');
+
+-- CreateEnum
+CREATE TYPE "PromotionScope" AS ENUM ('SINGLE_PRODUCT', 'SELECTED_PRODUCTS', 'VENDOR_WIDE');
 
 -- CreateEnum
 CREATE TYPE "ReferralRewardStatus" AS ENUM ('PENDING', 'PAID', 'CANCELLED');
@@ -29,10 +29,13 @@ CREATE TYPE "ReferralRewardStatus" AS ENUM ('PENDING', 'PAID', 'CANCELLED');
 CREATE TYPE "PaymentStatus" AS ENUM ('PENDING', 'INITIATED', 'SUCCESS', 'FAILED', 'EXPIRED', 'LATE_PAYMENT', 'AMOUNT_MISMATCH', 'REFUNDED');
 
 -- CreateEnum
+CREATE TYPE "PotPointTransactionType" AS ENUM ('EARN', 'REDEEM', 'ADJUST');
+
+-- CreateEnum
 CREATE TYPE "PayoutStatus" AS ENUM ('PENDING', 'PROCESSING', 'PAID', 'FAILED');
 
 -- CreateEnum
-CREATE TYPE "RefundStatus" AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'COMPLETED');
+CREATE TYPE "RefundStatus" AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'PROCESSING', 'COMPLETED', 'FAILED');
 
 -- CreateEnum
 CREATE TYPE "RiderWithdrawalStatus" AS ENUM ('PENDING', 'PROCESSING', 'PAID', 'FAILED', 'CANCELLED');
@@ -82,17 +85,16 @@ CREATE TABLE "User" (
     "preferences" TEXT[],
     "bio" TEXT,
     "role" "Role",
+    "roles" "Role"[] DEFAULT ARRAY[]::"Role"[],
     "brandName" TEXT,
     "brandLogo" TEXT,
     "googleId" TEXT,
     "kycStatus" "KycStatus" NOT NULL DEFAULT 'PENDING',
     "nin" TEXT,
     "ninData" JSONB,
-    "order_openAT" TEXT,
-    "order_closeAT" TEXT,
-    "operatingHours" JSONB,
     "deliveryPreferences" JSONB,
     "serviceAreas" JSONB,
+    "isLive" BOOLEAN NOT NULL DEFAULT false,
     "commissionRate" DOUBLE PRECISION NOT NULL DEFAULT 0.15,
     "bankName" TEXT,
     "bankCode" TEXT,
@@ -101,6 +103,7 @@ CREATE TABLE "User" (
     "paystackRecipientCode" TEXT,
     "referralCode" TEXT,
     "referredByUserId" TEXT,
+    "potPointsBalance" INTEGER NOT NULL DEFAULT 0,
     "tokenVersion" INTEGER NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -115,6 +118,24 @@ CREATE TABLE "User" (
     "emailVerificationExpiresAt" TIMESTAMP(3),
 
     CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "UserSession" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "sessionId" TEXT NOT NULL,
+    "ip" TEXT,
+    "userAgent" TEXT,
+    "deviceId" TEXT,
+    "geoCity" TEXT,
+    "geoRegion" TEXT,
+    "geoCountry" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "lastRefreshedAt" TIMESTAMP(3) NOT NULL,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "UserSession_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -137,13 +158,30 @@ CREATE TABLE "Address" (
 );
 
 -- CreateTable
+CREATE TABLE "DishType" (
+    "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "description" TEXT,
+    "imageUrl" TEXT,
+    "sortOrder" INTEGER NOT NULL DEFAULT 100,
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "DishType_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "Product" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "description" TEXT NOT NULL,
     "price" DOUBLE PRECISION NOT NULL,
     "archived" BOOLEAN NOT NULL DEFAULT false,
-    "category" "Category" NOT NULL,
+    "dishTypeId" TEXT NOT NULL,
+    "portionLabel" TEXT,
+    "trackInventory" BOOLEAN NOT NULL DEFAULT false,
+    "stock" INTEGER,
     "images" TEXT[],
     "thumbnail" TEXT,
     "video" TEXT[],
@@ -157,26 +195,8 @@ CREATE TABLE "Product" (
     "popularityUpdatedAt" TIMESTAMP(3),
     "popularityPercent" DOUBLE PRECISION NOT NULL DEFAULT 0,
     "isNew" BOOLEAN NOT NULL DEFAULT false,
-    "isLive" BOOLEAN NOT NULL DEFAULT false,
-    "liveUntil" TIMESTAMP(3),
 
     CONSTRAINT "Product_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "ProductSchedule" (
-    "id" TEXT NOT NULL,
-    "productId" TEXT NOT NULL,
-    "goLiveAt" TIMESTAMP(3),
-    "takeDownAt" TIMESTAMP(3),
-    "isLive" BOOLEAN NOT NULL DEFAULT false,
-    "graceMinutes" INTEGER DEFAULT 0,
-    "autoGraceEnabled" BOOLEAN NOT NULL DEFAULT false,
-    "manualGraceEnabled" BOOLEAN NOT NULL DEFAULT false,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "ProductSchedule_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -185,6 +205,7 @@ CREATE TABLE "ProductOption" (
     "productId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "price" DOUBLE PRECISION NOT NULL,
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
 
     CONSTRAINT "ProductOption_pkey" PRIMARY KEY ("id")
 );
@@ -367,6 +388,7 @@ CREATE TABLE "Payment" (
     "idempotencyKey" TEXT,
     "isProcessing" BOOLEAN NOT NULL DEFAULT false,
     "processingStartedAt" TIMESTAMP(3),
+    "refundedAmount" INTEGER NOT NULL DEFAULT 0,
     "startedAt" TIMESTAMP(3),
     "completedAt" TIMESTAMP(3),
     "expiresAt" TIMESTAMP(3),
@@ -396,13 +418,14 @@ CREATE TABLE "AuditLog" (
 -- CreateTable
 CREATE TABLE "Promotion" (
     "id" TEXT NOT NULL,
-    "code" TEXT NOT NULL,
+    "code" TEXT,
     "vendorId" TEXT,
     "name" TEXT NOT NULL,
     "description" TEXT,
     "type" "DiscountType" NOT NULL,
     "value" DOUBLE PRECISION NOT NULL,
     "maxDiscount" DOUBLE PRECISION,
+    "scope" "PromotionScope" NOT NULL DEFAULT 'VENDOR_WIDE',
     "isActive" BOOLEAN NOT NULL DEFAULT true,
     "startsAt" TIMESTAMP(3),
     "expiresAt" TIMESTAMP(3),
@@ -427,6 +450,19 @@ CREATE TABLE "PromotionUsage" (
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "PromotionUsage_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "PotPointTransaction" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "points" INTEGER NOT NULL,
+    "type" "PotPointTransactionType" NOT NULL,
+    "reason" TEXT NOT NULL,
+    "orderId" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "PotPointTransaction_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -475,6 +511,8 @@ CREATE TABLE "RefundRequest" (
     "resolvedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "paystackRefundId" TEXT,
+    "requestedAmountKobo" INTEGER,
 
     CONSTRAINT "RefundRequest_pkey" PRIMARY KEY ("id")
 );
@@ -802,6 +840,29 @@ CREATE TABLE "VendorSupportTicket" (
 );
 
 -- CreateTable
+CREATE TABLE "CustomerSupportTicket" (
+    "id" TEXT NOT NULL,
+    "customerId" TEXT NOT NULL,
+    "category" TEXT NOT NULL,
+    "subject" TEXT NOT NULL,
+    "description" TEXT NOT NULL,
+    "status" "SupportTicketStatus" NOT NULL DEFAULT 'OPEN',
+    "orderId" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "CustomerSupportTicket_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "_PromotionProducts" (
+    "A" TEXT NOT NULL,
+    "B" TEXT NOT NULL,
+
+    CONSTRAINT "_PromotionProducts_AB_pkey" PRIMARY KEY ("A","B")
+);
+
+-- CreateTable
 CREATE TABLE "_ProductOrders" (
     "A" TEXT NOT NULL,
     "B" TEXT NOT NULL,
@@ -825,19 +886,40 @@ CREATE UNIQUE INDEX "User_nin_key" ON "User"("nin");
 CREATE UNIQUE INDEX "User_referralCode_key" ON "User"("referralCode");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "UserSession_sessionId_key" ON "UserSession"("sessionId");
+
+-- CreateIndex
+CREATE INDEX "UserSession_userId_idx" ON "UserSession"("userId");
+
+-- CreateIndex
+CREATE INDEX "UserSession_sessionId_idx" ON "UserSession"("sessionId");
+
+-- CreateIndex
+CREATE INDEX "UserSession_userId_sessionId_idx" ON "UserSession"("userId", "sessionId");
+
+-- CreateIndex
 CREATE INDEX "Address_latitude_longitude_idx" ON "Address"("latitude", "longitude");
 
 -- CreateIndex
 CREATE INDEX "Address_isDefault_idx" ON "Address"("isDefault");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "DishType_name_key" ON "DishType"("name");
+
+-- CreateIndex
+CREATE INDEX "DishType_isActive_sortOrder_idx" ON "DishType"("isActive", "sortOrder");
+
+-- CreateIndex
 CREATE INDEX "product_name_idx" ON "Product"("name");
 
 -- CreateIndex
-CREATE INDEX "product_category_idx" ON "Product"("category");
+CREATE INDEX "Product_dishTypeId_idx" ON "Product"("dishTypeId");
 
 -- CreateIndex
 CREATE INDEX "product_vendor_idx" ON "Product"("vendorId");
+
+-- CreateIndex
+CREATE INDEX "Product_vendorId_archived_idx" ON "Product"("vendorId", "archived");
 
 -- CreateIndex
 CREATE INDEX "Product_archived_idx" ON "Product"("archived");
@@ -849,10 +931,7 @@ CREATE INDEX "Product_createdAt_idx" ON "Product"("createdAt");
 CREATE INDEX "Product_price_idx" ON "Product"("price");
 
 -- CreateIndex
-CREATE INDEX "Product_isLive_idx" ON "Product"("isLive");
-
--- CreateIndex
-CREATE UNIQUE INDEX "ProductSchedule_productId_key" ON "ProductSchedule"("productId");
+CREATE UNIQUE INDEX "ProductOption_productId_name_key" ON "ProductOption"("productId", "name");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Order_specialOrderOfferId_key" ON "Order"("specialOrderOfferId");
@@ -930,6 +1009,12 @@ CREATE INDEX "PromotionUsage_userId_idx" ON "PromotionUsage"("userId");
 CREATE INDEX "PromotionUsage_userId_promotionId_idx" ON "PromotionUsage"("userId", "promotionId");
 
 -- CreateIndex
+CREATE INDEX "PotPointTransaction_userId_createdAt_idx" ON "PotPointTransaction"("userId", "createdAt");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "PotPointTransaction_orderId_key" ON "PotPointTransaction"("orderId");
+
+-- CreateIndex
 CREATE INDEX "ReferralReward_referrerId_idx" ON "ReferralReward"("referrerId");
 
 -- CreateIndex
@@ -946,6 +1031,9 @@ CREATE INDEX "VendorPayout_vendorId_idx" ON "VendorPayout"("vendorId");
 
 -- CreateIndex
 CREATE INDEX "VendorPayout_status_idx" ON "VendorPayout"("status");
+
+-- CreateIndex
+CREATE INDEX "RefundRequest_paystackRefundId_idx" ON "RefundRequest"("paystackRefundId");
 
 -- CreateIndex
 CREATE INDEX "Cart_customerId_idx" ON "Cart"("customerId");
@@ -1050,19 +1138,31 @@ CREATE INDEX "VendorSupportTicket_vendorId_createdAt_idx" ON "VendorSupportTicke
 CREATE INDEX "VendorSupportTicket_vendorId_status_idx" ON "VendorSupportTicket"("vendorId", "status");
 
 -- CreateIndex
+CREATE INDEX "CustomerSupportTicket_customerId_createdAt_idx" ON "CustomerSupportTicket"("customerId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "CustomerSupportTicket_customerId_status_idx" ON "CustomerSupportTicket"("customerId", "status");
+
+-- CreateIndex
+CREATE INDEX "_PromotionProducts_B_index" ON "_PromotionProducts"("B");
+
+-- CreateIndex
 CREATE INDEX "_ProductOrders_B_index" ON "_ProductOrders"("B");
 
 -- AddForeignKey
 ALTER TABLE "User" ADD CONSTRAINT "User_referredByUserId_fkey" FOREIGN KEY ("referredByUserId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "UserSession" ADD CONSTRAINT "UserSession_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "Address" ADD CONSTRAINT "Address_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Product" ADD CONSTRAINT "Product_vendorId_fkey" FOREIGN KEY ("vendorId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Product" ADD CONSTRAINT "Product_dishTypeId_fkey" FOREIGN KEY ("dishTypeId") REFERENCES "DishType"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ProductSchedule" ADD CONSTRAINT "ProductSchedule_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "Product" ADD CONSTRAINT "Product_vendorId_fkey" FOREIGN KEY ("vendorId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ProductOption" ADD CONSTRAINT "ProductOption_productId_fkey" FOREIGN KEY ("productId") REFERENCES "Product"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -1147,6 +1247,9 @@ ALTER TABLE "PromotionUsage" ADD CONSTRAINT "PromotionUsage_promotionId_fkey" FO
 
 -- AddForeignKey
 ALTER TABLE "PromotionUsage" ADD CONSTRAINT "PromotionUsage_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "PotPointTransaction" ADD CONSTRAINT "PotPointTransaction_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "ReferralReward" ADD CONSTRAINT "ReferralReward_referrerId_fkey" FOREIGN KEY ("referrerId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -1269,7 +1372,107 @@ ALTER TABLE "SpecialOrderOffer" ADD CONSTRAINT "SpecialOrderOffer_vendorId_fkey"
 ALTER TABLE "VendorSupportTicket" ADD CONSTRAINT "VendorSupportTicket_vendorId_fkey" FOREIGN KEY ("vendorId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "CustomerSupportTicket" ADD CONSTRAINT "CustomerSupportTicket_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "_PromotionProducts" ADD CONSTRAINT "_PromotionProducts_A_fkey" FOREIGN KEY ("A") REFERENCES "Product"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "_PromotionProducts" ADD CONSTRAINT "_PromotionProducts_B_fkey" FOREIGN KEY ("B") REFERENCES "Promotion"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "_ProductOrders" ADD CONSTRAINT "_ProductOrders_A_fkey" FOREIGN KEY ("A") REFERENCES "Order"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "_ProductOrders" ADD CONSTRAINT "_ProductOrders_B_fkey" FOREIGN KEY ("B") REFERENCES "Product"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- ── Baseline appendix: Product full-text search (non-Prisma objects) ─────
+-- Previously created at server boot by setupSearch.ts (now verify-only).
+-- Idempotent: safe to re-run and safe where the objects already exist.
+-- NOTE: CREATE EXTENSION requires privileges the deploy role may not have.
+-- If this fails on a managed DB, have an admin run
+-- `CREATE EXTENSION IF NOT EXISTS pg_trgm;` once, then re-run the migration.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS tsvector_col tsvector;
+
+CREATE INDEX IF NOT EXISTS product_tsv_idx ON "Product" USING GIN(tsvector_col);
+CREATE INDEX IF NOT EXISTS product_name_trgm_idx ON "Product" USING gin (name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS product_description_trgm_idx ON "Product" USING gin (description gin_trgm_ops);
+
+CREATE OR REPLACE FUNCTION update_tsvector_col() RETURNS trigger AS $$
+BEGIN
+  NEW.tsvector_col := to_tsvector(
+    'english',
+    coalesce(NEW.name,'') || ' ' || coalesce(NEW.description,'')
+  );
+  RETURN NEW;
+END
+$$ LANGUAGE plpgsql;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trigger_update_tsvector_col') THEN
+    CREATE TRIGGER trigger_update_tsvector_col
+    BEFORE INSERT OR UPDATE ON "Product"
+    FOR EACH ROW EXECUTE FUNCTION update_tsvector_col();
+  END IF;
+END$$;
+
+UPDATE "Product" SET tsvector_col = to_tsvector('english', coalesce(name,'') || ' ' || coalesce(description,'')) WHERE tsvector_col IS NULL;
+
+-- ── Baseline appendix: curated DishType vocabulary (data) ─────────
+-- Fixed stable ids the seeder and product creation depend on.
+-- Idempotent via ON CONFLICT DO NOTHING.
+INSERT INTO "DishType" ("id", "name", "description", "sortOrder", "isActive", "createdAt", "updatedAt") VALUES
+  ('JOLLOF', 'Jollof Rice', 'Smoky party-style jollof and its cousins', 10, true, NOW(), NOW()),
+  ('FRIED_RICE', 'Fried Rice', 'Nigerian fried rice dishes', 20, true, NOW(), NOW()),
+  ('OFADA', 'Ofada Rice', 'Ofada with ayamase or designer stew', 30, true, NOW(), NOW()),
+  ('WHITE_RICE', 'White Rice', 'Plain white rice with stews and sauces', 40, true, NOW(), NOW()),
+  ('COCONUT_RICE', 'Coconut Rice', 'Coconut rice dishes', 50, true, NOW(), NOW()),
+  ('AMALA', 'Amala', 'Amala with gbegiri, ewedu and stews', 60, true, NOW(), NOW()),
+  ('EBA', 'Eba', 'Eba with soups', 70, true, NOW(), NOW()),
+  ('POUNDED_YAM', 'Pounded Yam', 'Pounded yam with soups', 80, true, NOW(), NOW()),
+  ('FUFU', 'Fufu', 'Fufu with soups', 90, true, NOW(), NOW()),
+  ('SEMOVITA', 'Semovita & Wheat', 'Semovita, semolina and wheat swallows', 100, true, NOW(), NOW()),
+  ('TUWO', 'Tuwo', 'Tuwo masara, tuwo shinkafa and northern swallows', 110, true, NOW(), NOW()),
+  ('EWA_AGOYIN', 'Ewa Agoyin', 'Ewa agoyin with agege bread', 120, true, NOW(), NOW()),
+  ('BEANS', 'Beans & Porridge', 'Beans, beans porridge and bean-based mains', 130, true, NOW(), NOW()),
+  ('MOI_MOI', 'Moi Moi', 'Moi moi (moin moin) in all forms', 140, true, NOW(), NOW()),
+  ('AKARA', 'Akara', 'Akara bean cakes', 150, true, NOW(), NOW()),
+  ('PUFF_PUFF', 'Puff Puff', 'Puff puff snacks', 160, true, NOW(), NOW()),
+  ('EGUSI', 'Egusi Soup', 'Egusi soup with any swallow', 170, true, NOW(), NOW()),
+  ('OGBONO', 'Ogbono Soup', 'Ogbono soup with any swallow', 180, true, NOW(), NOW()),
+  ('OKRA', 'Okra Soup', 'Okra soup with any swallow', 190, true, NOW(), NOW()),
+  ('EFO_RIRO', 'Efo Riro', 'Efo riro vegetable soup', 200, true, NOW(), NOW()),
+  ('AFANG', 'Afang Soup', 'Afang and okazi soups', 210, true, NOW(), NOW()),
+  ('EDIKANG', 'Edikang Ikong', 'Edikang ikong soup', 220, true, NOW(), NOW()),
+  ('BANGA', 'Banga Soup', 'Banga soup, starch and pairings', 230, true, NOW(), NOW()),
+  ('OHA', 'Oha Soup', 'Oha soup', 240, true, NOW(), NOW()),
+  ('BITTERLEAF', 'Bitterleaf Soup', 'Bitterleaf soup', 250, true, NOW(), NOW()),
+  ('NSALA', 'Nsala Soup', 'Nsala white soup', 260, true, NOW(), NOW()),
+  ('FISHERMAN', 'Fisherman Soup', 'Riverside fisherman soup', 270, true, NOW(), NOW()),
+  ('PEPPER_SOUP', 'Pepper Soup', 'Goat meat, catfish, chicken and yam pepper soups', 280, true, NOW(), NOW()),
+  ('ASUN', 'Asun', 'Spicy grilled goat meat', 290, true, NOW(), NOW()),
+  ('SUYA', 'Suya', 'Grilled suya meats', 300, true, NOW(), NOW()),
+  ('BOLI', 'Boli', 'Roasted plantain with sides', 310, true, NOW(), NOW()),
+  ('PLANTAIN', 'Plantain', 'Boiled, fried and porridge plantain dishes', 320, true, NOW(), NOW()),
+  ('FRIED_YAM', 'Fried Yam', 'Fried yam with sauces', 330, true, NOW(), NOW()),
+  ('YAM_PORRIDGE', 'Yam Porridge', 'Yam porridge (asaro) and yam mains', 340, true, NOW(), NOW()),
+  ('ABACHA', 'Abacha', 'Abacha African salad', 350, true, NOW(), NOW()),
+  ('NKWOBI', 'Nkwobi', 'Nkwobi cow-foot delicacy', 360, true, NOW(), NOW()),
+  ('ISIEWU', 'Isi Ewu', 'Isi ewu goat-head delicacy', 370, true, NOW(), NOW()),
+  ('KILISHI', 'Kilishi', 'Kilishi beef jerky', 380, true, NOW(), NOW()),
+  ('PONMO', 'Ponmo', 'Peppered ponmo cow skin', 390, true, NOW(), NOW()),
+  ('OKPA', 'Okpa', 'Okpa and corn pudding', 400, true, NOW(), NOW()),
+  ('AGIDI_PAP', 'Agidi, Pap & Custard', 'Agidi, pap, akamu and custard', 410, true, NOW(), NOW()),
+  ('CHICKEN', 'Chicken & Turkey', 'Chicken and turkey mains', 420, true, NOW(), NOW()),
+  ('GOAT_MEAT', 'Goat Meat', 'Goat meat mains and stews', 430, true, NOW(), NOW()),
+  ('FISH', 'Fish & Seafood', 'Grilled, fried and sauced fish and seafood', 440, true, NOW(), NOW()),
+  ('SMALL_CHOPS', 'Small Chops', 'Samosa, spring rolls and party chops', 450, true, NOW(), NOW()),
+  ('SNACKS', 'Snacks & Pastries', 'Meat pie, sausage rolls, egg rolls, chin chin', 460, true, NOW(), NOW()),
+  ('SHAWARMA', 'Shawarma', 'Naija-style shawarma', 470, true, NOW(), NOW()),
+  ('NOODLES', 'Noodles & Pasta', 'Indomie, noodles and pasta dishes', 480, true, NOW(), NOW()),
+  ('DRINKS', 'Drinks', 'Zobo, kunu, smoothies, juices and drinks', 490, true, NOW(), NOW()),
+  ('OTHER', 'Other', 'Everything else in the pot', 9999, true, NOW(), NOW())
+ON CONFLICT ("id") DO NOTHING;

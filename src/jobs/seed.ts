@@ -1551,13 +1551,8 @@ async function seedDatabase() {
       });
       showcasePromoIds.push(auto.id);
       if (scopedProduct) {
-        // NOTE: schema.prisma declares the Promotion<->Product link as an
-        // implicit M-N (client expects `_PromotionProducts`) but migration
-        // 20260906000000_promotion_scope created an explicit
-        // `PromotionProducts(promotionId, productId)` table. prisma schema /
-        // migrations must NOT be changed in this pass, so the link is
-        // inserted with raw SQL into the real table instead of
-        // `products:{connect}` (which would require `_PromotionProducts`).
+        // Promotion<->Product is an implicit M-N (`_PromotionProducts`),
+        // so the single-product link is a plain relation connect.
         const single = await prisma.promotion.create({
           data: {
             vendorId: scopedProduct.vendorId,
@@ -1572,13 +1567,9 @@ async function seedDatabase() {
             startsAt: weekAgo,
             expiresAt: monthOut,
             maxUsesPerUser: 1,
+            products: { connect: { id: scopedProduct.id } },
           },
         });
-        await prisma.$executeRaw`
-          INSERT INTO "PromotionProducts" ("promotionId", "productId")
-          VALUES (${single.id}, ${scopedProduct.id})
-          ON CONFLICT DO NOTHING
-        `;
         showcasePromoIds.push(single.id);
       }
       // Expired-but-active-flag promo: getActivePromotions filters by
