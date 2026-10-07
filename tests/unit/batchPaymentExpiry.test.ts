@@ -20,7 +20,7 @@ jest.mock("../../src/lib/prisma", () => ({
   __esModule: true,
   default: {
     payment: { findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUnique: jest.fn() },
-    order: { updateMany: jest.fn() },
+    order: { findMany: jest.fn(), updateMany: jest.fn() },
     $transaction: jest.fn(async (arg: any) => arg),
   },
 }));
@@ -33,9 +33,17 @@ jest.mock("../../src/services/paymentFinalizer.service", () => ({
   finalizePaymentSuccess: jest.fn(async () => ({ outcome: "ALREADY_PROCESSED" })),
 }));
 
+// N-04A added the real inventory import to this worker; stub the cache layer
+// it transitively pulls in so this suite does not require Redis.
+jest.mock("../../src/services/clearCaches", () => ({
+  __esModule: true,
+  clearProductCache: jest.fn(async () => {}),
+  clearProductsCache: jest.fn(async () => {}),
+}));
+
 const db = prisma as unknown as {
   payment: { findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
-  order: { updateMany: jest.Mock };
+  order: { findMany: jest.Mock; updateMany: jest.Mock };
   $transaction: jest.Mock;
 };
 const mockedVerify = verifyPayment as jest.Mock;
@@ -61,7 +69,12 @@ function queuePayments(payments: any[]) {
     .mockResolvedValue([]);
 }
 
-/** The single `updateMany` this worker issues for order expiry. */
+/** Eligible-order selection issued by this worker (the N-04 batch scope). */
+function orderSelectionCall() {
+  return db.order.findMany.mock.calls[0][0];
+}
+
+/** The per-order CAS this worker issues to kill an eligible order. */
 function orderExpiryCall() {
   return db.order.updateMany.mock.calls[0][0];
 }
@@ -72,8 +85,11 @@ function whereStatuses() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  db.$transaction.mockImplementation(async (arg: any) => arg);
+  db.$transaction.mockImplementation(async (arg: any) =>
+    typeof arg === "function" ? arg(db) : arg,
+  );
   db.payment.update.mockResolvedValue({});
+  db.order.findMany.mockResolvedValue([{ id: "order-A" }]);
   db.order.updateMany.mockResolvedValue({ count: 3 });
   mockedVerify.mockResolvedValue({ status: "failed" });
 });
@@ -88,6 +104,10 @@ describe("N-04 — batch payment expiry", () => {
       data: { status: "EXPIRED" },
     });
     // No batch key -> the pre-existing primary-order fallback is preserved.
+    expect(orderSelectionCall().where).toEqual({
+      id: "order-A",
+      status: { in: ["AWAITING_PAYMENT", "PENDING"] },
+    });
     expect(orderExpiryCall().where).toEqual({
       id: "order-A",
       status: { in: ["AWAITING_PAYMENT", "PENDING"] },
@@ -107,11 +127,11 @@ describe("N-04 — batch payment expiry", () => {
 
     // The primary regression: sibling discovery is by the batch key, not by
     // payment.orderId, so orders B and C are covered too.
-    expect(orderExpiryCall().where).toEqual({
+    expect(orderSelectionCall().where).toEqual({
       idempotencyKey: "batch-123",
       status: { in: ["AWAITING_PAYMENT", "PENDING"] },
     });
-    expect(orderExpiryCall().where.id).toBeUndefined();
+    expect(orderSelectionCall().where.id).toBeUndefined();
     expect(db.payment.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: { status: "EXPIRED" } }),
     );
@@ -149,6 +169,7 @@ describe("N-04 — batch payment expiry", () => {
   it("5. idempotent rerun: the status predicate makes a second pass a no-op", async () => {
     queuePayments([expiredCandidate()]);
     db.order.updateMany.mockResolvedValueOnce({ count: 3 }).mockResolvedValueOnce({ count: 0 });
+    db.order.findMany.mockResolvedValue([{ id: "order-A" }]);
     await verifyPendingPayments(10);
     const first = orderExpiryCall();
 
@@ -165,24 +186,24 @@ describe("N-04 — batch payment expiry", () => {
   it("6. only the payment's own batch is affected (other keys untouched)", async () => {
     queuePayments([expiredCandidate({ idempotencyKey: "batch-123" })]);
     await verifyPendingPayments(10);
-    const { where } = orderExpiryCall();
+    const { where } = orderSelectionCall();
     // Scoped to exactly this key — an unrelated batch-999 is not selectable.
     expect(where.idempotencyKey).toBe("batch-123");
     expect(where.idempotencyKey).not.toBe("batch-999");
   });
 
-  it("7. payment + sibling expiry happen in ONE transaction", async () => {
+  it("7. payment + sibling expiry happen in ONE interactive transaction", async () => {
     queuePayments([expiredCandidate()]);
     await verifyPendingPayments(10);
 
-    // Batch form: a single $transaction call carrying both writes, so it is
-    // all-or-nothing rather than payment-then-orders.
+    // Interactive form (N-04A): a single $transaction whose callback performs
+    // the payment flip, sibling selection and each order CAS, so everything
+    // commits or rolls back together.
     expect(db.$transaction).toHaveBeenCalledTimes(1);
     const arg = db.$transaction.mock.calls[0][0];
-    expect(Array.isArray(arg)).toBe(true);
-    expect(arg).toHaveLength(2);
+    expect(typeof arg).toBe("function");
     expect(db.payment.update).toHaveBeenCalledTimes(1);
-    expect(db.order.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.order.findMany).toHaveBeenCalledTimes(1);
   });
 
   it("8. a not-yet-expired payment is verified, not expired (no behaviour change)", async () => {

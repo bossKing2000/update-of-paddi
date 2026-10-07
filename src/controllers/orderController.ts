@@ -2,12 +2,16 @@ import { Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { AuthRequest } from "../middlewares/auth.middleware";
 import prisma from "../lib/prisma";
-import { ActivityType, OrderStatus, Prisma, Role } from "@prisma/client";
+import { ActivityType, OrderStatus, Prisma, Role, type Order } from "@prisma/client";
 import dayjs from "dayjs";
 import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
 import { sendNotification } from "../utils/activityUtils/notify";
 import { ensureString } from "../utils/paramUtils";
 import { clearProductCache } from "../services/clearCaches";
+import {
+  buildOrderMoneySnapshot,
+  resolveCommissionRate,
+} from "../services/orderSnapshot.service";
 import { sendSuccess, sendCreated } from "../utils/apiResponse";
 import {
   NotFoundError,
@@ -467,11 +471,35 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
   // whole cancellation back (loud failure) instead of vanishing silently.
   // The open-request guard makes double-cancel idempotent: one
   // cancellation can only ever file one refund request per payment.
+  // N-04A: the CAS predicate on the status below means this run either
+  // performed the transition or threw. `cancellationApplied` is therefore
+  // authoritative for the stock release — never the pre-read `currentStatus`.
+  let cancellationApplied = false;
+
   const updatedOrder = await prisma.$transaction(async (tx) => {
-    const updated = await tx.order.update({
-      where: { id: orderId },
-      data: updateData,
-    });
+    // N-04A: CAS on the expected status. Previously this was an
+    // unconditional `update({ where: { id } })` validated only against a
+    // status read earlier in the request, so a cancel that read
+    // AWAITING_PAYMENT could overwrite an order that a payment-expiry /
+    // order-expiry worker had already moved to CANCELLED_UNPAID — and then
+    // restore stock for an order another path already owned. Prisma's
+    // extended where-unique turns that into a genuine compare-and-set:
+    // no matching row ⇒ P2025 ⇒ we abort instead of clobbering.
+    let updated: Order;
+    try {
+      updated = await tx.order.update({
+        where: { id: orderId, status: currentStatus },
+        data: updateData,
+      });
+    } catch (err: any) {
+      if (err?.code === "P2025") {
+        throw new ConflictError(
+          "This order changed state while the update was in progress. Reload and try again.",
+        );
+      }
+      throw err;
+    }
+    cancellationApplied = true;
 
     if (status === OrderStatus.CANCELLED && order.paymentStatus === "SUCCESS") {
       const payment = await tx.payment.findFirst({
@@ -495,6 +523,9 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
               paymentRef: payment.reference,
               reason: "Order cancelled after payment",
               status: "PENDING",
+              // Phase 3.2b: this path knows the exact cancelled order, so
+              // attribution is exact even for multi-order batch payments.
+              orderId: order.id,
               // N-01: the request must be bounded by THIS order's paid
               // value, never by the payment total. One Paystack payment can
               // cover several vendors' orders (payment.orderId is only the
@@ -516,7 +547,13 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
   // Cancelling an unpaid order releases its checkout-time stock
   // reservation back on sale. Paid orders never restore — portions are
   // consumed once payment succeeds.
+  //
+  // N-04A: gated on `cancellationApplied` (this run won the CAS), not on the
+  // pre-read `currentStatus`. If another transition won the race we threw
+  // above, so reaching here always means this request is the owner of the
+  // reservation — exactly once, with no double release.
   if (
+    cancellationApplied &&
     status === OrderStatus.CANCELLED &&
     currentStatus === OrderStatus.AWAITING_PAYMENT &&
     order.paymentStatus !== "SUCCESS"
@@ -1083,6 +1120,20 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
       where: { id: offerId },
       data: { status: "ACCEPTED" },
     });
+    // Phase 3.2b going-forward snapshots. Special orders carry no promo
+    // discount (discount 0); the vendor's effective rate is read in-tx so
+    // the frozen rate is the rate actually used, and economics
+    // (price/base, delivery fee) are exactly as currently implemented.
+    const specialVendor = await tx.user.findUnique({
+      where: { id: offer.vendorId },
+      select: { commissionRate: true },
+    });
+    const specialBase = offer.price;
+    const specialSnapshot = buildOrderMoneySnapshot({
+      basePriceNaira: specialBase,
+      discountNaira: 0,
+      commissionRate: resolveCommissionRate(specialVendor?.commissionRate),
+    });
     const created = await tx.order.create({
       data: {
         customerId: userId,
@@ -1091,6 +1142,10 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
         basePrice: offer.price,
         deliveryFee: deliveryFeeResult.fee,
         totalPrice: round(offer.price + deliveryFeeResult.fee),
+        commissionRateSnapshot: specialSnapshot.commissionRateSnapshot,
+        commissionKobo: specialSnapshot.commissionKobo,
+        vendorPayoutKobo: specialSnapshot.vendorPayoutKobo,
+        discountKobo: specialSnapshot.discountKobo,
         status: OrderStatus.AWAITING_PAYMENT,
         specialOrderOfferId: offer.id,
         idempotencyKey: uuidv4(),
@@ -1099,6 +1154,7 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
           create: [
             {
               productId: offer.request.productId,
+              productName: requestedProduct.name,
               quantity: offer.request.quantity,
               unitPrice: offer.price,
               subtotal: offer.price,

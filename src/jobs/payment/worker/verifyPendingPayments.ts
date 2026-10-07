@@ -1,6 +1,7 @@
 import prisma from "../../../lib/prisma";
 import { verifyPayment } from "../../../services/paymentService";
 import { finalizePaymentSuccess } from "../../../services/paymentFinalizer.service";
+import { restoreStockForOrders } from "../../../services/inventory.service";
 import { logger } from "../../../lib/logger";
 import { PaymentStatus, OrderStatus } from "@prisma/client";
 
@@ -56,14 +57,6 @@ export async function verifyPendingPayments(batchSize = 50) {
             // payment.orderId left the sibling orders AWAITING_PAYMENT until
             // the separate order-expiry cron ran, so a multi-vendor batch sat
             // half-expired for up to one cron interval.
-            //
-            // The status predicate is deliberately unchanged, so terminal or
-            // in-flight orders (PAYMENT_CONFIRMED / COMPLETED / CANCELLED /
-            // CANCELLED_UNPAID / PAYMENT_EXPIRED) are still never touched, a
-            // concurrent finalizer/webhook still wins by CAS, and re-running
-            // this worker is idempotent. Both writes stay in the single
-            // existing transaction so the payment and every eligible sibling
-            // expire atomically.
             const expirableOrderScope = payment.idempotencyKey
               ? {
                   idempotencyKey: payment.idempotencyKey,
@@ -77,21 +70,64 @@ export async function verifyPendingPayments(batchSize = 50) {
                     in: [OrderStatus.AWAITING_PAYMENT, OrderStatus.PENDING],
                   },
                 };
-            await prisma.$transaction([
-              prisma.payment.update({
+
+            // N-04A: this death path used to cancel the order WITHOUT
+            // releasing its checkout-time stock reservation. Because the order
+            // lands in CANCELLED_UNPAID, every other restoration path
+            // (expireAwaitingPaymentJob, orderCleanupJob, the finalizer's
+            // LATE_PAYMENT branch, the cancel endpoint) only ever looks at
+            // AWAITING_PAYMENT orders — so the reserved portions were stranded
+            // permanently, with no recovery.
+            //
+            // Restoration therefore has to happen HERE, inside the same
+            // transaction as the cancellation, and only for orders this
+            // execution actually transitioned. `restoreStockForOrders` is not
+            // internally idempotent (it just does stock += qty with no
+            // restoration marker), so the per-order CAS is the idempotency
+            // boundary:
+            //
+            //   restoreStockForOrders  ⇔  this tx moved the order out of
+            //                              [AWAITING_PAYMENT, PENDING]
+            //
+            // Anything already transitioned by a concurrent order-expiry,
+            // cleanup, late-payment or cancellation returns count === 0 and
+            // therefore must NOT restore — that other path owns it. Paid or
+            // otherwise terminal orders are never in the candidate set and are
+            // never touched. A failure anywhere rolls the whole batch back,
+            // so there is no state where the payment is EXPIRED while some
+            // siblings are cancelled-and-restored and others are not.
+            await prisma.$transaction(async (tx) => {
+              await tx.payment.update({
                 where: { id: payment.id },
                 data: { status: PaymentStatus.EXPIRED },
-              }),
-              prisma.order.updateMany({
+              });
+
+              const candidates = await tx.order.findMany({
                 where: expirableOrderScope,
-                data: {
-                  status: OrderStatus.CANCELLED_UNPAID,
-                  cancellationReason: "PAYMENT_EXPIRED",
-                  cancelledAt: now,
-                  paymentStatus: PaymentStatus.EXPIRED,
-                },
-              }),
-            ]);
+                select: { id: true },
+              });
+
+              for (const candidate of candidates) {
+                const updated = await tx.order.updateMany({
+                  where: {
+                    id: candidate.id,
+                    status: {
+                      in: [OrderStatus.AWAITING_PAYMENT, OrderStatus.PENDING],
+                    },
+                  },
+                  data: {
+                    status: OrderStatus.CANCELLED_UNPAID,
+                    cancellationReason: "PAYMENT_EXPIRED",
+                    cancelledAt: now,
+                    paymentStatus: PaymentStatus.EXPIRED,
+                  },
+                });
+                // Winner of this CAS owns the reservation release.
+                if (updated.count === 1) {
+                  await restoreStockForOrders(tx, [candidate.id]);
+                }
+              }
+            });
             expired++;
             continue;
           }
