@@ -394,28 +394,49 @@ export const paystackWebhookHandler = async (req: Request, res: Response) => {
       if (withdrawal.status !== "PROCESSING")
         return res.status(200).send("Transfer already settled");
       if (event === "transfer.success") {
-        await prisma.$transaction([
-          prisma.riderWithdrawal.update({
-            where: { id: withdrawal.id },
-            data: { status: "PAID", processedAt: new Date() },
-          }),
-          prisma.deliveryPerson.update({
+        // N-03: settle with an atomic compare-and-set instead of
+        // read-then-write. Two concurrent/duplicate `transfer.success`
+        // deliveries can both observe PROCESSING; with the previous
+        // read-then-`update` pair both would debit the wallet. The CAS is the
+        // final idempotency guarantee — it does not rely on the Redis
+        // replay-claim layer (which keys on payload fields and would let a
+        // re-shaped duplicate through). The wallet debit happens inside the
+        // same transaction and only when exactly one row transitioned, so a
+        // RiderWithdrawal can debit its rider's wallet at most once.
+        const settled = await prisma.$transaction(async (tx) => {
+          const claimed = await tx.riderWithdrawal.updateMany({
+            where: { id: withdrawal.id, status: "PROCESSING" },
+            data: {
+              status: "PAID",
+              processedAt: new Date(),
+              failureReason: null,
+            },
+          });
+          if (claimed.count !== 1) return false;
+          await tx.deliveryPerson.update({
             where: { id: withdrawal.deliveryPersonId },
             data: { walletBalance: { decrement: withdrawal.amount } },
-          }),
-        ]);
-        await createAuditLog({
-          userId: null,
-          action: "RIDER_WITHDRAWAL_TRANSFER_SUCCEEDED",
-          metadata: {
-            withdrawalId: withdrawal.id,
-            reference: data.reference,
-            amount: withdrawal.amount,
-          },
+          });
+          return true;
         });
+        if (settled) {
+          await createAuditLog({
+            userId: null,
+            action: "RIDER_WITHDRAWAL_TRANSFER_SUCCEEDED",
+            metadata: {
+              withdrawalId: withdrawal.id,
+              reference: data.reference,
+              amount: withdrawal.amount,
+            },
+          });
+        }
       } else {
-        await prisma.riderWithdrawal.update({
-          where: { id: withdrawal.id },
+        // N-03: same CAS discipline. A duplicate `transfer.failed` is a
+        // no-op, a late/duplicate failure can never reverse a withdrawal
+        // that already settled as PAID, and a failed transfer never touches
+        // the wallet (it is only ever debited on success above).
+        const failed = await prisma.riderWithdrawal.updateMany({
+          where: { id: withdrawal.id, status: "PROCESSING" },
           data: {
             status: "FAILED",
             failureReason: (
@@ -426,11 +447,16 @@ export const paystackWebhookHandler = async (req: Request, res: Response) => {
             processedAt: new Date(),
           },
         });
-        await createAuditLog({
-          userId: null,
-          action: "RIDER_WITHDRAWAL_TRANSFER_FAILED",
-          metadata: { withdrawalId: withdrawal.id, reference: data.reference },
-        });
+        if (failed.count === 1) {
+          await createAuditLog({
+            userId: null,
+            action: "RIDER_WITHDRAWAL_TRANSFER_FAILED",
+            metadata: {
+              withdrawalId: withdrawal.id,
+              reference: data.reference,
+            },
+          });
+        }
       }
       return res.status(200).send("Transfer webhook processed");
     }

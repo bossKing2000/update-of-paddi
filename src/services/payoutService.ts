@@ -19,6 +19,43 @@ export interface CreateRecipientInput {
   bankCode: string;
 }
 
+/**
+ * N-03: what we actually know about the outcome of a transfer request after
+ * it failed to produce a normal response.
+ *
+ *   REJECTED — Paystack answered 4xx: the request was refused and no
+ *              transfer was created. Provably safe to treat as a failure.
+ *   UNKNOWN  — we cannot prove the transfer was not created (no response at
+ *              all: timeout / ECONNRESET / DNS / socket, OR a 5xx from
+ *              Paystack whose edge may have accepted the transfer before
+ *              failing). Money MAY have left. Must never be treated as a
+ *              definite failure, or a retry can pay the recipient twice.
+ *
+ * Note this is deliberately NOT the same as the older `retryable` flag
+ * (which is `!err?.response` and therefore calls a 5xx "definite"). That
+ * flag is consumed by the vendor payout path and is left untouched so no
+ * existing behaviour changes; transfer callers that must not risk a double
+ * payment should branch on `outcome`.
+ */
+export type TransferInitiationOutcome = "REJECTED" | "UNKNOWN";
+
+/**
+ * Classifies a failed transfer request from the error alone. Never guesses
+ * "definitely failed" without an actual 4xx answer from Paystack.
+ */
+export function classifyTransferInitiationError(err: any): TransferInitiationOutcome {
+  const status = err?.response?.status;
+  // No HTTP response at all: the request may or may not have reached
+  // Paystack (timeout, connection reset, DNS/TLS failure, process kill).
+  if (typeof status !== "number") return "UNKNOWN";
+  // 5xx: Paystack's own server/edge failed. It may have accepted the
+  // transfer before returning an error, so the outcome is still unknown.
+  if (status >= 500) return "UNKNOWN";
+  // 4xx (and any other answered status): Paystack replied that it refused
+  // the request, so no transfer was created.
+  return "REJECTED";
+}
+
 export const createTransferRecipient = async ({
   name,
   accountNumber,
@@ -94,7 +131,13 @@ export const initiateTransfer = async ({
     throw new UpstreamServiceError(
       "Paystack",
       err?.response?.data?.message || "Failed to initiate transfer",
-      { retryable: !err?.response },
+      {
+        // Unchanged legacy semantics, still consumed by the vendor payout
+        // path: "no HTTP response" was the only non-retryable signal there.
+        retryable: !err?.response,
+        // N-03: precise outcome for callers that must not risk paying twice.
+        outcome: classifyTransferInitiationError(err),
+      },
     );
   }
 };

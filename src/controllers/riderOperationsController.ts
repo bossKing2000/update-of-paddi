@@ -9,11 +9,13 @@ import {
   initiateTransfer,
   listBanks,
   resolveBankAccount,
+  type TransferInitiationOutcome,
 } from "../services/payoutService";
 import {
   ConflictError,
   ForbiddenError,
   NotFoundError,
+  UpstreamServiceError,
   ValidationError,
 } from "../errors/AppError";
 import {
@@ -335,29 +337,76 @@ export const processRiderWithdrawal = async (
       "Transfer initiated; wallet will be debited only after Paystack confirms success",
     );
   } catch (error: any) {
-    await prisma.riderWithdrawal.update({
-      where: { id: withdrawal.id },
-      data: {
-        status: "FAILED",
-        failureReason:
-          error?.message?.slice(0, 500) || "Transfer initiation failed",
-        processedAt: new Date(),
-      },
-    });
+    // N-03: a failed request is NOT proof that Paystack refused the
+    // transfer. An error only proves that we did not get a normal answer:
+    // a timeout / connection reset / crash means the transfer may already
+    // have been created at Paystack, and so does a 5xx from Paystack's own
+    // edge. Marking that FAILED released the funds (FAILED is excluded from
+    // the reserved-balance aggregate), letting the rider withdraw the same
+    // earnings again while the original transfer was still live — and the
+    // late `transfer.success` was then discarded because the row was no
+    // longer PROCESSING.
+    //
+    // Only a definite 4xx rejection (Paystack answered and refused, so no
+    // transfer exists) may become FAILED. Everything else stays PROCESSING:
+    // the funds remain reserved, the withdrawal cannot be re-initiated (the
+    // claim below only accepts PENDING), and the deterministic reference
+    // stays bound to this one withdrawal. Stage O-C adds the reconciliation
+    // that resolves a stuck PROCESSING row.
+    const outcome: TransferInitiationOutcome =
+      (error?.details?.outcome as TransferInitiationOutcome) || "UNKNOWN";
+    const failureReason =
+      error?.message?.slice(0, 500) || "Transfer initiation failed";
+
+    if (outcome === "REJECTED") {
+      await prisma.riderWithdrawal.updateMany({
+        where: { id: withdrawal.id, status: "PROCESSING" },
+        data: {
+          status: "FAILED",
+          failureReason,
+          processedAt: new Date(),
+        },
+      });
+      await createAuditLog({
+        userId: req.user!.id,
+        action: "RIDER_WITHDRAWAL_TRANSFER_FAILED",
+        req,
+        metadata: {
+          withdrawalId: withdrawal.id,
+          reference,
+          amount: withdrawal.amount,
+          previousStatus: "PROCESSING",
+          newStatus: "FAILED",
+          gatewayOutcome: outcome,
+          failureReason,
+        },
+      });
+      throw new UpstreamServiceError("Paystack", failureReason, {
+        outcome,
+      });
+    }
+
+    // UNKNOWN: leave the withdrawal PROCESSING so the money stays reserved
+    // and cannot be transferred twice while the first attempt is unresolved.
     await createAuditLog({
       userId: req.user!.id,
-      action: "RIDER_WITHDRAWAL_TRANSFER_FAILED",
+      action: "RIDER_WITHDRAWAL_TRANSFER_UNKNOWN",
       req,
       metadata: {
-        withdrawalId,
+        withdrawalId: withdrawal.id,
         reference,
         amount: withdrawal.amount,
         previousStatus: "PROCESSING",
-        newStatus: "FAILED",
-        failureReason: error?.message?.slice(0, 500) || "Transfer initiation failed",
+        newStatus: "PROCESSING",
+        gatewayOutcome: outcome,
+        failureReason,
       },
     });
-    throw error;
+    throw new UpstreamServiceError(
+      "Paystack",
+      "Transfer outcome is not yet known. The withdrawal remains reserved and will be settled once Paystack confirms the transfer.",
+      { outcome },
+    );
   }
 };
 
