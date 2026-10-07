@@ -874,7 +874,15 @@ export const updateRefundStatus = async (req: AuthRequest, res: Response) => {
       if (remaining <= 0) {
         throw new ConflictError("This payment has already been fully refunded");
       }
-      reservedKobo = requestedKobo ?? remaining;
+      // N-01: an amount explicitly submitted by the admin still wins, but
+      // when none is given we must honour the amount already recorded on the
+      // request before falling back to "everything remaining". The
+      // paid-cancel path records the cancelled order's own paid value, so a
+      // batch payment can no longer have its entire remainder refunded by
+      // submitting an order-scoped request with no amount. Amountless
+      // requests (the customer self-service path) still fall back to
+      // `remaining`, preserving that documented behaviour.
+      reservedKobo = requestedKobo ?? refundRequest.requestedAmountKobo ?? remaining;
       if (reservedKobo > remaining) {
         throw new ValidationError(
           `Refund amount exceeds remaining refundable balance (₦${(remaining / 100).toFixed(2)})`,

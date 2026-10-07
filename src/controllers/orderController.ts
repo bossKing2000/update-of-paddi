@@ -495,6 +495,15 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
               paymentRef: payment.reference,
               reason: "Order cancelled after payment",
               status: "PENDING",
+              // N-01: the request must be bounded by THIS order's paid
+              // value, never by the payment total. One Paystack payment can
+              // cover several vendors' orders (payment.orderId is only the
+              // primary order), so leaving this null made the admin's
+              // `requestedAmountKobo ?? remaining` fallback resolve to the
+              // whole payment — refunding sibling vendors' orders too.
+              // `order.totalPrice` is the amount this order contributed to
+              // the payment (checkout charges sum(totalPrice * 100)).
+              requestedAmountKobo: Math.round(order.totalPrice * 100),
             },
           });
         }
