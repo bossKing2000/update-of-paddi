@@ -49,18 +49,41 @@ export async function verifyPendingPayments(batchSize = 50) {
           // asking, just expire it. finalizePaymentSuccess's own lock
           // handles races with a webhook that might still be in flight.
           if (payment.expiresAt && now > payment.expiresAt) {
+            // N-04: one payment can cover several vendors' orders. The
+            // authoritative batch key is Order.idempotencyKey — Payment.orderId
+            // points only at the *primary/first* order (the same model the
+            // finalizer's getOrdersForPayment uses). Expiring only
+            // payment.orderId left the sibling orders AWAITING_PAYMENT until
+            // the separate order-expiry cron ran, so a multi-vendor batch sat
+            // half-expired for up to one cron interval.
+            //
+            // The status predicate is deliberately unchanged, so terminal or
+            // in-flight orders (PAYMENT_CONFIRMED / COMPLETED / CANCELLED /
+            // CANCELLED_UNPAID / PAYMENT_EXPIRED) are still never touched, a
+            // concurrent finalizer/webhook still wins by CAS, and re-running
+            // this worker is idempotent. Both writes stay in the single
+            // existing transaction so the payment and every eligible sibling
+            // expire atomically.
+            const expirableOrderScope = payment.idempotencyKey
+              ? {
+                  idempotencyKey: payment.idempotencyKey,
+                  status: {
+                    in: [OrderStatus.AWAITING_PAYMENT, OrderStatus.PENDING],
+                  },
+                }
+              : {
+                  id: payment.orderId,
+                  status: {
+                    in: [OrderStatus.AWAITING_PAYMENT, OrderStatus.PENDING],
+                  },
+                };
             await prisma.$transaction([
               prisma.payment.update({
                 where: { id: payment.id },
                 data: { status: PaymentStatus.EXPIRED },
               }),
               prisma.order.updateMany({
-                where: {
-                  id: payment.orderId,
-                  status: {
-                    in: [OrderStatus.AWAITING_PAYMENT, OrderStatus.PENDING],
-                  },
-                },
+                where: expirableOrderScope,
                 data: {
                   status: OrderStatus.CANCELLED_UNPAID,
                   cancellationReason: "PAYMENT_EXPIRED",
