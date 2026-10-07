@@ -40,6 +40,95 @@ export interface CreateRecipientInput {
 export type TransferInitiationOutcome = "REJECTED" | "UNKNOWN";
 
 /**
+ * N-03 / Stage O-C: result of a read-only lookup of an EXISTING transfer.
+ *
+ *  FOUND      — Paystack returned the transfer. `status`/`amountKobo` are
+ *               Paystack's own authoritative values for the transfer we
+ *               created (see `GET /transfer/verify/:reference`).
+ *  NOT_FOUND  — Paystack answered 404 for this reference.
+ *  UNKNOWN    — we could not obtain a trustworthy answer right now
+ *               (timeout, connection reset, DNS, 5xx, 401, or a response
+ *               that did not contain a usable status/amount).
+ *
+ * `NOT_FOUND` is deliberately NOT treated as proof that no transfer exists:
+ * the Paystack docs do not state whether a just-created transfer is
+ * immediately retrievable, so reconciliation treats it as unresolved and
+ * leaves the withdrawal PROCESSING (see verifyPendingRiderWithdrawals).
+ */
+export type TransferLookupResult =
+  | {
+      outcome: "FOUND";
+      status: string;
+      amountKobo: number;
+      reference: string | null;
+      transferCode: string | null;
+      failures: unknown;
+    }
+  | { outcome: "NOT_FOUND" }
+  | { outcome: "UNKNOWN"; reason: string };
+
+/**
+ * GET /transfer/verify/:reference — "Verify Transfer".
+ *
+ * Read-only: Paystack documents it as verifying the status of a transfer on
+ * the integration, taking the transfer reference we supplied. This is the
+ * only call the rider-withdrawal reconciler is allowed to make — it can
+ * never initiate, resend or modify a transfer.
+ *
+ * Endpoint/method/auth verified against Paystack's official API reference
+ * (https://paystack.com/docs/api/transfer/ — "Verify Transfer",
+ * `GET /transfer/verify/:reference`, `Authorization: Bearer SECRET_KEY`;
+ * response envelope `{ status, message, data }` where `data` carries
+ * `status`, `amount`, `reference`, `transfer_code`, `failures`).
+ *
+ * The shared `paystack` axios instance already carries the Bearer secret
+ * header, so no second HTTP client is introduced.
+ */
+export const fetchTransferByReference = async (
+  reference: string,
+): Promise<TransferLookupResult> => {
+  try {
+    const response = await paystack.get(
+      `/transfer/verify/${encodeURIComponent(reference)}`,
+    );
+    const data = response.data?.data;
+    if (!data || typeof data !== "object") {
+      return { outcome: "UNKNOWN", reason: "Paystack response had no data" };
+    }
+    const status =
+      typeof data.status === "string" ? data.status.toLowerCase() : null;
+    const amountKobo = Number(data.amount);
+    if (!status || !Number.isFinite(amountKobo)) {
+      return {
+        outcome: "UNKNOWN",
+        reason: "Paystack transfer response missing status/amount",
+      };
+    }
+    return {
+      outcome: "FOUND",
+      status,
+      amountKobo,
+      reference: typeof data.reference === "string" ? data.reference : null,
+      transferCode:
+        typeof data.transfer_code === "string" ? data.transfer_code : null,
+      failures: data.failures ?? null,
+    };
+  } catch (err: any) {
+    const status = err?.response?.status;
+    if (status === 404) return { outcome: "NOT_FOUND" };
+    // Everything else — including 401/403 on a bad key and any 5xx — means
+    // we cannot confirm the transfer right now. Never a "failed".
+    return {
+      outcome: "UNKNOWN",
+      reason:
+        err?.response?.data?.message ||
+        err?.message ||
+        "transfer lookup failed",
+    };
+  }
+};
+
+/**
  * Classifies a failed transfer request from the error alone. Never guesses
  * "definitely failed" without an actual 4xx answer from Paystack.
  */

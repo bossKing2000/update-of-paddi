@@ -3,6 +3,7 @@ import { runOrderCleanupJob } from "../workers jobs/orderCleanupJob";
 import { runExpireAwaitingPaymentJob } from "../workers jobs/expireAwaitingPaymentJob";
 import { verifyPendingPayments } from "../payment/worker/verifyPendingPayments";
 import { verifyPendingRefunds } from "../payment/worker/verifyPendingRefunds";
+import { verifyPendingRiderWithdrawals } from "../payment/worker/verifyPendingRiderWithdrawals";
 import { DeliveryAssignmentService } from "../../services/deliveryAssignment";
 import { logger } from "../../lib/logger";
 
@@ -56,6 +57,25 @@ cron.schedule("*/10 * * * *", async () => {
     await verifyPendingRefunds();
   } catch (err) {
     logger.error({ err }, "[CRON] Verify pending refunds failed");
+  }
+});
+
+/**
+ * 🛵 Reconcile PROCESSING Rider Withdrawals
+ * Runs every 5 minutes. A rider withdrawal whose Paystack transfer outcome
+ * was never learned (timeout, connection reset, 5xx — O-B now keeps these
+ * PROCESSING on purpose, because the transfer may exist) is resolved by
+ * asking Paystack what happened to the transfer that already exists, via
+ * its stored reference. NEVER initiates another transfer, never creates a
+ * withdrawal, never mints a reference. Anything Paystack cannot confirm
+ * authoritatively is left PROCESSING with funds still reserved.
+ * See verifyPendingRiderWithdrawals.ts.
+ */
+cron.schedule("*/5 * * * *", async () => {
+  try {
+    await verifyPendingRiderWithdrawals();
+  } catch (err) {
+    logger.error({ err }, "[CRON] Verify pending rider withdrawals failed");
   }
 });
 

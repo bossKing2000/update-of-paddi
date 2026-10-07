@@ -5,6 +5,10 @@ import prisma from "../lib/prisma";
 import { redisPayments } from "../lib/redis";
 import { logger } from "../lib/logger";
 import { createAuditLog } from "../utils/auditLog.service";
+import {
+  settleRiderWithdrawalFailed,
+  settleRiderWithdrawalPaid,
+} from "../services/riderWithdrawalSettlement.service";
 import { finalizePaymentSuccess } from "../services/paymentFinalizer.service";
 import { matchRefundRequest, completeRefund, failRefund } from "../services/refundFinalizer.service";
 
@@ -394,32 +398,13 @@ export const paystackWebhookHandler = async (req: Request, res: Response) => {
       if (withdrawal.status !== "PROCESSING")
         return res.status(200).send("Transfer already settled");
       if (event === "transfer.success") {
-        // N-03: settle with an atomic compare-and-set instead of
-        // read-then-write. Two concurrent/duplicate `transfer.success`
-        // deliveries can both observe PROCESSING; with the previous
-        // read-then-`update` pair both would debit the wallet. The CAS is the
-        // final idempotency guarantee — it does not rely on the Redis
-        // replay-claim layer (which keys on payload fields and would let a
-        // re-shaped duplicate through). The wallet debit happens inside the
-        // same transaction and only when exactly one row transitioned, so a
-        // RiderWithdrawal can debit its rider's wallet at most once.
-        const settled = await prisma.$transaction(async (tx) => {
-          const claimed = await tx.riderWithdrawal.updateMany({
-            where: { id: withdrawal.id, status: "PROCESSING" },
-            data: {
-              status: "PAID",
-              processedAt: new Date(),
-              failureReason: null,
-            },
-          });
-          if (claimed.count !== 1) return false;
-          await tx.deliveryPerson.update({
-            where: { id: withdrawal.deliveryPersonId },
-            data: { walletBalance: { decrement: withdrawal.amount } },
-          });
-          return true;
-        });
-        if (settled) {
+        // N-03: settlement is delegated to the shared helper used by the
+        // reconciliation worker too, so the compare-and-set that guarantees
+        // "a withdrawal debits its wallet at most once" is defined in exactly
+        // one place. `settled === false` means another webhook/reconciler
+        // already won the transition and did (or did not) the debit.
+        const settlement = await settleRiderWithdrawalPaid(withdrawal.id);
+        if (settlement.outcome === "SETTLED") {
           await createAuditLog({
             userId: null,
             action: "RIDER_WITHDRAWAL_TRANSFER_SUCCEEDED",
@@ -434,20 +419,16 @@ export const paystackWebhookHandler = async (req: Request, res: Response) => {
         // N-03: same CAS discipline. A duplicate `transfer.failed` is a
         // no-op, a late/duplicate failure can never reverse a withdrawal
         // that already settled as PAID, and a failed transfer never touches
-        // the wallet (it is only ever debited on success above).
-        const failed = await prisma.riderWithdrawal.updateMany({
-          where: { id: withdrawal.id, status: "PROCESSING" },
-          data: {
-            status: "FAILED",
-            failureReason: (
-              eventPayload.data?.gateway_response ||
-              eventPayload.data?.message ||
-              "Transfer failed"
-            ).slice(0, 500),
-            processedAt: new Date(),
-          },
-        });
-        if (failed.count === 1) {
+        // the wallet.
+        const settlement = await settleRiderWithdrawalFailed(
+          withdrawal.id,
+          (
+            eventPayload.data?.gateway_response ||
+            eventPayload.data?.message ||
+            "Transfer failed"
+          ).slice(0, 500),
+        );
+        if (settlement.outcome === "SETTLED") {
           await createAuditLog({
             userId: null,
             action: "RIDER_WITHDRAWAL_TRANSFER_FAILED",

@@ -352,20 +352,30 @@ describe("6-11. transfer webhook settlement (atomic CAS)", () => {
     expect(db.deliveryPerson.update).not.toHaveBeenCalled();
   });
 
-  it("11. success vs failed race: only the first atomic terminal transition lands", async () => {
-    let settled = false;
+  it("11. success vs failed race: exactly one terminal transition, one wallet mutation", async () => {
+    // Which event wins is genuinely non-deterministic; the money invariant is
+    // not: exactly one row transition, and the wallet is debited at most once
+    // (only the PAID winner may touch it).
+    let terminal: string | null = null;
     db.riderWithdrawal.updateMany.mockImplementation(async (args: any) => {
-      if (settled) return { count: 0 };
-      settled = true;
-      expect(args.data.status).toBe("PAID");
+      const where = args.where as { status: string };
+      if (terminal !== null) return { count: 0 };
+      terminal = args.data.status;
       return { count: 1 };
     });
+    db.riderWithdrawal.findUnique.mockImplementation(async () =>
+      processingWithdrawal({ status: terminal ?? "PROCESSING" }),
+    );
     await Promise.all([
       deliverWebhook("transfer.success"),
       deliverWebhook("transfer.failed"),
     ]);
-    expect(db.deliveryPerson.update).toHaveBeenCalledTimes(1);
-    expect(audit.mock.calls.some((c) => c[0].action === "RIDER_WITHDRAWAL_TRANSFER_FAILED")).toBe(false);
+    expect(["PAID", "FAILED"]).toContain(terminal);
+    const debits = db.deliveryPerson.update.mock.calls.filter(
+      (c) => c[0].data?.walletBalance?.decrement === AMOUNT,
+    );
+    expect(debits.length).toBeLessThanOrEqual(1);
+    expect(debits.length).toBe(terminal === "PAID" ? 1 : 0);
   });
 
   it("12. a PAID withdrawal receiving transfer.success again never debits", async () => {
