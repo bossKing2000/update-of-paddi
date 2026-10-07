@@ -9,6 +9,10 @@ import {
   settleRiderWithdrawalFailed,
   settleRiderWithdrawalPaid,
 } from "../services/riderWithdrawalSettlement.service";
+import {
+  settleVendorPayoutFailed,
+  settleVendorPayoutPaid,
+} from "../services/vendorPayoutSettlement.service";
 import { finalizePaymentSuccess } from "../services/paymentFinalizer.service";
 import { matchRefundRequest, completeRefund, failRefund } from "../services/refundFinalizer.service";
 
@@ -359,20 +363,27 @@ export const paystackWebhookHandler = async (req: Request, res: Response) => {
 
         if (vendorPayout.status !== "PROCESSING")
           return res.status(200).send("Vendor payout already settled");
-        const settled = await prisma.vendorPayout.updateMany({
-          where: { id: vendorPayout.id, status: "PROCESSING" },
-          data:
-            event === "transfer.success"
-              ? { status: "PAID", paidAt: new Date(), failureReason: null }
-              : {
-                  status: "FAILED",
-                  failureReason: String(
-                    eventPayload.data?.gateway_response ||
-                      eventPayload.data?.message ||
-                      "Transfer failed",
-                  ).slice(0, 500),
-                },
-        });
+        // N-06: settlement goes through the shared helper so the
+        // PROCESSING -> PAID / FAILED CAS lives in exactly one place.
+        // A verified success keeps the order claims (the money is genuinely
+        // paid out); a verified failure releases them in the SAME
+        // transaction, so those orders return to the eligible pool instead
+        // of being stranded against a dead payout. Only the CAS winner
+        // releases anything, so a concurrent reconciler or webhook can never
+        // produce a double release.
+        const settlement =
+          event === "transfer.success"
+            ? await settleVendorPayoutPaid(vendorPayout.id)
+            : await settleVendorPayoutFailed(
+                vendorPayout.id,
+                String(
+                  eventPayload.data?.gateway_response ||
+                    eventPayload.data?.message ||
+                    "Transfer failed",
+                ).slice(0, 500),
+              );
+        const settled =
+          settlement.outcome === "SETTLED" ? { count: 1 } : { count: 0 };
         if (settled.count === 1) {
           await createAuditLog({
             userId: null,

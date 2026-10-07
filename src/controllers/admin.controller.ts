@@ -35,6 +35,7 @@ import {
   createTransferRecipient,
   initiateTransfer,
 } from "../services/payoutService";
+import { settleVendorPayoutFailed } from "../services/vendorPayoutSettlement.service";
 import { calculatePayoutAmounts } from "./vendorDashboard.service";
 import { evaluateVendorStatus } from "../services/vendorStatus.service";
 import { validatePromoDatesAndValue } from "./promoController";
@@ -1164,18 +1165,24 @@ async function initiateVendorPayoutTransfer(
       "Payout transfer outcome unknown",
     );
     if (err?.details?.retryable === false) {
-      await prisma.vendorPayout.updateMany({
-        where: { id: payout.id, status: PayoutStatus.PROCESSING },
-        data: {
-          status: PayoutStatus.FAILED,
-          failureReason: String(err.message).slice(0, 500),
-        },
-      });
-      await auditAdmin(req, "ADMIN_PAYOUT_TRANSFER_FAILED", {
-        payoutId: payout.id,
-        vendorId: vendor.id,
-        reference,
-      });
+      // N-06: a definite rejection closes this payout AND releases the order
+      // claims in one transaction, so the orders become eligible for a future
+      // payout again instead of being stranded forever against a dead
+      // payout. Only the winner of the PROCESSING CAS releases anything; if a
+      // concurrent transfer.success already settled it to PAID, this is a
+      // no-op and the claims are (correctly) retained.
+      const settlement = await settleVendorPayoutFailed(
+        payout.id,
+        String(err.message),
+      );
+      if (settlement.outcome === "SETTLED") {
+        await auditAdmin(req, "ADMIN_PAYOUT_TRANSFER_FAILED", {
+          payoutId: payout.id,
+          vendorId: vendor.id,
+          reference,
+          releasedOrders: settlement.releasedOrders,
+        });
+      }
       throw new UpstreamServiceError(
         "Paystack",
         "Payout transfer failed; correct the payout details and retry.",
@@ -1211,6 +1218,18 @@ export const processPayout = async (req: AuthRequest, res: Response) => {
     if (!payout) throw new NotFoundError("Payout");
     if (payout.status !== PayoutStatus.FAILED)
       throw new ConflictError("Only failed payouts can be retried");
+    // N-06 coherence guard: a definite failure now releases the payout's
+    // order claims (see settleVendorPayoutFailed), so such a payout owns no
+    // orders and must never be re-sent — re-sending it alongside a fresh
+    // claim over those same released orders would produce TWO Paystack
+    // transfers for one obligation. A FAILED payout is retryable only while it
+    // still holds its orders (pre-existing payouts); otherwise the correct
+    // recovery is a normal payout run that re-claims them. This is a no-op
+    // for every payout that predates the release behaviour.
+    if (payout._count.orders === 0)
+      throw new ConflictError(
+        "This failed payout no longer holds any orders — its orders were released for a new payout run. Run the payout normally to re-claim them.",
+      );
     const retryHold = payoutHoldReason(payout.vendor);
     if (retryHold) {
       return sendSuccess(

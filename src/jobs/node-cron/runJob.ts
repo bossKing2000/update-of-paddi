@@ -4,6 +4,7 @@ import { runExpireAwaitingPaymentJob } from "../workers jobs/expireAwaitingPayme
 import { verifyPendingPayments } from "../payment/worker/verifyPendingPayments";
 import { verifyPendingRefunds } from "../payment/worker/verifyPendingRefunds";
 import { verifyPendingRiderWithdrawals } from "../payment/worker/verifyPendingRiderWithdrawals";
+import { verifyPendingVendorPayouts } from "../payment/worker/verifyPendingVendorPayouts";
 import { DeliveryAssignmentService } from "../../services/deliveryAssignment";
 import { logger } from "../../lib/logger";
 
@@ -76,6 +77,25 @@ cron.schedule("*/5 * * * *", async () => {
     await verifyPendingRiderWithdrawals();
   } catch (err) {
     logger.error({ err }, "[CRON] Verify pending rider withdrawals failed");
+  }
+});
+
+/**
+ * 💸 Reconcile PROCESSING Vendor Payouts
+ * Runs every 10 minutes. A payout whose Paystack transfer outcome was never
+ * learned (timeout, connection reset, 5xx — deliberately left PROCESSING so a
+ * retry cannot transfer twice) is resolved by asking Paystack about the
+ * transfer that already exists, using its stored reference. NEVER initiates
+ * another transfer. A verified failure also releases the payout's order claims
+ * so those orders can be paid in a future run; anything Paystack cannot
+ * confirm authoritatively stays PROCESSING with its orders still claimed.
+ * See verifyPendingVendorPayouts.ts.
+ */
+cron.schedule("*/10 * * * *", async () => {
+  try {
+    await verifyPendingVendorPayouts();
+  } catch (err) {
+    logger.error({ err }, "[CRON] Verify pending vendor payouts failed");
   }
 });
 
