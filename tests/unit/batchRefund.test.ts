@@ -25,13 +25,19 @@ jest.mock("../../src/lib/prisma", () => ({
       update: jest.fn(),
       updateMany: jest.fn(),
     },
-    payment: { findFirst: jest.fn(), findUnique: jest.fn(), updateMany: jest.fn() },
+    payment: {
+      findFirst: jest.fn(),
+      findUnique: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+    },
     refundRequest: {
       findUnique: jest.fn(),
       findFirst: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
       updateMany: jest.fn(),
+      aggregate: jest.fn(),
     },
     user: { findUnique: jest.fn() },
     vendorPayout: { findUnique: jest.fn(), updateMany: jest.fn() },
@@ -72,8 +78,10 @@ jest.mock("../../src/services/payoutService", () => ({
   initiateTransfer: jest.fn(async () => ({ status: true })),
 }));
 
+import fs from "fs";
 import prisma from "../../src/lib/prisma";
 import { updateOrderStatus } from "../../src/controllers/orderController";
+import { completeRefund } from "../../src/services/refundFinalizer.service";
 import { requestRefund } from "../../src/controllers/paymentController";
 import { updateRefundStatus } from "../../src/controllers/admin.controller";
 import { refundPaymentViaPaystack } from "../../src/services/refundService";
@@ -295,5 +303,156 @@ describe("N-01 — paid-cancel refund is scoped to the cancelled order", () => {
 
     // Unchanged legacy semantics: null => refund everything remaining.
     expect(db.payment.updateMany.mock.calls[0][0].data.refundedAmount.increment).toBe(1000000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// N-02 — completing an order-scoped refund must not touch sibling orders
+// ---------------------------------------------------------------------------
+
+describe("N-02 — completeRefund cancels only the refunded order", () => {
+  const complete = () => completeRefund("r-1", { source: "webhook" });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.refundRequest.update.mockImplementation(async (a: any) => ({ id: a.where.id, ...a.data }));
+    db.order.updateMany.mockResolvedValue({ count: 1 });
+    db.payment.update.mockImplementation(async (a: any) => ({ ...batchPayment(), ...a.data }));
+  });
+
+  it("5. order-scoped refund cancels only that order; the sibling is untouched", async () => {
+    db.refundRequest.findUnique.mockResolvedValue({
+      id: "r-1",
+      paymentRef: "PSK-BATCH-1",
+      orderId: "o-A",
+      status: "PROCESSING",
+      requestedAmountKobo: 550000,
+    });
+    db.payment.findUnique.mockResolvedValue(batchPayment());
+    // A's order-scoped refund (550k) plus B's (450k) have both completed, so
+    // the payment as a whole is fully refunded — the only situation in which
+    // completeRefund cancels any order at all.
+    db.refundRequest.aggregate.mockResolvedValue({ _sum: { requestedAmountKobo: 1000000 } });
+    db.order.findMany.mockResolvedValue([vendorAOrder()]);
+
+    const res = await complete();
+    expect(res.outcome).toBe("SUCCESS");
+
+    // Sibling fan-out is gone: the lookup is scoped to the refunded order id,
+    // never to the payment's idempotencyKey.
+    expect(db.order.findMany).toHaveBeenCalledWith({ where: { id: "o-A" } });
+    const where = db.order.updateMany.mock.calls[0][0].where;
+    expect(where.id).toEqual({ in: ["o-A"] });
+    expect(where.idempotencyKey).toBeUndefined();
+    expect(db.order.updateMany.mock.calls[0][0].data.status).toBe("CANCELLED");
+  });
+
+  it("6. whole-payment refund (orderId null) keeps the batch fan-out", async () => {
+    db.refundRequest.findUnique.mockResolvedValue({
+      id: "r-1",
+      paymentRef: "PSK-BATCH-1",
+      orderId: null,
+      status: "PROCESSING",
+      requestedAmountKobo: 1000000,
+    });
+    db.payment.findUnique.mockResolvedValue(batchPayment());
+    db.refundRequest.aggregate.mockResolvedValue({ _sum: { requestedAmountKobo: 1000000 } });
+    db.order.findMany.mockResolvedValue([vendorAOrder(), vendorBOrder()]);
+
+    const res = await complete();
+    expect(res.outcome).toBe("SUCCESS");
+    expect(db.order.findMany).toHaveBeenCalledWith({
+      where: { idempotencyKey: K },
+    });
+    expect(db.order.updateMany.mock.calls[0][0].where.id).toEqual({
+      in: ["o-A", "o-B"],
+    });
+  });
+
+  it("7. an already-COMPLETED order is never rewritten and causes no error", async () => {
+    db.refundRequest.findUnique.mockResolvedValue({
+      id: "r-1",
+      paymentRef: "PSK-BATCH-1",
+      orderId: "o-C",
+      status: "PROCESSING",
+      requestedAmountKobo: 550000,
+    });
+    db.payment.findUnique.mockResolvedValue(batchPayment());
+    db.refundRequest.aggregate.mockResolvedValue({ _sum: { requestedAmountKobo: 1000000 } });
+    db.order.findMany.mockResolvedValue([{ id: "o-C", status: "COMPLETED" }]);
+
+    // Must not throw merely because the order is terminal…
+    const res = await complete();
+    expect(res.outcome).toBe("SUCCESS");
+    expect(res.fullyRefunded).toBe(true);
+    // …and the order write must exclude terminal statuses.
+    const where = db.order.updateMany.mock.calls[0][0].where;
+    expect(where.status.in).not.toContain("COMPLETED");
+    expect(where.status.in).not.toContain("CANCELLED");
+    expect(where.status.in).not.toContain("FAILED_DELIVERY");
+    expect(where.status.in).toContain("COOKING");
+    expect(where.status.in).toContain("PAYMENT_CONFIRMED");
+  });
+
+  it("8. two-vendor batch: vendor A is cancelled while vendor B stays COOKING", async () => {
+    db.refundRequest.findUnique.mockResolvedValue({
+      id: "r-1",
+      paymentRef: "PSK-BATCH-1",
+      orderId: "o-A",
+      status: "PROCESSING",
+      requestedAmountKobo: 550000,
+    });
+    db.payment.findUnique.mockResolvedValue(batchPayment());
+    // A's order-scoped refund (550k) plus B's (450k) have both completed, so
+    // the payment as a whole is fully refunded — the only situation in which
+    // completeRefund cancels any order at all.
+    db.refundRequest.aggregate.mockResolvedValue({ _sum: { requestedAmountKobo: 1000000 } });
+    db.order.findMany.mockResolvedValue([vendorAOrder()]);
+
+    await complete();
+
+    const where = db.order.updateMany.mock.calls[0][0].where;
+    // Only A is ever a write target — B (COOKING) is neither loaded nor
+    // written, so it keeps its status untouched.
+    expect(where.id).toEqual({ in: ["o-A"] });
+    expect(db.order.findMany).not.toHaveBeenCalledWith({
+      where: { idempotencyKey: K },
+    });
+    // B is a cancellable status, so if it HAD been targeted it would have
+    // been rewritten — proving the scoping, not the status filter, is what
+    // protects it here.
+    expect(where.status.in).toContain("COOKING");
+  });
+
+  it("drift guard: the refund cancellable set matches the order transition table", () => {
+    const src = fs.readFileSync("src/controllers/orderController.ts", "utf8");
+    const rule = src.slice(
+      src.indexOf("CANCELLED: {"),
+      src.indexOf("FAILED_DELIVERY: {"),
+    );
+    const from = rule
+      .slice(rule.indexOf("from: ["))
+      .slice(0, rule.indexOf("]", rule.indexOf("from: [")))
+      .match(/OrderStatus\.([A-Z_]+)/g)!
+      .map((m) => m.replace("OrderStatus.", ""));
+
+    expect(from).toEqual([
+      "AWAITING_PAYMENT",
+      "PAYMENT_CONFIRMED",
+      "COOKING",
+      "READY_FOR_PICKUP",
+      "OUT_FOR_DELIVERY",
+    ]);
+
+    // The same list must be what refundFinalizer actually filters on.
+    const finalizer = fs.readFileSync("src/services/refundFinalizer.service.ts", "utf8");
+    const set = finalizer.slice(
+      finalizer.indexOf("const REFUND_CANCELLABLE_ORDER_STATUSES"),
+      finalizer.indexOf("];", finalizer.indexOf("const REFUND_CANCELLABLE_ORDER_STATUSES")),
+    );
+    const mirrored = set
+      .match(/OrderStatus\.([A-Z_]+)/g)!
+      .map((m) => m.replace("OrderStatus.", ""));
+    expect(mirrored).toEqual(from);
   });
 });

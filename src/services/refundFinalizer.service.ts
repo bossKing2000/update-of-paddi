@@ -6,6 +6,30 @@ import { createAuditLog } from "../utils/auditLog.service";
 type RefundOutcomeSource = "webhook" | "reconciliation" | "admin_sync";
 
 /**
+ * N-02: the order statuses a refund is allowed to cancel.
+ *
+ * This is NOT a new rule — it is the project's own existing state machine,
+ * copied from the CANCELLED transition in
+ * `updateOrderStatus` (src/controllers/orderController.ts, `transitions`).
+ * Anything outside this list is terminal or already-settled for cancellation
+ * purposes (COMPLETED, CANCELLED, FAILED_DELIVERY, PAYMENT_EXPIRED,
+ * CANCELLED_UNPAID, and the not-yet-confirmed PENDING /
+ * WAITING_VENDOR_CONFIRMATION / WAITING_CUSTOMER_APPROVAL states, which
+ * never appear as a transition source). Using the transition table keeps the
+ * refund path from inventing state transitions the order machine does not
+ * support — a refund must never flip a COMPLETED (possibly already
+ * paid-out) order to CANCELLED. `tests/unit/batchRefund.test.ts` asserts
+ * this list stays in sync with the transition table.
+ */
+const REFUND_CANCELLABLE_ORDER_STATUSES: OrderStatus[] = [
+  OrderStatus.AWAITING_PAYMENT,
+  OrderStatus.PAYMENT_CONFIRMED,
+  OrderStatus.COOKING,
+  OrderStatus.READY_FOR_PICKUP,
+  OrderStatus.OUT_FOR_DELIVERY,
+];
+
+/**
  * Marks a refund request COMPLETED once Paystack has confirmed the money
  * actually moved (refund.processed webhook, or a reconciliation fetch
  * that returns status "processed"). Shared by the webhook handler and
@@ -60,11 +84,31 @@ export async function completeRefund(
     if (completedKobo >= payment.amount && payment.status !== PaymentStatus.REFUNDED) {
       fullyRefunded = true;
       await tx.payment.update({ where: { id: payment.id }, data: { status: PaymentStatus.REFUNDED } });
-      const affectedOrders = payment.idempotencyKey
-        ? await tx.order.findMany({ where: { idempotencyKey: payment.idempotencyKey } })
-        : [{ id: payment.orderId }];
+      // N-02: scope the cancellation to what was actually refunded.
+      //
+      // An order-scoped RefundRequest (orderId set — e.g. the paid-cancel
+      // path) must cancel ONLY that order. Previously every order sharing the
+      // payment's idempotencyKey was cancelled, so refunding one vendor's
+      // order in a multi-vendor batch also cancelled the other vendors'
+      // orders. A request with orderId === null is a whole-payment refund, so
+      // the original fan-out over the batch is preserved there.
+      //
+      // Either way the update is restricted to statuses the order state
+      // machine can legitimately move to CANCELLED, so a COMPLETED (possibly
+      // already paid out) or otherwise terminal order is never rewritten and
+      // never causes an error.
+      const affectedOrders = refundRequest.orderId
+        ? await tx.order.findMany({ where: { id: refundRequest.orderId } })
+        : payment.idempotencyKey
+          ? await tx.order.findMany({
+              where: { idempotencyKey: payment.idempotencyKey },
+            })
+          : [{ id: payment.orderId }];
       await tx.order.updateMany({
-        where: { id: { in: affectedOrders.map((o) => o.id) } },
+        where: {
+          id: { in: affectedOrders.map((o) => o.id) },
+          status: { in: REFUND_CANCELLABLE_ORDER_STATUSES },
+        },
         data: {
           paymentStatus: PaymentStatus.REFUNDED,
           status: OrderStatus.CANCELLED,
