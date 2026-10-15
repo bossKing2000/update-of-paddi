@@ -8,20 +8,27 @@ datasource db {
 }
 
 model User {
-  id          String   @id @default(uuid())
-  username    String?  @unique
-  name        String
-  email       String   @unique
-  phoneNumber String?
-  password    String?
-  avatarUrl   String?
-  preferences String[]
-  bio         String?
-  role        Role?
-  roles       Role[] @default([])
-  brandName   String?
-  brandLogo   String?
-  googleId    String?  @unique
+  id              String    @id @default(uuid())
+  username        String?   @unique
+  name            String
+  email           String    @unique
+  phoneNumber     String?
+  // Phase 1D.1: canonical phone identity used for uniqueness. phoneNumber
+  // stays as the display/input-compatible field; phoneNumberE164 is the
+  // normalized E.164 value (e.g. +2348012345678). OTP storage lives in
+  // Redis, never in PostgreSQL.
+  phoneNumberE164 String?   @unique
+  isPhoneVerified Boolean   @default(false)
+  phoneVerifiedAt DateTime?
+  password        String?
+  avatarUrl       String?
+  preferences     String[]
+  bio             String?
+  role            Role?
+  roles           Role[]    @default([])
+  brandName       String?
+  brandLogo       String?
+  googleId        String?   @unique
 
   // KYC (NIN verification via Dojah) — required for VENDOR and DELIVERY
   // before they can go live. See src/services/dojah.service.ts.
@@ -140,6 +147,12 @@ model User {
   // Special Offers sent by this vendor
   specialOffersSent SpecialOrderOffer[] @relation("VendorSpecialOffers")
 
+  // Phase 2A catalog suggestions made by this user (as a vendor)
+  categorySuggestionsMade CategorySuggestion[] @relation("SuggestionVendor")
+
+  // Catalog suggestions reviewed by this user (as an admin)
+  categorySuggestionsReviewed CategorySuggestion[] @relation("SuggestionReviewer")
+
   // Persistent refresh sessions — DB is source of truth, Redis is cache
   sessions UserSession[]
 }
@@ -148,6 +161,12 @@ model UserSession {
   id              String   @id @default(uuid())
   userId          String
   sessionId       String   @unique
+  /// Phase 1E: the role this SESSION is acting as, independent of every other
+  /// session the same account holds and of the account-wide `User.role`.
+  /// Nullable on purpose: rows that predate this column keep NULL and are
+  /// treated as "whatever the account role was", so the migration is additive
+  /// and needs no backfill and no forced re-login.
+  activeRole      Role?
   ip              String?
   userAgent       String?
   deviceId        String?
@@ -190,6 +209,26 @@ model Address {
 }
 
 // Curated Bottom Pot food vocabulary ("What's in the Pot?").
+// Phase 2A catalog taxonomy. Categories are admin/developer controlled
+// (stable string ids); vendors never create them, they only suggest new
+// DishTypes via CategorySuggestion.
+model Category {
+  id        String   @id // stable key, e.g. "RICE_DISHES"
+  name      String   @unique // display name, e.g. "Rice Dishes"
+  slug      String   @unique // URL-safe key, e.g. "rice-dishes"
+  icon      String?
+  sortOrder Int      @default(100)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  dishTypes   DishType[]
+  suggestions CategorySuggestion[]
+  products    Product[]
+
+  @@index([isActive, sortOrder])
+}
+
 // Vendors choose from active rows — they never free-type dish types, so
 // "Ofada" / "ofada" / "OFADA" cannot duplicate. New dishes are added as
 // rows (no deployment). Stable string ids (e.g. "JOLLOF") keep API
@@ -204,15 +243,29 @@ model DishType {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  // Phase 2A: every dish belongs to exactly one Category.
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
   products Product[]
 
+  // Back-reference for suggestions approved into this canonical row.
+  approvedSuggestion CategorySuggestion?
+
   @@index([isActive, sortOrder])
+  @@index([categoryId])
+  @@index([categoryId, isActive, sortOrder])
 }
 
 model Product {
   id          String  @id @default(uuid())
   name        String
   description String
+  // Phase 3.2a drift remediation: search infrastructure owned by migration
+  // 20261006000000_search (raw SQL). Declared here so the migrator sees the
+  // live objects as expected state instead of drift. tsvector_col is
+  // server-maintained by a trigger and is not application-written.
+  tsvector_col Unsupported("tsvector")?
   price       Float
   archived    Boolean @default(false) // just like a delete function
 
@@ -220,9 +273,29 @@ model Product {
   dishTypeId String
   dishType   DishType @relation(fields: [dishTypeId], references: [id])
 
+  // Phase 2B: denormalized shortcut for fast category filtering. The
+  // authoritative classification stays dishTypeId -> DishType.categoryId;
+  // this column is server-derived on write, never client-controlled.
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
   // Portion size: how much food ONE purchased unit represents
   // (e.g. "1 portion", "Family Pack — serves 4–5"). Free text, not inventory.
   portionLabel String?
+
+  // Phase 2B: same-day ordering window. Simple flag only — no scheduler,
+  // no auto-activation; enforcement belongs to a later step.
+  isScheduled Boolean @default(false)
+
+  // Phase 2B: recurring same-day order deadline ("HH:MM", Africa/Lagos
+  // business day). Null = no cutoff. Format validated at the API layer.
+  orderCutoffTime String?
+
+  // Phase 2B: maximum qualifying orders per business day. Null =
+  // unlimited. Never 0-as-unlimited. Reservation logic belongs to a
+  // later step; there is deliberately no Product-level counter column
+  // (see ProductDailyCounter).
+  dailyCap Int?
 
   // Inventory: remaining purchasable units. When trackInventory is false
   // the product has unlimited availability (stock is ignored). When true,
@@ -239,6 +312,9 @@ model Product {
   orders              Order[]               @relation("ProductOrders")
   orderItems          OrderItem[]
   options             ProductOption[]       @relation("ProductOptions")
+  tags                ProductTag[]
+  optionGroups        OptionGroup[]
+  dailyCounters       ProductDailyCounter[]
   averageRating       Float?                @default(0)
   reviewCount         Int                   @default(0)
   createdAt           DateTime              @default(now())
@@ -261,6 +337,11 @@ model Product {
   @@index([archived])
   @@index([createdAt])
   @@index([price])
+  @@index([categoryId]) // Phase 2B category filtering
+  @@index([categoryId, archived]) // Phase 2B category browse
+  @@index([tsvector_col], map: "product_tsv_idx", type: Gin)
+  @@index([name(ops: raw("gin_trgm_ops"))], map: "product_name_trgm_idx", type: Gin)
+  @@index([description(ops: raw("gin_trgm_ops"))], map: "product_description_trgm_idx", type: Gin)
 }
 
 model ProductOption {
@@ -279,6 +360,135 @@ model ProductOption {
   @@unique([productId, name])
 }
 
+// Phase 2B structured add-ons. Coexists with (never replaces) the legacy
+// flat ProductOption table: historical carts/orders keep their FKs, and
+// the ProductOption → OptionGroup data migration belongs to Phase 2B.2.
+model OptionGroup {
+  id            String   @id @default(uuid())
+  productId     String
+  name          String
+  required      Boolean  @default(false)
+  minSelections Int      @default(0)
+  maxSelections Int      @default(1)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  product Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
+  items   OptionGroupItem[]
+
+  @@index([productId, sortOrder])
+}
+
+model OptionGroupItem {
+  id            String   @id @default(uuid())
+  optionGroupId String
+  name          String
+  // Same Float/naira representation as ProductOption.price. May be
+  // negative (discount add-on). No kobo conversion in this phase.
+  priceAdd      Float    @default(0)
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  optionGroup OptionGroup @relation(fields: [optionGroupId], references: [id], onDelete: Cascade)
+
+  cartItemOptions CartItemOption[]
+  orderItemOptions OrderItemOption[]
+
+  @@index([optionGroupId, isActive, sortOrder])
+}
+
+// Phase 2B daily capacity counters: one row per product per Africa/Lagos
+// business day. Separate table (not a Product column) so per-day rows
+// expire naturally, refunds restore atomically, and concurrent checkouts
+// serialize on the row. Increment/decrement logic belongs to a later step.
+model ProductDailyCounter {
+  productId String
+  date      DateTime
+  count     Int      @default(0)
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([productId, date])
+  @@index([date])
+}
+
+// Phase 2A product tagging. Canonical tags only (stable string ids);
+// vendors attach/detach them, they never free-type tag names.
+enum TagType {
+  CUISINE
+  DIET
+  OCCASION
+}
+
+model Tag {
+  id        String   @id // stable key, e.g. "SPICY" — never a random UUID
+  name      String   @unique // display name, e.g. "Spicy"
+  type      TagType
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products ProductTag[]
+
+  @@index([type, isActive])
+}
+
+model ProductTag {
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  tagId String
+  tag   Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([productId, tagId])
+  @@index([tagId, productId])
+}
+
+enum SuggestionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// Phase 2A vendor dish suggestions. Vendors propose names against an
+// existing Category; admins approve (creating the canonical DishType,
+// linked via approvedDishTypeId) or reject with a note. No HTTP
+// endpoints yet — schema only.
+model CategorySuggestion {
+  id String @id @default(uuid())
+
+  vendorId String
+  vendor   User   @relation("SuggestionVendor", fields: [vendorId], references: [id], onDelete: Cascade)
+
+  suggestedName String
+
+  suggestedCategoryId String
+  suggestedCategory   Category @relation(fields: [suggestedCategoryId], references: [id], onDelete: Restrict)
+
+  status SuggestionStatus @default(PENDING)
+
+  adminNote String?
+
+  reviewedByAdminId String?
+  reviewedByAdmin   User?   @relation("SuggestionReviewer", fields: [reviewedByAdminId], references: [id], onDelete: SetNull)
+
+  reviewedAt DateTime?
+
+  approvedDishTypeId String?   @unique
+  approvedDishType   DishType? @relation(fields: [approvedDishTypeId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([vendorId, status])
+}
+
 model Order {
   id               String      @id @default(uuid())
   customerId       String
@@ -292,6 +502,19 @@ model Order {
   // were effectively always free and there was no out-of-range check.
   deliveryFee      Float       @default(0)
   totalPrice       Float
+  // Phase 3.2a: per-order financial snapshots in kobo (integer minor units).
+  // Nullable with no default and no backfill — historical rows predate the
+  // writers (Phase 3.2b) and their exact values are unrecoverable, so NULL
+  // here means "unknown history", never zero. Populated going-forward in
+  // the same transaction that creates the Order.
+  commissionKobo   BigInt?
+  vendorPayoutKobo BigInt?
+  discountKobo     BigInt?
+  // Phase 3.2b: the exact vendor commission rate applied when this order's
+  // commissionKobo was calculated. Nullable with no backfill — the rate is
+  // read live at order creation and frozen here so later rate changes can
+  // never rewrite history. Populated going-forward with the snapshots above.
+  commissionRateSnapshot Float?
   vendorNote       String?
   customerApproval Boolean     @default(false)
   status           OrderStatus @default(PENDING)
@@ -309,18 +532,26 @@ model Order {
   // prevents the same completed order from being paid out to the vendor
   // twice across multiple payout runs.
   payoutId String?
-  payout   VendorPayout? @relation(fields: [payoutId], references: [id])
+  // Restrict (NOT SetNull): deleting a payout must never silently reopen
+  // its orders for a second payout. Payouts are never deleted via the API;
+  // this guards out-of-band deletes against double-pay resurrection.
+  payout   VendorPayout? @relation(fields: [payoutId], references: [id], onDelete: Restrict)
 
   // Set when this order was created from an accepted special-order offer
   // rather than a normal cart checkout.
   specialOrderOfferId String?            @unique
   specialOrderOffer   SpecialOrderOffer? @relation("SpecialOfferOrder", fields: [specialOrderOfferId], references: [id])
 
-  customer    User                 @relation("CustomerOrders", fields: [customerId], references: [id], onDelete: Cascade)
-  vendor      User                 @relation("VendorOrders", fields: [vendorId], references: [id], onDelete: Cascade)
+  // Restrict (NOT Cascade): deleting a customer or vendor must never
+  // erase their orders and the financial history (payments, refunds,
+  // payouts, earnings) attached to them. Close/suspend via isBlocked /
+  // vendorStatus instead; deactivation preserves history by design.
+  customer    User                 @relation("CustomerOrders", fields: [customerId], references: [id], onDelete: Restrict)
+  vendor      User                 @relation("VendorOrders", fields: [vendorId], references: [id], onDelete: Restrict)
   address     Address?             @relation(fields: [addressId], references: [id], onDelete: SetNull)
   items       OrderItem[]
   payments    Payment[]            @relation("OrderPayments")
+  refunds     RefundRequest[]
   Product     Product[]            @relation("ProductOrders")
   assignments DeliveryAssignment[]
   earnings    DeliveryEarning[]
@@ -351,27 +582,48 @@ model OrderItem {
   id        String            @id @default(uuid())
   orderId   String
   productId String
+  // Phase 3.2a: catalog name snapshotted at checkout. Nullable with no
+  // default and no backfill — the live Product relation remains the only
+  // source for historical rows. Populated going-forward from the
+  // revalidated product name in the checkout transaction.
+  productName String?
   quantity  Int
   unitPrice Float
   subtotal  Float
   createdAt DateTime          @default(now())
   updatedAt DateTime? // specialRequest String? // NEW FIELD
   order     Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  product   Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // Restrict (NOT Cascade): deleting a product must never silently delete
+  // the OrderItem rows referencing it from customers' past orders. Removal
+  // from sale is via archived=true; both delete paths refuse products
+  // with order history (409) before the database constraint is reached.
+  product   Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
   options   OrderItemOption[]
 }
 
 model OrderItemOption {
   id            String        @id @default(uuid())
-  optionId      String
+  // Phase 2B.5a dual option-source representation. Legacy rows carry
+  // optionId; new rows carry optionGroupItemId instead. Exactly one must
+  // be set — enforced by a database CHECK constraint (see migration), not
+  // just application validation.
+  optionId      String?
   name          String
   price         Float
   orderItemId   String
   orderItem     OrderItem     @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
-  productOption ProductOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  // Restrict (NOT Cascade): legacy option rows are frozen but still
+  // referenced by historical orders. Matches the new optionGroupItem
+  // convention directly below — deleting catalog must never delete history.
+  productOption ProductOption? @relation(fields: [optionId], references: [id], onDelete: Restrict)
+  optionGroupItemId String?
+  // Restrict (NOT Cascade): deleting a catalog item must never silently
+  // delete historical order records. Deactivate via isActive instead.
+  optionGroupItem OptionGroupItem? @relation(fields: [optionGroupItemId], references: [id], onDelete: Restrict)
 
   @@index([orderItemId])
   @@index([optionId])
+  @@index([optionGroupItemId])
 }
 
 model ProductReview {
@@ -678,7 +930,7 @@ model Promotion {
   // - SINGLE_PRODUCT: applies to exactly one product (productId required)
   // - SELECTED_PRODUCTS: applies to multiple specific products (products relation)
   // - VENDOR_WIDE: applies to all eligible products of the vendor (vendorId required)
-  scope       PromotionScope @default(VENDOR_WIDE)
+  scope PromotionScope @default(VENDOR_WIDE)
 
   isActive Boolean @default(true)
 
@@ -695,7 +947,7 @@ model Promotion {
   updatedAt DateTime @updatedAt
 
   usages   PromotionUsage[]
-  products Product[] @relation("PromotionProducts")
+  products Product[]        @relation("PromotionProducts")
 
   @@unique([vendorId, code])
   @@index([code])
@@ -822,6 +1074,13 @@ model RefundRequest {
   // null means a full refund of whatever remained on the payment.
   requestedAmountKobo Int?
 
+  // Phase 3.2a: optional link to the single order this request refunds.
+  // Nullable with no backfill — historical and batch-level (multi-order
+  // payment) rows intentionally remain NULL. Deleting an order never
+  // deletes refund history (RESTRICT); use deactivation/cancellation flows.
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
   @@index([paystackRefundId])
 }
 
@@ -884,16 +1143,24 @@ model CartItem {
 model CartItemOption {
   id              String @id @default(uuid())
   cartItemId      String
-  productOptionId String
+  // Phase 2B.4a: dual option-source representation. Legacy rows carry
+  // productOptionId; new rows carry optionGroupItemId instead. Exactly
+  // one must be set — enforced by a database CHECK constraint (see
+  // migration), not just application validation.
+  productOptionId String?
+  optionGroupItemId String?
+
   name            String
   price           Float
 
   // Relations
   cartItem      CartItem      @relation(fields: [cartItemId], references: [id], onDelete: Cascade)
-  productOption ProductOption @relation(fields: [productOptionId], references: [id], onDelete: Cascade)
+  productOption ProductOption? @relation(fields: [productOptionId], references: [id], onDelete: Cascade)
+  optionGroupItem OptionGroupItem? @relation(fields: [optionGroupItemId], references: [id], onDelete: Cascade)
 
   @@index([cartItemId])
   @@index([productOptionId])
+  @@index([optionGroupItemId])
 }
 
 // A point-in-time snapshot of what GET /cart/summary showed the customer
@@ -931,7 +1198,7 @@ model DeliveryPerson {
   user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   vehicleType     String?
   licensePlate    String?
-  status          DeliveryPersonStatus @default(ACTIVE)
+  status          DeliveryPersonStatus @default(INACTIVE)
   rating          Float                @default(0)
   totalDeliveries Int                  @default(0)
   isOnline        Boolean              @default(false)
@@ -993,6 +1260,22 @@ model DeliveryEarning {
 
   deliveryPerson DeliveryPerson @relation(fields: [deliveryPersonId], references: [id])
   order          Order          @relation(fields: [orderId], references: [id])
+
+  // F9: a completed delivery pays out exactly once. `orderId` is the key —
+  // NOT (deliveryPersonId, orderId), which would still let two different riders
+  // hold an earning against the same order and duplicate the rider payout.
+  //
+  // Domain: an order has a single `deliveryFee`, and the sole production writer
+  // derives `totalEarned` from it, so one delivery can only ever produce one
+  // earning. Reassignment writes DECLINED assignments, which can never reach
+  // DELIVERED, so they never earn. `tip`/`deductions` are columns for future
+  // use and have no writer today. With no supported multi-leg or multi-earning
+  // model, "zero or one earning per order" is the real invariant.
+  //
+  // The primary application guard is the N-05A completion flow (the conditional
+  // Order CAS plus the `orderTransitioned` earnings gate); this constraint is
+  // the database-level financial backstop underneath it.
+  @@unique([orderId])
 }
 
 enum RiderWithdrawalStatus {
@@ -1057,7 +1340,10 @@ model RiderWithdrawal {
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
 
-  deliveryPerson   DeliveryPerson     @relation(fields: [deliveryPersonId], references: [id], onDelete: Cascade)
+  // Restrict (NOT Cascade): deleting a rider must never erase the
+  // withdrawal ledger. Riders are deactivated via DeliveryPerson.status;
+  // withdrawals are terminal financial records.
+  deliveryPerson   DeliveryPerson     @relation(fields: [deliveryPersonId], references: [id], onDelete: Restrict)
   payoutAccount    RiderPayoutAccount @relation(fields: [payoutAccountId], references: [id], onDelete: Restrict)
   processedByAdmin User?              @relation("RiderWithdrawalProcessedBy", fields: [processedByAdminId], references: [id])
 

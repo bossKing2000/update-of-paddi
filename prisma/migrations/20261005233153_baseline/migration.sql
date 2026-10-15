@@ -8,6 +8,9 @@ CREATE TYPE "Role" AS ENUM ('CUSTOMER', 'VENDOR', 'ADMIN', 'DELIVERY');
 CREATE TYPE "KycStatus" AS ENUM ('PENDING', 'VERIFIED', 'REJECTED');
 
 -- CreateEnum
+CREATE TYPE "VendorStatus" AS ENUM ('NEW', 'PENDING_REVIEW', 'ACTIVE', 'SUSPENDED');
+
+-- CreateEnum
 CREATE TYPE "SpecialOrderRequestStatus" AS ENUM ('PENDING', 'OFFER_MADE', 'ACCEPTED', 'REJECTED', 'CANCELLED');
 
 -- CreateEnum
@@ -114,6 +117,9 @@ CREATE TABLE "User" (
     "isBlocked" BOOLEAN NOT NULL DEFAULT false,
     "blockedReason" TEXT,
     "blockedAt" TIMESTAMP(3),
+    "vendorStatus" "VendorStatus",
+    "vendorStatusReason" TEXT,
+    "vendorStatusChangedAt" TIMESTAMP(3),
     "emailVerificationToken" TEXT,
     "emailVerificationExpiresAt" TIMESTAMP(3),
 
@@ -1385,94 +1391,3 @@ ALTER TABLE "_ProductOrders" ADD CONSTRAINT "_ProductOrders_A_fkey" FOREIGN KEY 
 
 -- AddForeignKey
 ALTER TABLE "_ProductOrders" ADD CONSTRAINT "_ProductOrders_B_fkey" FOREIGN KEY ("B") REFERENCES "Product"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- ── Baseline appendix: Product full-text search (non-Prisma objects) ─────
--- Previously created at server boot by setupSearch.ts (now verify-only).
--- Idempotent: safe to re-run and safe where the objects already exist.
--- NOTE: CREATE EXTENSION requires privileges the deploy role may not have.
--- If this fails on a managed DB, have an admin run
--- `CREATE EXTENSION IF NOT EXISTS pg_trgm;` once, then re-run the migration.
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
-ALTER TABLE "Product" ADD COLUMN IF NOT EXISTS tsvector_col tsvector;
-
-CREATE INDEX IF NOT EXISTS product_tsv_idx ON "Product" USING GIN(tsvector_col);
-CREATE INDEX IF NOT EXISTS product_name_trgm_idx ON "Product" USING gin (name gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS product_description_trgm_idx ON "Product" USING gin (description gin_trgm_ops);
-
-CREATE OR REPLACE FUNCTION update_tsvector_col() RETURNS trigger AS $$
-BEGIN
-  NEW.tsvector_col := to_tsvector(
-    'english',
-    coalesce(NEW.name,'') || ' ' || coalesce(NEW.description,'')
-  );
-  RETURN NEW;
-END
-$$ LANGUAGE plpgsql;
-
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trigger_update_tsvector_col') THEN
-    CREATE TRIGGER trigger_update_tsvector_col
-    BEFORE INSERT OR UPDATE ON "Product"
-    FOR EACH ROW EXECUTE FUNCTION update_tsvector_col();
-  END IF;
-END$$;
-
-UPDATE "Product" SET tsvector_col = to_tsvector('english', coalesce(name,'') || ' ' || coalesce(description,'')) WHERE tsvector_col IS NULL;
-
--- ── Baseline appendix: curated DishType vocabulary (data) ─────────
--- Fixed stable ids the seeder and product creation depend on.
--- Idempotent via ON CONFLICT DO NOTHING.
-INSERT INTO "DishType" ("id", "name", "description", "sortOrder", "isActive", "createdAt", "updatedAt") VALUES
-  ('JOLLOF', 'Jollof Rice', 'Smoky party-style jollof and its cousins', 10, true, NOW(), NOW()),
-  ('FRIED_RICE', 'Fried Rice', 'Nigerian fried rice dishes', 20, true, NOW(), NOW()),
-  ('OFADA', 'Ofada Rice', 'Ofada with ayamase or designer stew', 30, true, NOW(), NOW()),
-  ('WHITE_RICE', 'White Rice', 'Plain white rice with stews and sauces', 40, true, NOW(), NOW()),
-  ('COCONUT_RICE', 'Coconut Rice', 'Coconut rice dishes', 50, true, NOW(), NOW()),
-  ('AMALA', 'Amala', 'Amala with gbegiri, ewedu and stews', 60, true, NOW(), NOW()),
-  ('EBA', 'Eba', 'Eba with soups', 70, true, NOW(), NOW()),
-  ('POUNDED_YAM', 'Pounded Yam', 'Pounded yam with soups', 80, true, NOW(), NOW()),
-  ('FUFU', 'Fufu', 'Fufu with soups', 90, true, NOW(), NOW()),
-  ('SEMOVITA', 'Semovita & Wheat', 'Semovita, semolina and wheat swallows', 100, true, NOW(), NOW()),
-  ('TUWO', 'Tuwo', 'Tuwo masara, tuwo shinkafa and northern swallows', 110, true, NOW(), NOW()),
-  ('EWA_AGOYIN', 'Ewa Agoyin', 'Ewa agoyin with agege bread', 120, true, NOW(), NOW()),
-  ('BEANS', 'Beans & Porridge', 'Beans, beans porridge and bean-based mains', 130, true, NOW(), NOW()),
-  ('MOI_MOI', 'Moi Moi', 'Moi moi (moin moin) in all forms', 140, true, NOW(), NOW()),
-  ('AKARA', 'Akara', 'Akara bean cakes', 150, true, NOW(), NOW()),
-  ('PUFF_PUFF', 'Puff Puff', 'Puff puff snacks', 160, true, NOW(), NOW()),
-  ('EGUSI', 'Egusi Soup', 'Egusi soup with any swallow', 170, true, NOW(), NOW()),
-  ('OGBONO', 'Ogbono Soup', 'Ogbono soup with any swallow', 180, true, NOW(), NOW()),
-  ('OKRA', 'Okra Soup', 'Okra soup with any swallow', 190, true, NOW(), NOW()),
-  ('EFO_RIRO', 'Efo Riro', 'Efo riro vegetable soup', 200, true, NOW(), NOW()),
-  ('AFANG', 'Afang Soup', 'Afang and okazi soups', 210, true, NOW(), NOW()),
-  ('EDIKANG', 'Edikang Ikong', 'Edikang ikong soup', 220, true, NOW(), NOW()),
-  ('BANGA', 'Banga Soup', 'Banga soup, starch and pairings', 230, true, NOW(), NOW()),
-  ('OHA', 'Oha Soup', 'Oha soup', 240, true, NOW(), NOW()),
-  ('BITTERLEAF', 'Bitterleaf Soup', 'Bitterleaf soup', 250, true, NOW(), NOW()),
-  ('NSALA', 'Nsala Soup', 'Nsala white soup', 260, true, NOW(), NOW()),
-  ('FISHERMAN', 'Fisherman Soup', 'Riverside fisherman soup', 270, true, NOW(), NOW()),
-  ('PEPPER_SOUP', 'Pepper Soup', 'Goat meat, catfish, chicken and yam pepper soups', 280, true, NOW(), NOW()),
-  ('ASUN', 'Asun', 'Spicy grilled goat meat', 290, true, NOW(), NOW()),
-  ('SUYA', 'Suya', 'Grilled suya meats', 300, true, NOW(), NOW()),
-  ('BOLI', 'Boli', 'Roasted plantain with sides', 310, true, NOW(), NOW()),
-  ('PLANTAIN', 'Plantain', 'Boiled, fried and porridge plantain dishes', 320, true, NOW(), NOW()),
-  ('FRIED_YAM', 'Fried Yam', 'Fried yam with sauces', 330, true, NOW(), NOW()),
-  ('YAM_PORRIDGE', 'Yam Porridge', 'Yam porridge (asaro) and yam mains', 340, true, NOW(), NOW()),
-  ('ABACHA', 'Abacha', 'Abacha African salad', 350, true, NOW(), NOW()),
-  ('NKWOBI', 'Nkwobi', 'Nkwobi cow-foot delicacy', 360, true, NOW(), NOW()),
-  ('ISIEWU', 'Isi Ewu', 'Isi ewu goat-head delicacy', 370, true, NOW(), NOW()),
-  ('KILISHI', 'Kilishi', 'Kilishi beef jerky', 380, true, NOW(), NOW()),
-  ('PONMO', 'Ponmo', 'Peppered ponmo cow skin', 390, true, NOW(), NOW()),
-  ('OKPA', 'Okpa', 'Okpa and corn pudding', 400, true, NOW(), NOW()),
-  ('AGIDI_PAP', 'Agidi, Pap & Custard', 'Agidi, pap, akamu and custard', 410, true, NOW(), NOW()),
-  ('CHICKEN', 'Chicken & Turkey', 'Chicken and turkey mains', 420, true, NOW(), NOW()),
-  ('GOAT_MEAT', 'Goat Meat', 'Goat meat mains and stews', 430, true, NOW(), NOW()),
-  ('FISH', 'Fish & Seafood', 'Grilled, fried and sauced fish and seafood', 440, true, NOW(), NOW()),
-  ('SMALL_CHOPS', 'Small Chops', 'Samosa, spring rolls and party chops', 450, true, NOW(), NOW()),
-  ('SNACKS', 'Snacks & Pastries', 'Meat pie, sausage rolls, egg rolls, chin chin', 460, true, NOW(), NOW()),
-  ('SHAWARMA', 'Shawarma', 'Naija-style shawarma', 470, true, NOW(), NOW()),
-  ('NOODLES', 'Noodles & Pasta', 'Indomie, noodles and pasta dishes', 480, true, NOW(), NOW()),
-  ('DRINKS', 'Drinks', 'Zobo, kunu, smoothies, juices and drinks', 490, true, NOW(), NOW()),
-  ('OTHER', 'Other', 'Everything else in the pot', 9999, true, NOW(), NOW())
-ON CONFLICT ("id") DO NOTHING;

@@ -1,0 +1,54 @@
+-- F3 Stage 2: database-level backstop for "one active delivery per order".
+--
+-- Invariant: at most ONE DeliveryAssignment per order may be in an active
+-- delivery status (ASSIGNED / ACCEPTED / PICKED_UP / EN_ROUTE). This is the
+-- database half of a two-layer control:
+--
+--   1. Application layer (F3 Stage 1) — every assignment-creating path
+--      (assignOrder manual + auto, acceptBroadcast) serialises on the Order
+--      row via `claimOrderRow` and re-checks `assertNoActiveAssignment`
+--      immediately before the INSERT, so it should never produce a second
+--      active row.
+--   2. This index — the backstop for anything the application cannot see:
+--      a future code path that inserts without claiming the order row, a
+--      script or seed, a manual DBA fix, or a race that slips past a
+--      read-then-insert in a transaction that took no lock.
+--
+-- WHY A PARTIAL INDEX AND NOT `@@unique([orderId])` IN THE SCHEMA
+--
+-- A plain unique index on ("orderId") would forbid a SECOND ROW of any kind for
+-- an order. That is wrong for this domain: reassignment is a first-class,
+-- supported flow (`handleDecline` writes a DECLINED row and then re-dispatches,
+-- `expireOldBroadcasts` retries after a broadcast times out, and every
+-- completed delivery leaves a DELIVERED row). One order legitimately accumulates
+-- many historical rows. Only rows that are *simultaneously* live must be
+-- unique, which is exactly what a partial predicate expresses — so the
+-- constraint is deliberately NOT declared in schema.prisma, because Prisma
+-- cannot express a partial unique index and a `@@unique([orderId])` there would
+-- be both invalid and actively break legitimate reassignment.
+--
+-- The predicate deliberately uses N-05C's authoritative active-status set.
+-- EN_ROUTE is included: a rider physically holding the order is mid-delivery.
+-- Note this is deliberately *wider* than the per-driver capacity set
+-- (DRIVER_STACK_STATUSES omits EN_ROUTE) — reconciling those two notions is
+-- finding F5 and is deliberately out of scope here.
+--
+-- Rows already in a terminal status (DECLINED / DELIVERED / FAILED / RETURNED /
+-- CANCELLED) are outside the predicate and are never constrained, so history
+-- is untouched. Status TRANSITIONS are also unaffected: the index applies to
+-- rows, and updating the one active row's status in place (ASSIGNED -> ACCEPTED
+-- -> PICKED_UP -> EN_ROUTE -> DELIVERED) never creates a second indexed row.
+--
+-- Safety: verified 0 orders with more than one active assignment before
+-- applying, so this is a pure index addition — no data rewrite, no table
+-- rewrite, no constraint validation scan that could fail.
+--
+-- Prisma cannot declare partial unique indexes, so this is raw SQL by
+-- necessity (same pattern as Payment_userId_idempotencyKey_active_key in
+-- 20261006203325_phase_3_2f_active_payment_backstop): future `migrate diff`
+-- runs will propose dropping it — DO NOT accept such a DROP; the index is
+-- load-bearing. Covered by tests/integration/deliveryAssignmentBackstop.test.ts,
+-- which asserts the index exists with this exact predicate.
+CREATE UNIQUE INDEX "DeliveryAssignment_one_active_per_order"
+  ON "DeliveryAssignment" ("orderId")
+  WHERE "status" IN ('ASSIGNED', 'ACCEPTED', 'PICKED_UP', 'EN_ROUTE');

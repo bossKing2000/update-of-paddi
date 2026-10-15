@@ -1,0 +1,31 @@
+-- F9: one DeliveryEarning per Order — database-level financial backstop.
+--
+-- A completed delivery pays out once. An order carries a single `deliveryFee`
+-- and the sole production writer derives `totalEarned` from it, so one delivery
+-- can only ever produce one earning; there is no supported multi-leg or
+-- multi-earning model, and reassignment leaves DECLINED assignments that can
+-- never reach DELIVERED and therefore never earn.
+--
+-- The key is ("orderId") alone. A composite (deliveryPersonId, orderId) key
+-- would NOT express the invariant: it would still allow Order A to hold an
+-- earning for Rider 1 AND another for Rider 2, which is exactly the duplicate
+-- financial record this constraint exists to prevent. Zero or one earning per
+-- order is the real rule.
+--
+-- The primary guard remains the application layer: the N-05A conditional Order
+-- CAS together with the `orderTransitioned` gate around the earning insert. This
+-- constraint sits underneath it and turns any residual duplicate into a failed
+-- transaction (P2002) rather than a second rider payout.
+--
+-- Unlike the partial index in 20261007090000_delivery_assignment_active_backstop,
+-- this one IS representable in schema.prisma (@@unique([orderId])), so Prisma
+-- models it fully and `migrate diff` will not propose dropping it.
+--
+-- Safety: verified 0 orders with more than one earning before applying
+-- (1 earning, 1 distinct order, all tip/deductions zero), so this is a pure
+-- index addition — no data rewrite. Also adds the missing index on "orderId",
+-- which the table previously lacked entirely (only its primary key existed).
+--
+-- SQL below is Prisma's own generated output for this schema change, unmodified.
+-- CreateIndex
+CREATE UNIQUE INDEX "DeliveryEarning_orderId_key" ON "DeliveryEarning"("orderId");
