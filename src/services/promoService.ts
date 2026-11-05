@@ -79,7 +79,9 @@ export function calculateDiscountAllocation(
 
   if (type === DiscountType.DELIVERY) {
     for (const group of eligibleGroups) {
-      const discount = round(Math.min(value, group.deliveryFee));
+      // Phase 3A: `value` is fixed naira for DELIVERY promos; convert to
+      // kobo so it compares against `group.deliveryFee` (integer kobo).
+      const discount = round(Math.min(Math.round(value * 100), group.deliveryFee));
       if (discount > 0) {
         vendorDeliveryDiscounts[group.vendorId] = discount;
         totalDiscount += discount;
@@ -98,7 +100,8 @@ export function calculateDiscountAllocation(
   const rawDiscount =
     type === DiscountType.PERCENTAGE
       ? (eligibleSubtotal * value) / 100
-      : Math.min(value, eligibleSubtotal);
+      : Math.min(Math.round(value * 100), eligibleSubtotal);
+  // maxDiscount is integer kobo (Phase 3A); rawDiscount is kobo.
   const cappedDiscount =
     maxDiscount != null ? Math.min(rawDiscount, maxDiscount) : rawDiscount;
 
@@ -244,6 +247,8 @@ export async function applyPromoService({
   const eligibleSubtotal = round(
     eligibleGroups.reduce((sum, v) => sum + v.subtotal, 0),
   );
+  // minOrderAmount is integer kobo (Phase 3A); eligibleSubtotal is integer
+  // kobo. Compare directly — both sides are kobo, no * 100.
   if (eligibleSubtotal < promo.minOrderAmount) {
     return emptyResult(
       code,
@@ -441,7 +446,7 @@ export async function getActivePromotionsForCustomer(userId?: string | null) {
     price: number,
   ): { discountedPrice: number; discountAmount: number } => {
     if (promo.type !== DiscountType.PERCENTAGE && promo.type !== DiscountType.FIXED) {
-      return { discountedPrice: Math.round(price * 100) / 100, discountAmount: 0 };
+      return { discountedPrice: price, discountAmount: 0 };
     }
     const discountedPrice = computeDiscountedPrice({
       type: promo.type,
@@ -451,7 +456,7 @@ export async function getActivePromotionsForCustomer(userId?: string | null) {
     });
     return {
       discountedPrice,
-      discountAmount: Math.round((price - discountedPrice) * 100) / 100,
+      discountAmount: price - discountedPrice,
     };
   };
 

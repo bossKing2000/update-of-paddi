@@ -18,12 +18,24 @@ jest.mock("../../src/lib/prisma", () => ({
       delete: jest.fn().mockResolvedValue({}),
       deleteMany: jest.fn().mockResolvedValue({}),
       findMany: jest.fn().mockResolvedValue([]),
+      // createUserSession re-reads the stored role for the cache payload
+      // when the caller states none (refresh TTL slide).
+      findUnique: jest.fn().mockResolvedValue(null),
+      // Phase 1E: setSessionActiveRole scopes its write to one session.
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
   },
 }));
 
 import { redisUsersSessions } from "../../src/lib/redis";
-import { createUserSession, getUserSession, deleteUserSession, deleteAllUserSessions, listUserSessions } from "../../src/lib/session";
+import {
+  createUserSession,
+  getUserSession,
+  deleteUserSession,
+  deleteAllUserSessions,
+  listUserSessions,
+  setSessionActiveRole,
+} from "../../src/lib/session";
 
 const mockedRedis = redisUsersSessions as jest.Mocked<typeof redisUsersSessions>;
 
@@ -65,6 +77,37 @@ describe("session.ts (multi-device sessions)", () => {
     expect(mockedRedis.del).toHaveBeenCalledWith("session:user:user-1:session-B");
     expect(mockedRedis.del).toHaveBeenCalledWith("session:user:user-1:session-C");
     expect(mockedRedis.del).toHaveBeenCalledWith("session:user:user-1:index");
+  });
+
+  it("deleteAllUserSessions reports success only when the DB rows actually went", async () => {
+    // Phase 1E.1. A caller that makes a security claim (password change) has
+    // to be able to tell a completed revocation from a failed one.
+    mockedRedis.sMembers.mockResolvedValue(["session-A"]);
+
+    const db = (await import("../../src/lib/prisma")).default as any;
+    db.userSession.deleteMany.mockResolvedValueOnce({ count: 1 });
+    await expect(deleteAllUserSessions("user-1")).resolves.toBe(true);
+
+    db.userSession.deleteMany.mockRejectedValueOnce(new Error("db down"));
+    await expect(deleteAllUserSessions("user-1")).resolves.toBe(false);
+  });
+
+  it("setSessionActiveRole evicts a stale cache entry when the cache write fails", async () => {
+    // PostgreSQL is authoritative. If the cache write fails, leaving the old
+    // entry in place would let a cache-first read hand back the previous role,
+    // so the key is dropped and the next read falls back to the database.
+    const db = (await import("../../src/lib/prisma")).default as any;
+    db.userSession.updateMany.mockResolvedValue({ count: 1 });
+    mockedRedis.get.mockResolvedValue(JSON.stringify({ ip: "1.2.3.4", activeRole: "CUSTOMER" }));
+    mockedRedis.set.mockRejectedValueOnce(new Error("redis down"));
+
+    await setSessionActiveRole("user-1", "session-A", "VENDOR");
+
+    expect(db.userSession.updateMany).toHaveBeenCalledWith({
+      where: { userId: "user-1", sessionId: "session-A" },
+      data: { activeRole: "VENDOR" },
+    });
+    expect(mockedRedis.del).toHaveBeenCalledWith("session:user:user-1:session-A");
   });
 
   it("listUserSessions returns metadata for every still-live session and prunes expired ones from the index", async () => {

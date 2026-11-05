@@ -1,6 +1,7 @@
 import { Request } from "express";
 import { getClientInfo } from "../ip";
 import { createAuditLog } from "../auditLog.service";
+import { logger } from "../../lib/logger";
 
 interface AuditOptions {
   req: Request;
@@ -28,6 +29,6 @@ export async function createAuditEntry({
     });
     console.log(`[AUDIT] ✅ Logged action: ${action}`);
   } catch (err) {
-    console.error("[AUDIT] ❌ Failed to log audit:", err);
+    logger.error({ err, action }, "Failed to log audit entry");
   }
 }

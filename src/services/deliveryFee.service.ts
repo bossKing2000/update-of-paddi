@@ -9,9 +9,9 @@ import haversine from "haversine-distance";
  *
  * Tunable via env vars so pricing can be adjusted without a code change.
  */
-const BASE_FEE = Number(process.env.DELIVERY_BASE_FEE) || 300; // ₦300 flat base
-const PER_KM_RATE = Number(process.env.DELIVERY_PER_KM_RATE) || 100; // ₦100/km
-const FREE_DELIVERY_THRESHOLD = Number(process.env.FREE_DELIVERY_THRESHOLD) || 15000; // per-vendor subtotal
+const BASE_FEE = Number(process.env.DELIVERY_BASE_FEE) || 30000; // ₦300 flat base → integer kobo
+const PER_KM_RATE = Number(process.env.DELIVERY_PER_KM_RATE) || 10000; // ₦100/km → integer kobo per km
+const FREE_DELIVERY_THRESHOLD = Number(process.env.FREE_DELIVERY_THRESHOLD) || 1500000; // per-vendor subtotal, integer kobo
 const MAX_DELIVERY_DISTANCE_KM = Number(process.env.MAX_DELIVERY_DISTANCE_KM) || 20;
 
 export interface DeliveryFeeResult {
@@ -27,11 +27,14 @@ export interface DeliveryFeeResult {
  * A cart is often multi-vendor, so this is called once per vendor group —
  * each vendor is a separate pickup point at a (potentially very
  * different) distance, so each gets its own fee.
+ *
+ * All amounts are integer kobo (Phase 3A). `vendorSubtotal` must be passed
+ * in kobo; the returned `fee` is integer kobo.
  */
 export async function calculateDeliveryFee(
   vendorId: string,
   addressId: string,
-  vendorSubtotal: number
+  vendorSubtotalKobo: number
 ): Promise<DeliveryFeeResult> {
   const [vendorAddress, customerAddress] = await Promise.all([
     prisma.address.findFirst({
@@ -67,7 +70,7 @@ export async function calculateDeliveryFee(
   ) / 1000;
 
   const withinRange = distanceKm <= MAX_DELIVERY_DISTANCE_KM;
-  const freeDelivery = vendorSubtotal >= FREE_DELIVERY_THRESHOLD;
+  const freeDelivery = vendorSubtotalKobo >= FREE_DELIVERY_THRESHOLD;
   const fee = freeDelivery ? 0 : Math.round(BASE_FEE + distanceKm * PER_KM_RATE);
 
   return {

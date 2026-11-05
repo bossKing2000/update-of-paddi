@@ -88,6 +88,38 @@ describe("jest config contract", () => {
       expect(integration.testMatch).toEqual(["<rootDir>/tests/integration/**/*.test.ts"]);
     });
 
+    /**
+     * Regression pin for the selection defect this config used to carry.
+     *
+     * `testMatch` above is RECURSIVE, so it also matched
+     * tests/integration/redis/**. Those six suites are owned by
+     * jest.redis-integration.config.js and need
+     * setupFiles: ["<rootDir>/tests/setup/pinTestRedisUrl.apply.ts"] — the
+     * fail-closed Redis gate. This config deliberately does not load it, so
+     * selecting them here ran them UNGATED against an unpinned Redis client,
+     * which produced real assertion failures plus cross-suite
+     * "The client is closed" contamination.
+     *
+     * The fix is an entry in this config's OWN testPathIgnorePatterns, not a
+     * narrower testMatch, because testMatch is CLI-overridable and is already
+     * pinned above; and not in the base config, whose array is pinned too.
+     */
+    it("excludes the Redis subdirectory, which has its own config and its own pin", () => {
+      const patterns = integration.testPathIgnorePatterns as string[];
+      expect(patterns.some((p) => p.includes("tests/integration/redis"))).toBe(true);
+
+      // The exclusion must not have been obtained by discarding anything else.
+      expect(patterns).toContain("/node_modules/");
+      expect(patterns).toContain("/dist/");
+      expect(String(integration.globalSetup)).toContain("integrationPreflight");
+      expect(integration.setupFiles).toContain("<rootDir>/tests/setup/pinTestDatabaseUrl.apply.ts");
+
+      // And it must not have been "solved" by bolting the Redis pin onto the
+      // PostgreSQL config. pinTestRedisUrl rewrites process.env.REDIS_URL,
+      // which has no meaning for the PG suites; the two configs stay separate.
+      expect(integration.setupFiles).not.toContain("<rootDir>/tests/setup/pinTestRedisUrl.apply.ts");
+    });
+
     it("attaches the fail-closed preflight as globalSetup", () => {
       expect(String(integration.globalSetup)).toContain("integrationPreflight");
     });

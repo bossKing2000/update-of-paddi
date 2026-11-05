@@ -29,6 +29,10 @@ import {
   riderWithdrawalSchema,
 } from "../validations/riderOperationsSchema";
 import { encrypt, decrypt } from "../utils/encrypt";
+import {
+  assertRiderApproved,
+  loadRiderEligibility,
+} from "../services/riderEligibility.service";
 
 const getDriver = async (userId: string) => {
   const driver = await prisma.deliveryPerson.findUnique({
@@ -39,6 +43,22 @@ const getDriver = async (userId: string) => {
   });
   if (!driver) throw new NotFoundError("Rider profile");
   return driver;
+};
+
+/**
+ * Task 3: operational eligibility for the rider-operations handlers.
+ *
+ * Deliberately NOT folded into getDriver. getDriver serves onboarding and
+ * account-management surfaces too — vehicle submission, KYC status, support
+ * tickets, reading one's own payout summary — and an applicant who has not been
+ * approved must still be able to complete those. Callers opt in.
+ *
+ * Uses the APPROVED gate, not the on-shift gate: managing where money is paid
+ * is account administration, not dispatch, so a rider who has stepped offline
+ * must keep full access to it.
+ */
+const requireApprovedRider = async (userId: string) => {
+  assertRiderApproved(await loadRiderEligibility(userId));
 };
 
 const withdrawalDetails = {
@@ -135,6 +155,10 @@ export const getRiderBankList = async (_req: AuthRequest, res: Response) =>
   sendSuccess(res, { banks: await listBanks() }, "Bank list retrieved");
 
 export const setRiderBankDetails = async (req: AuthRequest, res: Response) => {
+  // Approved-account gate, NOT the on-shift gate: bank details are payout
+  // account administration, and the withdrawal path already refuses funds
+  // unless the driver is ACTIVE, so an offline rider keeps this access.
+  await requireApprovedRider(req.user!.id);
   const parsed = riderBankDetailsSchema.safeParse(req.body);
   if (!parsed.success)
     throw new ValidationError(
@@ -320,7 +344,9 @@ export const processRiderWithdrawal = async (
       });
     }
     await initiateTransfer({
-      amountNaira: withdrawal.amount,
+      // withdrawal.amount is integer kobo (Phase 3A). Paystack expects kobo,
+      // so pass it unchanged — no * 100.
+      amountKobo: withdrawal.amount,
       recipientCode,
       reason: `Paddi rider withdrawal for ${withdrawal.deliveryPerson.user.name}`,
       reference,
@@ -411,6 +437,7 @@ export const processRiderWithdrawal = async (
 };
 
 export const submitDeliveryProof = async (req: AuthRequest, res: Response) => {
+  await requireApprovedRider(req.user!.id);
   const parsed = riderProofSchema.safeParse(req.body);
   if (!parsed.success)
     throw new ValidationError(

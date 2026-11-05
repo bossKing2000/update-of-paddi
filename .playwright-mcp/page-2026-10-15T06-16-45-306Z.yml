@@ -1,0 +1,552 @@
+- generic [active] [ref=f7e1]:
+  - banner [ref=f7e2]:
+    - generic [ref=f7e3]:
+      - generic [ref=f7e5]:
+        - link "DoorDash Help Center home" [ref=f7e6] [cursor=pointer]:
+          - /url: /en-us
+        - 'link "{audience} support home" [ref=f7e9] [cursor=pointer]':
+          - /url: /en-us/dashers
+          - generic [ref=f7e10]: for Dashers
+      - navigation "Main navigation" [ref=f7e11]:
+        - button "Categories" [ref=f7e12] [cursor=pointer]
+        - button "I'm looking for other Support" [ref=f7e15] [cursor=pointer]
+      - generic [ref=f7e18]:
+        - search [ref=f7e21]:
+          - generic [ref=f7e22]:
+            - textbox "Search help articles" [ref=f7e24]:
+              - /placeholder: What are you looking for?
+            - button "Search" [ref=f7e25] [cursor=pointer]
+        - button "EN-US – Select language" [ref=f7e29] [cursor=pointer]:
+          - generic [ref=f7e32]: EN-US
+  - main [ref=f7e35]:
+    - navigation "Breadcrumb" [ref=f7e37]:
+      - list [ref=f7e38]:
+        - listitem [ref=f7e39]:
+          - link "DoorDash Help Center" [ref=f7e40] [cursor=pointer]:
+            - /url: /en-us
+          - generic [aria-hidden] [ref=f7e41]: /
+        - listitem [ref=f7e42]:
+          - link "Dasher Support" [ref=f7e43] [cursor=pointer]:
+            - /url: /en-us/dashers
+          - generic [aria-hidden] [ref=f7e44]: /
+        - listitem [ref=f7e45]:
+          - link "Become a Dasher" [ref=f7e46] [cursor=pointer]:
+            - /url: /en-us/dashers/category/become-a-dasher
+          - generic [aria-hidden] [ref=f7e47]: /
+        - listitem [ref=f7e48]:
+          - generic [ref=f7e49]: Dasher Background Check FAQ
+    - generic [ref=f7e50]:
+      - generic [ref=f7e51]:
+        - article [ref=f7e53]:
+          - generic [ref=f7e54]:
+            - heading "Dasher Background Check FAQ" [level=1] [ref=f7e55]
+            - generic [ref=f7e56]: 12 min read
+          - generic [ref=f7e61]:
+            - heading [level=2] [ref=f7e62]:
+              - strong [ref=f7e63]: Overview
+            - paragraph [ref=f7e64]: As part of our commitment to help protect the DoorDash community, we are constantly evaluating new ways to help promote safety on the platform. Anyone signing up to dash must pass a secure background check before gaining access to the DoorDash platform.
+            - heading [level=2] [ref=f7e65]:
+              - strong [ref=f7e66]: Most Frequently Asked Questions
+            - paragraph [ref=f7e67]:
+              - strong [ref=f7e68]: "Q: What is the process?"
+            - paragraph [ref=f7e69]:
+              - strong [ref=f7e70]: "A:"
+              - text: DoorDash uses accredited third-party background check providers, including
+              - link "Checkr" [ref=f7e71] [cursor=pointer]:
+                - /url: https://checkr.com/
+              - text: to run secure background checks on all prospective and existing Dashers. Background checks are initiated as part of the signup process, before allowing individuals to access the platform to accept offers as new Dashers. For the continued safety and security of all members of our community, background check reruns are performed under certain circumstances. This allows us to receive and evaluate potential new or updated criminal history records through real-time data sources.
+            - paragraph [ref=f7e72]: Additionally, Checkr provides a continuous check feature that can report new offenses occurring after your initial complete background check.
+            - paragraph [ref=f7e73]:
+              - strong [ref=f7e74]: "Q: What information is contained in a background check?"
+            - paragraph [ref=f7e75]:
+              - strong [ref=f7e76]: "A:"
+              - text: "Background checks consist of the following:"
+            - list [ref=f7e77]:
+              - listitem [ref=f7e78]:
+                - paragraph [ref=f7e79]: Motor Vehicle Report (if using a motor vehicle to dash)
+              - listitem [ref=f7e80]:
+                - paragraph [ref=f7e81]: Criminal History Report
+            - paragraph [ref=f7e82]:
+              - strong [ref=f7e83]: "Q: What happens if I have a new record since my most recent background check report?"
+            - paragraph [ref=f7e84]:
+              - strong [ref=f7e85]: "A:"
+              - text: If your report reflects an incident or information that results in you no longer meeting the background check criteria, your Dasher account will be deactivated from the platform. You will receive an email if this happens.
+            - paragraph [ref=f7e86]:
+              - strong [ref=f7e87]: "Q: How does the background check process work and how long does it take?"
+            - paragraph [ref=f7e88]:
+              - strong [ref=f7e89]: "A:"
+              - text: If such a record is flagged in your report, you will be notified with a Pre-Adverse Action notice attached to an email sent from
+              - link "no-reply@checkr.com" [ref=f7e90] [cursor=pointer]:
+                - /url: mailto:no-reply@checkr.com
+              - text: before any deactivation action is taken. That notice will include a copy of your report and additional information, including how you can dispute the accuracy of any information in the background check or provide additional information to be considered.
+            - paragraph [ref=f7e91]: If you do not provide any additional information, or dispute the accuracy of your background check with Checkr, within the number of days provided in your Pre-Adverse Action Notice, you will receive a Post-Adverse action notice that provides an explanation of the final decision, and your Dasher account will be deactivated.
+            - paragraph [ref=f7e92]:
+              - strong [ref=f7e93]: "Q: How do I dispute the accuracy of my background check or provide more information for DoorDash to consider in its decision?"
+            - paragraph [ref=f7e94]:
+              - strong [ref=f7e95]: "A:"
+              - text: All of the information needed to dispute the accuracy of background check with Checkr, or to provide additional information to Doordash for consideration, is contained in the Pre-Adverse Action notice attached to the email from
+              - link "no-reply@checkr.com" [ref=f7e96] [cursor=pointer]:
+                - /url: mailto:no-reply@checkr.com
+              - text: . If you believe the findings of the Checkr report are inaccurate (e.g., the charge(s) listed are not your own, details of the charge are incorrect, out of date, etc.), please contact Checkr via their
+              - link "Checkr Candidate Portal" [ref=f7e97] [cursor=pointer]:
+                - /url: https://applicant.checkr.com/
+              - text: . Through the candidate portal, please follow the dispute process which involves specifying what you believe to be inaccurate on your report and following the appropriate steps. For questions or assistance, please contact
+              - link "Checkr Support" [ref=f7e98] [cursor=pointer]:
+                - /url: https://help.checkr.com/hc/en-us/articles/360036929273-Contact-Checkr-Candidate-Support
+              - text: .
+            - paragraph [ref=f7e99]:
+              - strong [ref=f7e100]: "Q: My background check says 'suspended'. What does this mean?"
+            - paragraph [ref=f7e101]:
+              - strong [ref=f7e102]: "A:"
+              - text: This usually indicates that you need to provide Checkr with additional information or documentation in order for your background check to continue processing. You should have received an email from
+              - link "no-reply@checkr.com" [ref=f7e103] [cursor=pointer]:
+                - /url: mailto:no-reply@checkr.com
+              - text: with instructions, or you can log into the
+              - link "Checkr Candidate Portal" [ref=f7e104] [cursor=pointer]:
+                - /url: https://applicant.checkr.com/
+              - text: to view the status of your background check.
+            - paragraph [ref=f7e105]:
+              - strong [ref=f7e106]: "Q: Why is my report taking such a long time?"
+            - paragraph [ref=f7e107]:
+              - strong [ref=f7e108]: "A:"
+              - text: While most background checks are completed within a day, it is not uncommon to encounter longer wait times of one to two weeks due to factors such as DMV and local county office delays. Recall that process includes both a criminal background check and, for those who indicate they will deliver by motorized vehicle, a motor vehicle report check. Individuals who plan to deliver by bicycle do not need to undergo a motor vehicle report check. Please visit the
+              - link "Checkr Candidate Portal" [ref=f7e109] [cursor=pointer]:
+                - /url: https://candidate.checkr.com/view#login
+              - text: for the most up-to-date estimates.
+            - paragraph [ref=f7e110]:
+              - text: Because the checks are performed by Checkr, not DoorDash, DoorDash is unable to expedite or provide estimated completion times. Contact
+              - link "Checkr Support" [ref=f7e111] [cursor=pointer]:
+                - /url: https://help.checkr.com/hc/en-us/articles/360036929273-Contacting-Checkr-Support
+              - text: if you have any further questions about processing times.
+            - paragraph [ref=f7e112]:
+              - strong [ref=f7e113]: "Q: Checkr says my report is complete. Why can't I complete sign-up?"
+            - paragraph [ref=f7e114]:
+              - strong [ref=f7e115]: "A:"
+              - text: Complete is a term that Checkr uses to indicate it has finished compiling the information on a report. A report being “Complete” is not an indication that the results of the search have been reviewed or of an individual’s eligibility to access the DoorDash platform. In other words, not all “Complete” reports have been reviewed and received a “Clear” status that would allow you to move on to the next step in the sign-up process. To check whether your completed report is “Clear” or requires any additional action, please log in to the
+              - link "Checkr Candidate Portal" [ref=f7e116] [cursor=pointer]:
+                - /url: https://applicant.checkr.com/
+              - text: .
+            - paragraph [ref=f7e117]: If you opted to receive a copy of your background check or live in a state that requires a copy to be sent, you should have received an email from Checkr with the subject line “Your DoorDash background check is complete!”.
+            - paragraph [ref=f7e118]:
+              - strong [ref=f7e119]: "Q: What does my background check status mean?"
+            - paragraph [ref=f7e120]:
+              - strong [ref=f7e121]: "A:"
+              - text: "The answer depends on which message you see when you sign in to your Dasher signup account. The following messages are what you should be looking for:"
+            - paragraph [ref=f7e122]:
+              - strong [ref=f7e124]: Clear
+            - paragraph [ref=f7e125]:
+              - text: "Clear: Your background check is clear and you are ready to move on to the next step in the sign-up process. You should have received an email from"
+              - link "no-reply@checkr.com" [ref=f7e126] [cursor=pointer]:
+                - /url: mailto:no-reply@checkr.com
+              - text: "with the following message:"
+            - list [ref=f7e127]:
+              - listitem [ref=f7e128]:
+                - paragraph [ref=f7e129]: "\"Congratulations! This message means you have completed and cleared the background check step. Finish the next steps in the app to start dashing.\""
+              - listitem [ref=f7e130]:
+                - paragraph [ref=f7e131]: "Please note: In certain locations, there may be a waitlist to start dashing right away, and you will need to wait for a welcome email from DoorDash"
+            - paragraph [ref=f7e132]:
+              - strong [ref=f7e134]: In Progress
+            - paragraph [ref=f7e135]:
+              - strong [ref=f7e136]: "Consider:"
+              - text: Your background check has been processed by Checkr and has been shared with us for internal review. Click
+              - link "here" [ref=f7e137] [cursor=pointer]:
+                - /url: https://candidate.checkr.com/view#login
+              - text: to view your current status.
+            - list [ref=f7e138]:
+              - listitem [ref=f7e139]:
+                - paragraph [ref=f7e140]: The Consider status means that Checkr has processed your background check, but the results require additional review.
+              - listitem [ref=f7e141]:
+                - paragraph [ref=f7e142]: Reviews are typically completed within 5 business days. To see the results of your review and if you are eligible to Dash, please search your email inbox (the address associated with your Dasher signup) for an email with the subject ‘Pre-Adverse Action Notice’ or ‘Post-Adverse Action Notice’.
+            - paragraph [ref=f7e143]:
+              - strong [ref=f7e144]: Canceled
+            - paragraph [ref=f7e145]:
+              - strong [ref=f7e146]: "Canceled:"
+              - text: Your most recent background check could not be completed with the information you provided. Our third-party background check provider, Checkr, should have shared additional details to the email address you submitted.
+            - paragraph [ref=f7e147]: "This could be due to: missing or inaccurate personal information, your previous withdrawal of consent, or other issues identified during the background check process."
+            - paragraph [ref=f7e148]:
+              - text: The “
+              - strong [ref=f7e149]: Canceled
+              - text: ” status cannot be reviewed further, as there is no report to review since the background check was not completed. A new background check will need to be ordered. Please contact Dasher Support
+              - link [ref=f7e150] [cursor=pointer]:
+                - /url: https://help.doordash.com/dashers/s/dasher-support?language=en_US
+                - strong [ref=f7e151]: here
+              - text: (via Chat or Call) to request a new background check.
+            - paragraph [ref=f7e152]:
+              - strong [ref=f7e153]: Pending
+            - paragraph [ref=f7e154]:
+              - strong [ref=f7e155]: "Pending:"
+              - text: Your background check is still being processed by Checkr. Click here to view your current status with Checkr and whether they need additional information from you in order to complete your background check.
+            - list [ref=f7e156]:
+              - listitem [ref=f7e157]:
+                - paragraph [ref=f7e158]:
+                  - text: Sometimes Checkr may require additional information in order to complete the process. Please provide any additional information requested by Checkr by logging in to the
+                  - link "Checkr Candidate Portal" [ref=f7e159] [cursor=pointer]:
+                    - /url: https://candidate.checkr.com/view#login
+                  - text: .
+              - listitem [ref=f7e160]:
+                - paragraph [ref=f7e161]:
+                  - text: If Checkr has not requested any additional information or if you have already submitted the requested information, this means your background check is still being processed by Checkr. DoorDash is unable to expedite or provide estimates on wait times, because the reports are compiled and completed by Checkr, not DoorDash. Please visit the
+                  - link "Checkr Candidate Portal" [ref=f7e162] [cursor=pointer]:
+                    - /url: https://candidate.checkr.com/view#login
+                  - text: for the most up-to-date estimated completion time. For additional information regarding estimated completion times, please contact
+                  - link "Checkr Support" [ref=f7e163] [cursor=pointer]:
+                    - /url: https://help.checkr.com/hc/en-us/articles/360036929273-Contacting-Checkr-Support
+                  - text: .
+            - paragraph [ref=f7e164]:
+              - strong [ref=f7e165]: Disputed
+            - paragraph [ref=f7e166]:
+              - strong [ref=f7e167]: "Disputed:"
+              - text: Your background check dispute is being reviewed by Checkr.
+            - list [ref=f7e168]:
+              - listitem [ref=f7e169]:
+                - paragraph [ref=f7e170]: If you have disputed the results of a report with Checkr, then you may see this status. It means that Checkr has received your dispute and is reviewing it.
+              - listitem [ref=f7e171]:
+                - paragraph [ref=f7e172]: Disputed background checks can take up to 30 days. However, if the Dasher provides new documentation for the dispute toward the end of the 30-day period, Checkr will have an additional 15 days to complete the investigation
+            - paragraph [ref=f7e173]:
+              - strong [ref=f7e174]: "Q: How can I check the status of my background check?"
+            - paragraph [ref=f7e175]:
+              - strong [ref=f7e176]: "A:"
+              - text: "The background check process varies, but it can take 5-7 business days and, in some instances, a bit longer. If you have questions about the status of your background check, you can reach out to Checkr for more information by:"
+            - list [ref=f7e177]:
+              - listitem [ref=f7e178]:
+                - paragraph [ref=f7e179]: Clicking on the link below and providing the phone number, email, social security number, and date of birth you used for your background check. Once you have provided the information, click the Get Status button.
+                - list [ref=f7e180]:
+                  - listitem [ref=f7e181]:
+                    - paragraph [ref=f7e182]:
+                      - link "Checkr Candidate Portal" [ref=f7e183] [cursor=pointer]:
+                        - /url: https://candidate.checkr.com/view#login
+            - paragraph [ref=f7e184]:
+              - strong [ref=f7e185]: "Q: I received the 'Pre-Adverse Action Notice' email, what can I do?"
+            - paragraph [ref=f7e186]:
+              - strong [ref=f7e187]: "A:"
+              - text: "If you are:"
+            - paragraph [ref=f7e188]:
+              - strong [ref=f7e189]: "Signing up to become a Dasher:"
+            - paragraph [ref=f7e190]: "If you received an email with the subject 'Pre-Adverse Action Notice', this means that based on the information in your background check report, you may be precluded from proceeding with the sign up process. After the Pre-Adverse Action notice is sent, you will have 14 days to dispute the results of your background check. If you would like to dispute your results, please carefully follow the steps below:"
+            - list [ref=f7e191]:
+              - listitem [ref=f7e192]:
+                - paragraph [ref=f7e193]:
+                  - text: If you believe the findings of the Checkr report are inaccurate (e.g., the charge(s) listed are not your own, details of the charge are incorrect, out of date, etc.), please contact Checkr via their
+                  - link "Checkr Candidate Portal" [ref=f7e194] [cursor=pointer]:
+                    - /url: https://candidate.checkr.com/view#login
+                  - text: . Through the candidate portal, please follow the dispute process which involves specifying what you believe to be inaccurate on your report and following the appropriate steps. For questions or assistance, please contact
+                  - link "Checkr Support" [ref=f7e195] [cursor=pointer]:
+                    - /url: https://help.checkr.com/hc/en-us/articles/360036929273-Contacting-Checkr-Support
+                  - text: .
+              - listitem [ref=f7e196]:
+                - paragraph [ref=f7e197]:
+                  - text: If the findings of the Checkr report are accurate but you would like to provide additional information for consideration regarding the circumstances surrounding the information or charge(s) on your report, or otherwise, please email
+                  - link "checkr-review@doordash.com" [ref=f7e198] [cursor=pointer]:
+                    - /url: http://checkr-review@doordash.com
+                  - text: from the email address you used to sign up. If DoorDash does not hear from you within 14 days from when the Pre-Adverse Action Notice was sent to you, DoorDash will make a decision based on the available information.
+            - paragraph [ref=f7e199]:
+              - strong [ref=f7e200]: "An active Dasher:"
+            - paragraph [ref=f7e201]: "If you received an email with the subject 'Pre-Adverse Action Notice', this means that based on the results of your background check report, you will have 14 days after the Pre-Adverse Action notice is sent to dispute the results of your background check. In the meantime, your Dasher account will be unavailable. If you would like to dispute or appeal the initial results, please carefully read the following:"
+            - list [ref=f7e202]:
+              - listitem [ref=f7e203]:
+                - paragraph [ref=f7e204]:
+                  - text: If you believe the findings of the Checkr report are inaccurate (e.g., the charge(s) listed are not your own, details of the charge are incorrect, out of date, etc.), please contact Checkr via their
+                  - link "Checkr Candidate Portal" [ref=f7e205] [cursor=pointer]:
+                    - /url: https://candidate.checkr.com/view#login
+                  - text: . Through the candidate portal, please follow the dispute process which involves specifying what you believe to be inaccurate on your report and following the appropriate steps. For questions or assistance, please contact
+                  - link "Checkr Support" [ref=f7e206] [cursor=pointer]:
+                    - /url: https://help.checkr.com/hc/en-us/articles/360036929273-Contacting-Checkr-Support
+                  - text: .
+              - listitem [ref=f7e207]:
+                - paragraph [ref=f7e208]:
+                  - text: If the findings of the Checkr report are accurate but you would like to provide additional information for consideration regarding the circumstances surrounding the information or charge(s) on your report, or otherwise, please email
+                  - link "checkr-review@doordash.com" [ref=f7e209] [cursor=pointer]:
+                    - /url: http://checkr-review@doordash.com
+                  - text: from the email address you used to sign up. If DoorDash does not hear from you within 14 days from when the Pre-Adverse Action Notice was sent to you, DoorDash will make a decision based on the available information.
+            - paragraph [ref=f7e210]:
+              - strong [ref=f7e211]: "Q: I received a 'Post-Adverse Action Notice' email, what can I do?"
+            - paragraph [ref=f7e212]:
+              - strong [ref=f7e213]: "A:"
+              - text: "If you received an email with the subject 'Post-Adverse Action Notice', this means that more than 14 days have elapsed since your first Pre-Adverse Action Notice (see above) was sent to you via email, and your Dasher account has been deactivated from the platform. However, you still have the ability to do the following:"
+            - list [ref=f7e214]:
+              - listitem [ref=f7e215]:
+                - paragraph [ref=f7e216]:
+                  - text: If you believe the findings of the Checkr report are inaccurate (e.g., the charge(s) listed are not your own, details of the charge are incorrect, out of date, etc.), please contact Checkr via their
+                  - link "Checkr Candidate Portal" [ref=f7e217] [cursor=pointer]:
+                    - /url: https://candidate.checkr.com/view#login
+                  - text: . Through the candidate portal, please follow the dispute process which involves specifying what you believe to be inaccurate on your report and following the appropriate steps. For questions or assistance, please contact
+                  - link "Checkr Support" [ref=f7e218] [cursor=pointer]:
+                    - /url: https://help.checkr.com/hc/en-us/articles/360036929273-Contacting-Checkr-Support
+                  - text: .
+              - listitem [ref=f7e219]:
+                - paragraph [ref=f7e220]:
+                  - text: You can submit a deactivation appeal by emailing
+                  - link "checkr-review@doordash.com" [ref=f7e221] [cursor=pointer]:
+                    - /url: mailto:checkr-review@doordash.com
+                  - text: ", and provide information or evidence to support your reactivation request. Our specialized team will review your appeal."
+            - paragraph [ref=f7e222]:
+              - strong [ref=f7e223]: My Dasher account was deactivated because of my background check
+            - paragraph [ref=f7e224]:
+              - strong [ref=f7e225]: "Q: How to review the results of my background check"
+            - paragraph [ref=f7e226]:
+              - strong [ref=f7e227]: "A:"
+              - text: There are two ways to find your background check report
+            - list [ref=f7e228]:
+              - listitem [ref=f7e229]:
+                - paragraph [ref=f7e230]:
+                  - strong [ref=f7e231]: METHOD 1
+                  - text: ": Checkr, our background check provider, would have sent you a pre-adverse action notice via email which included a copy of your background check report. To locate this notice, search your email for a message from"
+                  - link "DDChAANotices@doordash.com" [ref=f7e232] [cursor=pointer]:
+                    - /url: mailto:DDChAANotices@doordash.com
+                  - text: .
+              - listitem [ref=f7e233]:
+                - paragraph [ref=f7e234]:
+                  - strong [ref=f7e235]: "METHOD 2:"
+                  - text: Log in to the Checkr
+                  - link "Candidate Portal" [ref=f7e236] [cursor=pointer]:
+                    - /url: https://candidate.checkr.com/login
+                  - text: to review your completed background check report.
+            - paragraph [ref=f7e237]:
+              - strong [ref=f7e238]: "Note:"
+              - text: Background checks completed more than 12 months ago are not available through the Checkr Candidate Portal. If your background check was completed more than 12 months ago, please contact Checkr Support directly to request a copy of it.
+            - paragraph [ref=f7e239]:
+              - strong [ref=f7e240]: "Q: There is incorrect or outdated information on my background check report"
+            - paragraph [ref=f7e241]:
+              - strong [ref=f7e242]: "A:"
+              - text: All of the information needed to dispute the accuracy of a background check with Checkr, or to provide additional information to Doordash for consideration, is contained in the Pre-Adverse Action notice attached to the email from no-reply@checkr.com. If you believe the information in the Checkr report is inaccurate (e.g., the charge(s) listed are not accurate, details of the charge are incorrect, out of date, etc.), please contact Checkr via their
+              - link "Candidate Portal" [ref=f7e243] [cursor=pointer]:
+                - /url: https://applicant.checkr.com/
+              - text: . Follow the dispute process in the Candidate Portal, which involves specifying what you believe to be inaccurate on your report and following the appropriate steps. For questions or assistance, please contact
+              - link "Checkr Support" [ref=f7e244] [cursor=pointer]:
+                - /url: https://help.checkr.com/hc/en-us/articles/360036929273-Contact-Checkr-Candidate-Support
+              - text: .
+            - paragraph [ref=f7e245]:
+              - strong [ref=f7e246]: "Note:"
+              - text: Background checks completed more than 12 months ago are not available through the Checkr Candidate Portal. If your background check was completed more than 12 months ago, please contact Checkr Support to request a copy of your report and dispute the accuracy of your background check results.
+            - paragraph [ref=f7e247]:
+              - strong [ref=f7e248]: "Q: The information on my background check report is accurate, but I want to appeal the decision"
+            - paragraph [ref=f7e249]:
+              - strong [ref=f7e250]: A.
+              - text: Please contact DoorDash at
+              - link "checkr-review@doordash.com" [ref=f7e251] [cursor=pointer]:
+                - /url: mailto:checkr-review@doordash.com
+              - text: ", and provide information or evidence to support your reactivation request. This may include, but is not limited to:"
+            - list [ref=f7e252]:
+              - listitem [ref=f7e253]:
+                - paragraph [ref=f7e254]: Evidence that you attended school, job training, or counseling, or are involved with your community. The evidence can come in the form of letters from people who know you, such as teachers, counselors, supervisors, clergy, and parole or probation officers.
+              - listitem [ref=f7e255]:
+                - paragraph [ref=f7e256]: As part of your appeal, you can also submit any documentation related to inaccuracies, rehabilitation, or other mitigating information for review before a final decision is made.
+              - listitem [ref=f7e257]:
+                - paragraph [ref=f7e258]: If you have any documents you would like us to consider–such as certificates of programs or class participation, completion of community service, medications or coursework, letters of recommendation, occupational certifications, documentation of rehabilitation or good conduct, or any other materials—please attach them to your email for review.
+          - generic [ref=f7e259]:
+            - generic [ref=f7e260]: Was this article helpful?
+            - generic [ref=f7e261]:
+              - button "Yes" [ref=f7e262] [cursor=pointer]
+              - button "No" [ref=f7e265] [cursor=pointer]
+        - generic [ref=f7e268]:
+          - generic [ref=f7e269]:
+            - heading "Related Articles" [level=2] [ref=f7e270]
+            - paragraph [ref=f7e271]: Continue exploring helpful resources
+          - list [ref=f7e272]:
+            - listitem [ref=f7e273]:
+              - link "About the Dasher Free Welcome Gift" [ref=f7e274] [cursor=pointer]:
+                - /url: /en-us/dashers/article/about-the-dasher-activation-kit
+            - listitem [ref=f7e280]:
+              - link "Canada Background Check FAQ" [ref=f7e281] [cursor=pointer]:
+                - /url: /en-us/dashers/article/canada-background-check-faq
+            - listitem [ref=f7e287]:
+              - link "Canada Dasher Sign Up" [ref=f7e288] [cursor=pointer]:
+                - /url: /en-us/dashers/article/canada-dasher-sign-up
+        - generic [ref=f7e295]:
+          - heading "If you can't find what you are looking for:" [level=2] [ref=f7e296]
+          - generic [ref=f7e297]:
+            - generic [ref=f7e298]:
+              - generic [ref=f7e299]:
+                - heading "Can't find what you are looking for?" [level=3] [ref=f7e300]
+                - paragraph [ref=f7e301]: Our chat and call support are available 24/7
+              - generic [ref=f7e302]:
+                - link "Chat with Us in the Dasher App" [ref=f7e303] [cursor=pointer]:
+                  - /url: https://help.doordash.com/en-us/dashers/article/chat-support-in-the-dasher-app
+                - link "Call Us at 855-431-0459" [ref=f7e306] [cursor=pointer]:
+                  - /url: tel:8554310459
+            - generic [ref=f7e309]:
+              - generic [ref=f7e310]:
+                - heading "Looking for Dasher gear?" [level=3] [ref=f7e311]
+                - paragraph [ref=f7e312]: Get Dasher essentials like Red Cards, hot bags, pizza bags, and stickers
+              - link "Visit the Dasher Store online" [ref=f7e314] [cursor=pointer]:
+                - /url: https://doordashstore.com/category.aspx?ID=13245
+      - complementary [ref=f7e317]:
+        - navigation "In this article" [ref=f7e318]:
+          - list [ref=f7e323]:
+            - listitem [ref=f7e324]:
+              - link "Overview" [ref=f7e325] [cursor=pointer]:
+                - /url: "#overview"
+            - listitem [ref=f7e326]:
+              - link "Most Frequently Asked Questions" [ref=f7e327] [cursor=pointer]:
+                - /url: "#most-frequently-asked-questions"
+    - generic [ref=f7e330]:
+      - link "I'm a Customer Customer Support" [ref=f7e331] [cursor=pointer]:
+        - /url: /en-us/consumers
+        - generic [ref=f7e332]:
+          - heading "I'm a Customer" [level=2] [ref=f7e333]
+          - generic [ref=f7e334]: Customer Support
+      - link "I'm a Merchant Merchant Support" [ref=f7e338] [cursor=pointer]:
+        - /url: /en-us/merchants
+        - generic [ref=f7e339]:
+          - heading "I'm a Merchant" [level=2] [ref=f7e340]
+          - generic [ref=f7e341]: Merchant Support
+      - link "I'm a Corporate Customer Business Support" [ref=f7e345] [cursor=pointer]:
+        - /url: /en-us/business
+        - generic [ref=f7e346]:
+          - heading "I'm a Corporate Customer" [level=2] [ref=f7e347]
+          - generic [ref=f7e348]: Business Support
+      - link "I'm an Advertiser Ads Support" [ref=f7e352] [cursor=pointer]:
+        - /url: /en-us/advertising
+        - generic [ref=f7e353]:
+          - heading "I'm an Advertiser" [level=2] [ref=f7e354]
+          - generic [ref=f7e355]: Ads Support
+  - contentinfo [ref=f7e359]:
+    - link "DoorDash Help Center" [ref=f7e362] [cursor=pointer]:
+      - /url: /en-us
+    - generic [ref=f7e375]:
+      - generic [ref=f7e376]:
+        - generic [ref=f7e378]:
+          - list [ref=f7e379]:
+            - listitem [ref=f7e380]:
+              - link "DoorDash for iOS" [ref=f7e381] [cursor=pointer]:
+                - /url: https://apps.apple.com/us/app/doordash-food-delivery/id719972451
+            - listitem [ref=f7e385]:
+              - link "DoorDash for Android" [ref=f7e386] [cursor=pointer]:
+                - /url: https://play.google.com/store/apps/details?id=com.dd.doordash&hl=en
+          - list [ref=f7e390]:
+            - listitem [ref=f7e391]:
+              - link "twitter" [ref=f7e392] [cursor=pointer]:
+                - /url: https://x.com/doordash
+            - listitem [ref=f7e395]:
+              - link "facebook" [ref=f7e396] [cursor=pointer]:
+                - /url: https://facebook.com/doordash
+            - listitem [ref=f7e399]:
+              - link "instagram" [ref=f7e400] [cursor=pointer]:
+                - /url: https://www.instagram.com/doordash
+            - listitem [ref=f7e403]:
+              - link "linkedin" [ref=f7e404] [cursor=pointer]:
+                - /url: https://www.linkedin.com/company/doordash
+          - button "English (US) – Select language" [ref=f7e409] [cursor=pointer]:
+            - generic [ref=f7e412]: English (US)
+        - generic [ref=f7e415]:
+          - generic [ref=f7e416]:
+            - heading "Get to Know Us" [level=3] [ref=f7e417]:
+              - button "Get to Know Us"
+            - list [ref=f7e418]:
+              - listitem [ref=f7e419]:
+                - link "About Us" [ref=f7e420] [cursor=pointer]:
+                  - /url: https://about.doordash.com
+              - listitem [ref=f7e421]:
+                - link "Accessibility" [ref=f7e422] [cursor=pointer]:
+                  - /url: https://about.doordash.com/en-us/accessibility
+              - listitem [ref=f7e423]:
+                - link "Company Blog" [ref=f7e424] [cursor=pointer]:
+                  - /url: https://blog.doordash.com/
+              - listitem [ref=f7e425]:
+                - link "Dasher Blog" [ref=f7e426] [cursor=pointer]:
+                  - /url: https://dasher.doordash.com/en-us/blog
+              - listitem [ref=f7e427]:
+                - link "Merchant Blog" [ref=f7e428] [cursor=pointer]:
+                  - /url: https://merchants.doordash.com/en-us/blog
+          - generic [ref=f7e429]:
+            - heading "Let Us Help You" [level=3] [ref=f7e430]:
+              - button "Let Us Help You"
+            - list [ref=f7e431]:
+              - listitem [ref=f7e432]:
+                - link "Account Details" [ref=f7e433] [cursor=pointer]:
+                  - /url: https://www.doordash.com/consumer/edit_profile/
+              - listitem [ref=f7e434]:
+                - link "Order History" [ref=f7e435] [cursor=pointer]:
+                  - /url: https://www.doordash.com/orders/
+              - listitem [ref=f7e436]:
+                - link "Customer Support" [ref=f7e437] [cursor=pointer]:
+                  - /url: /en-us/consumers
+              - listitem [ref=f7e438]:
+                - link "Dasher Support" [ref=f7e439] [cursor=pointer]:
+                  - /url: /en-us/dashers
+              - listitem [ref=f7e440]:
+                - link "Merchant Support" [ref=f7e441] [cursor=pointer]:
+                  - /url: /en-us/merchants
+              - listitem [ref=f7e442]:
+                - link "Business Support" [ref=f7e443] [cursor=pointer]:
+                  - /url: /en-us/business
+              - listitem [ref=f7e444]:
+                - link "Ads Support" [ref=f7e445] [cursor=pointer]:
+                  - /url: /en-us/advertising
+              - listitem [ref=f7e446]:
+                - link "Have an emergency?" [ref=f7e447] [cursor=pointer]:
+                  - /url: /en-us/dashers/article/i-have-an-emergency
+          - generic [ref=f7e448]:
+            - heading "Doing Business" [level=3] [ref=f7e449]:
+              - button "Doing Business"
+            - list [ref=f7e450]:
+              - listitem [ref=f7e451]:
+                - link "Become a Dasher" [ref=f7e452] [cursor=pointer]:
+                  - /url: https://dasher.doordash.com
+              - listitem [ref=f7e453]:
+                - link "DoorDash Merchant" [ref=f7e454] [cursor=pointer]:
+                  - /url: https://merchants.doordash.com
+              - listitem [ref=f7e455]:
+                - link "Get Dashers for Deliveries" [ref=f7e456] [cursor=pointer]:
+                  - /url: https://merchants.doordash.com/en-us/products/drive-on-demand
+              - listitem [ref=f7e457]:
+                - link "Get DoorDash for Business" [ref=f7e458] [cursor=pointer]:
+                  - /url: https://business.doordash.com/
+              - listitem [ref=f7e459]:
+                - link "Advertise on DoorDash" [ref=f7e460] [cursor=pointer]:
+                  - /url: https://advertising.doordash.com/
+      - list [ref=f7e462]:
+        - listitem [ref=f7e463]:
+          - link "Consumers" [ref=f7e464] [cursor=pointer]:
+            - /url: https://www.doordash.com
+        - listitem [ref=f7e465]:
+          - link "Dashers" [ref=f7e466] [cursor=pointer]:
+            - /url: https://dasher.doordash.com/en-us
+        - listitem [ref=f7e467]:
+          - link "Merchants" [ref=f7e468] [cursor=pointer]:
+            - /url: https://merchants.doordash.com/en-us
+        - listitem [ref=f7e469]:
+          - link "Advertisers" [ref=f7e470] [cursor=pointer]:
+            - /url: https://advertising.doordash.com/en-us
+        - listitem [ref=f7e471]:
+          - link "Businesses" [ref=f7e472] [cursor=pointer]:
+            - /url: https://business.doordash.com/en-us
+        - listitem [ref=f7e473]:
+          - link "Investor Relations" [ref=f7e474] [cursor=pointer]:
+            - /url: https://ir.doordash.com/
+        - listitem [ref=f7e475]:
+          - link "Careers" [ref=f7e476] [cursor=pointer]:
+            - /url: https://careersatdoordash.com/
+        - listitem [ref=f7e477]:
+          - link "Newsroom" [ref=f7e478] [cursor=pointer]:
+            - /url: https://about.doordash.com/en-us/news
+        - listitem [ref=f7e479]:
+          - link "Block Party" [ref=f7e480] [cursor=pointer]:
+            - /url: https://blog.doordash.com/en-us
+      - generic [ref=f7e481]:
+        - list [ref=f7e483]:
+          - listitem [ref=f7e484]:
+            - link "Terms of Service" [ref=f7e485] [cursor=pointer]:
+              - /url: /en-us/legal/article/cx-terms-and-conditions
+          - listitem [ref=f7e486]:
+            - link "Consumer Privacy" [ref=f7e487] [cursor=pointer]:
+              - /url: /en-us/legal/article/cx-privacy-policy
+          - listitem [ref=f7e488]:
+            - link "Dasher Privacy" [ref=f7e489] [cursor=pointer]:
+              - /url: /en-us/legal/article/dx-privacy-policy
+          - listitem [ref=f7e490]:
+            - link "Dasher Agreement" [ref=f7e491] [cursor=pointer]:
+              - /url: /en-us/legal/article/dx-ica
+          - listitem [ref=f7e492]:
+            - link "Platform Access Policy" [ref=f7e493] [cursor=pointer]:
+              - /url: /en-us/legal/article/dx-deactivation-policy
+          - listitem [ref=f7e494]:
+            - link "Delivery Locations" [ref=f7e495] [cursor=pointer]:
+              - /url: https://www.doordash.com/food-delivery/
+          - listitem [ref=f7e496]:
+            - link "Do Not Sell or Share My Personal Information" [ref=f7e497] [cursor=pointer]:
+              - /url: https://www.doordash.com/en-US/consent
+        - generic [ref=f7e498]:
+          - text: © 2026
+          - link "DoorDash" [ref=f7e499] [cursor=pointer]:
+            - /url: https://about.doordash.com/en-us

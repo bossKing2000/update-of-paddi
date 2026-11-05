@@ -1,5 +1,5 @@
 import fs from "fs";
-import { acquireLock, releaseLock, AcquiredLock } from "../../src/lib/redisLock";
+import { acquireLock, releaseLock, AcquiredLock, PAYMENT_LOCK_COMMAND_TIMEOUT_MS } from "../../src/lib/redisLock";
 
 /**
  * A minimal in-memory stand-in for the redis@5 client surface
@@ -94,17 +94,114 @@ describe("redisLock — ownership-safe SET NX + Lua compare-and-delete", () => {
   });
 });
 
+describe("redisLock — bounded command timeouts", () => {
+  /**
+   * A double that exposes `withCommandOptions` exactly like a real
+   * node-redis client: it records the applied timeout, scopes subsequent
+   * commands through it, and can be told to fail the way a timed-out
+   * command does. Storage semantics mirror FakeRedisClient above.
+   */
+  function timeoutCapableClient(fail?: { set?: Error; eval?: Error }) {
+    const store = new Map<string, string>();
+    const seenTimeouts: number[] = [];
+    const methods = {
+      async set(key: string, value: string, opts?: { NX?: boolean; EX?: number }) {
+        if (fail?.set) throw fail.set;
+        if (opts?.NX && store.has(key)) return null;
+        store.set(key, value);
+        return "OK";
+      },
+      async eval(_script: string, options: { keys: string[]; arguments: string[] }) {
+        if (fail?.eval) throw fail.eval;
+        const [key] = options.keys;
+        const [token] = options.arguments;
+        if (store.get(key) === token) {
+          store.delete(key);
+          return 1;
+        }
+        return 0;
+      },
+    };
+    const client = {
+      ...methods,
+      withCommandOptions: (options: { timeout: number }) => {
+        seenTimeouts.push(options.timeout);
+        return methods;
+      },
+    };
+    return { client, seenTimeouts, store };
+  }
+
+  it("forwards the configured timeout to the Redis command API", async () => {
+    const { client, seenTimeouts } = timeoutCapableClient();
+    const lock = (await acquireLock(client as any, "k", 20, { timeoutMs: 2000 })) as AcquiredLock;
+    expect(lock).not.toBeNull();
+    expect(seenTimeouts).toEqual([2000]);
+
+    const released = await releaseLock(client as any, lock, { timeoutMs: 2000 });
+    expect(released).toBe(true);
+    expect(seenTimeouts).toEqual([2000, 2000]);
+  });
+
+  it("clients without withCommandOptions preserve the existing no-timeout behavior", async () => {
+    // The legacy FakeRedisClient has no withCommandOptions: passing a timeout
+    // must degrade to the plain client, not throw.
+    const plain = new FakeRedisClient();
+    const lock = (await acquireLock(plain as any, "k", 20, { timeoutMs: 2000 })) as AcquiredLock;
+    expect(lock).not.toBeNull();
+    expect(await releaseLock(plain as any, lock, { timeoutMs: 2000 })).toBe(true);
+  });
+
+  it("omitting the timeout leaves behavior exactly as before", async () => {
+    const { client, seenTimeouts } = timeoutCapableClient();
+    const lock = (await acquireLock(client as any, "k", 20)) as AcquiredLock;
+    expect(lock).not.toBeNull();
+    expect(await releaseLock(client as any, lock)).toBe(true);
+    expect(seenTimeouts).toEqual([]);
+  });
+
+  it("acquisition timeout rejects rather than being treated as contention", async () => {
+    const { client } = timeoutCapableClient({ set: new Error("Command timed out") });
+    // Must REJECT: returning null would surface as a routine 409 "please
+    // retry", hiding an infrastructure failure from the caller.
+    await expect(
+      acquireLock(client as any, "k", 20, { timeoutMs: 2000 }),
+    ).rejects.toThrow("Command timed out");
+    // And nothing was left held: a healthy client acquires the same key.
+    const healthy = timeoutCapableClient();
+    const retry = await acquireLock(healthy.client as any, "k", 20);
+    expect(retry).not.toBeNull();
+  });
+
+  it("release timeout is swallowed and reported as false, never thrown", async () => {
+    const { client } = timeoutCapableClient({ eval: new Error("Command timed out") });
+    const forged: AcquiredLock = { key: "k", token: "t" };
+    await expect(
+      releaseLock(client as any, forged, { timeoutMs: 2000 }),
+    ).resolves.toBe(false);
+  });
+
+  it("the payment timeout default is positive and far below the 20s lock TTL", () => {
+    expect(PAYMENT_LOCK_COMMAND_TIMEOUT_MS).toBeGreaterThan(0);
+    expect(PAYMENT_LOCK_COMMAND_TIMEOUT_MS).toBeLessThan(20 * 1000);
+  });
+});
+
 describe("paymentController — uses the ownership-safe lock, not a bare DEL", () => {
   const source = fs.readFileSync("src/controllers/paymentController.ts", "utf8");
 
-  it("acquires the lock via acquireLock before ever calling Paystack, in both initiateOrderPayment and chargeSavedCard", () => {
-    const acquireCount = source.split("acquireLock(redisPayments, initLockKey, 20)").length - 1;
+  it("acquires the lock via acquireLock with a bounded timeout, before ever calling Paystack, in both initiateOrderPayment and chargeSavedCard", () => {
+    const acquireCount = source.split("acquireLock(redisPayments, initLockKey, 20,").length - 1;
     expect(acquireCount).toBe(2); // initiateOrderPayment + chargeSavedCard
+    // Both acquisitions must carry the payment-domain timeout: dropping it
+    // from either call site silently restores the unbounded hang this guards.
+    const timeoutCount = source.split("timeoutMs: PAYMENT_LOCK_COMMAND_TIMEOUT_MS").length - 1;
+    expect(timeoutCount).toBe(4); // 2 acquires + 2 releases
   });
 
   it("releases via releaseLock (token-checked), never a bare redisPayments.del", () => {
     expect(source).not.toContain("redisPayments.del(initLockKey)");
-    const releaseCount = source.split("releaseLock(redisPayments, lock)").length - 1;
+    const releaseCount = source.split("releaseLock(redisPayments, lock,").length - 1;
     expect(releaseCount).toBe(2);
   });
 

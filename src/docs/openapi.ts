@@ -134,14 +134,53 @@ export const openApiDocument = {
       post: { tags: ["Reviews"], summary: "Review a vendor (requires a completed order from them)", parameters: [{ name: "vendorId", in: "path", required: true, schema: { type: "string", format: "uuid" } }], responses: { "201": { description: "Created" } } },
     },
     "/product": {
-      get: { tags: ["Products"], summary: "List products (paginated; dishType, vendorId, price, rating, availability filters; popularity/price/rating/newest sort)", parameters: [{ name: "page", in: "query", schema: { type: "integer" } }, { name: "limit", in: "query", schema: { type: "integer" } }, { name: "dishType", in: "query", schema: { type: "string" } }, { name: "vendorId", in: "query", schema: { type: "string" } }, { name: "minPrice", in: "query", schema: { type: "number" } }, { name: "maxPrice", in: "query", schema: { type: "number" } }, { name: "minRating", in: "query", schema: { type: "number" } }, { name: "availableOnly", in: "query", schema: { type: "boolean" } }, { name: "sortBy", in: "query", schema: { type: "string", enum: ["popularity", "priceAsc", "priceDesc", "newest", "rating"] } }], responses: { "200": { description: "Products" } } },
-      post: { tags: ["Products"], summary: "Create a product (vendor only, multipart/form-data; dishTypeId, portion, stock, add-ons)", responses: { "201": { description: "Created" } } },
+      get: {
+        tags: ["Products"],
+        summary: "List products (paginated; dishType, vendorId, tag any-match, price, rating, availability filters; popularity/price/rating/newest sort)",
+        security: [],
+        parameters: [{ name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 }, description: "1-based page. A non-integer, zero or negative value is rejected with 400 VALIDATION_ERROR." }, { name: "limit", in: "query", schema: { type: "integer", minimum: 1, default: 20, maximum: 20 }, description: "Page size. A non-integer, zero or negative value is rejected with 400 VALIDATION_ERROR. A value above the maximum is clamped to 20 (not rejected)." }, { name: "dishType", in: "query", schema: { type: "string" } }, { name: "vendorId", in: "query", schema: { type: "string" } }, { name: "tags", in: "query", schema: { type: "string", description: "Comma-separated canonical tag ids (any-match); unknown/inactive ids are rejected" } }, { name: "minPrice", in: "query", schema: { type: "number" } }, { name: "maxPrice", in: "query", schema: { type: "number" } }, { name: "minRating", in: "query", schema: { type: "number" } }, { name: "availableOnly", in: "query", schema: { type: "boolean" } }, { name: "sortBy", in: "query", schema: { type: "string", enum: ["popularity", "priceAsc", "priceDesc", "newest", "rating"] } }], responses: { "200": { description: "Products" }, "400": { description: "Invalid pagination or filter", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } } } },
+      post: { tags: ["Products"], summary: "Create a product (vendor only, multipart/form-data; dishTypeId, portion, stock, add-ons, optional canonical tagIds)", responses: { "201": { description: "Created" } } },
     },
-    "/product/dish-types": { get: { tags: ["Products"], summary: "Curated dish-type vocabulary (What's in the Pot?)", responses: { "200": { description: "Dish types" } } } },
-    "/product/categories": { get: { tags: ["Products"], summary: "Deprecated alias of /product/dish-types", responses: { "200": { description: "Dish types" } } } },
+    "/product/dish-types": { get: { tags: ["Products"], summary: "Curated dish-type vocabulary (What's in the Pot?)", security: [], responses: { "200": { description: "Dish types" } } } },
+    "/product/categories": { get: { tags: ["Products"], summary: "Active categories in sortOrder with non-archived product counts (counts include unavailable-but-listed products)", security: [], responses: { "200": { description: "Categories" } } } },
+    "/product/categories/{slug}/products": { get: { tags: ["Products"], summary: "Category-scoped product browse (same filters/sort/pagination as /product, plus tag any-match; 404 for unknown or inactive slug)", security: [], parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }, { name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 }, description: "1-based page. A non-integer, zero or negative value is rejected with 400 VALIDATION_ERROR." }, { name: "limit", in: "query", schema: { type: "integer", minimum: 1, default: 20, maximum: 20 }, description: "Page size. A non-integer, zero or negative value is rejected with 400 VALIDATION_ERROR. A value above the maximum is clamped to 20 (not rejected)." }, { name: "dishType", in: "query", schema: { type: "string" } }, { name: "vendorId", in: "query", schema: { type: "string" } }, { name: "tags", in: "query", schema: { type: "string" } }, { name: "minPrice", in: "query", schema: { type: "number" } }, { name: "maxPrice", in: "query", schema: { type: "number" } }, { name: "minRating", in: "query", schema: { type: "number" } }, { name: "availableOnly", in: "query", schema: { type: "boolean" } }, { name: "sortBy", in: "query", schema: { type: "string", enum: ["popularity", "priceAsc", "priceDesc", "newest", "rating"] } }], responses: { "200": { description: "Products" }, "400": { description: "Invalid pagination or filter", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }, "404": { description: "Unknown category" } } } },
+    "/product/tags": { get: { tags: ["Products"], summary: "Active canonical tags (CUISINE/DIET/OCCASION)", security: [], responses: { "200": { description: "Tags" } } } },
+    "/vendors/{vendorId}": {
+      get: {
+        tags: ["Vendors"],
+        summary: "Public vendor profile (customer-facing Vendor Profile screen)",
+        description:
+          "Public and read-only — no authentication required. Exposes public identity (id, name, brandName, brandLogo, avatarUrl, bio), the customer-safe operating state (isOpen), the vendor's public rating (averageRating, reviewCount), followerCount and productCount (non-archived products). Moderation state, KYC data, internal delivery settings, payout details and account data are never exposed. 404 for an unknown, non-vendor, blocked or suspended vendor.",
+        security: [],
+        parameters: [{ name: "vendorId", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+        responses: {
+          "200": { description: "Vendor profile" },
+          "400": { description: "Malformed vendor id", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+          "404": { description: "Unknown or non-public vendor", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+        },
+      },
+    },
+    "/auth/nearby": {
+      get: {
+        tags: ["Auth", "Discovery"],
+        summary: "Vendors near a point",
+        description:
+          "Returns the vendors within `radius` kilometres of the given point, nearest first, with each vendor's open state and public rating. A missing or malformed lat/lng/radius is rejected with the standard error envelope (400, code VALIDATION_ERROR).",
+        security: [],
+        parameters: [
+          { name: "lat", in: "query", required: true, schema: { type: "number", minimum: -90, maximum: 90 } },
+          { name: "lng", in: "query", required: true, schema: { type: "number", minimum: -180, maximum: 180 } },
+          { name: "radius", in: "query", schema: { type: "number", default: 5 }, description: "Search radius in kilometres (positive number)." },
+        ],
+        responses: {
+          "200": { description: "Nearby vendors" },
+          "400": { description: "Invalid coordinates or radius", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+        },
+      },
+    },
     "/product/{id}": {
-      get: { tags: ["Products"], summary: "Get a product by id", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }], responses: { "200": { description: "Product" } } },
-      patch: { tags: ["Products"], summary: "Update a product (vendor, owner only)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }], responses: { "200": { description: "Updated" } } },
+      get: { tags: ["Products"], summary: "Get a product by id", security: [], parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }], responses: { "200": { description: "Product" } } },
+      patch: { tags: ["Products"], summary: "Update a product (vendor, owner only; tagIds omitted = unchanged, [] = clear, array = replace)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }], responses: { "200": { description: "Updated" } } },
       delete: {
         tags: ["Products"],
         summary: "Delete a product (only if it has never been ordered — otherwise archive it instead)",
@@ -150,11 +189,40 @@ export const openApiDocument = {
       },
     },
     "/product/{id}/archive": { patch: { tags: ["Products"], summary: "Archive or unarchive a product", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }], responses: { "200": { description: "Updated" } } } },
-    "/product/p/search": { get: { tags: ["Products"], summary: "Full-text + fuzzy product search with typo correction (matches names, descriptions and dish types)", parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }, { name: "page", in: "query", schema: { type: "integer" } }, { name: "sortBy", in: "query", schema: { type: "string", enum: ["relevance", "priceAsc", "priceDesc", "popularity", "newest"] } }], responses: { "200": { description: "Results" } } } },
-    "/product/p/suggestions": { get: { tags: ["Products"], summary: "Search-box autocomplete suggestions (name + dish type)", parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }], responses: { "200": { description: "Suggestions" } } } },
-    "/product/p/most": { get: { tags: ["Products"], summary: "Most popular orderable products", parameters: [{ name: "page", in: "query", schema: { type: "integer" } }], responses: { "200": { description: "Products" } } } },
-    "/product/p/new": { get: { tags: ["Products"], summary: "Newest products", parameters: [{ name: "limit", in: "query", schema: { type: "integer" } }, { name: "dishType", in: "query", schema: { type: "string" } }], responses: { "200": { description: "Products" } } } },
-    "/home/whats-in-the-pot": { get: { tags: ["Discovery"], summary: "Dish types with something orderable right now, ranked by count", responses: { "200": { description: "Pot" } } } },
+    "/product/p/search": { get: { tags: ["Products"], summary: "Full-text + fuzzy product search with typo correction (matches names, descriptions, dish types, categories and assigned tags; optional tag any-match filter)", security: [], description: "Results carry the same customer-facing product-card fields as GET /api/product (id, name, price, images, dishType, portionLabel, averageRating, reviewCount, trackInventory, stock, soldOut, vendorOperating, orderable, popularityPercent, vendor identity, promotion) plus the search-specific fields (description, vendorId, archived, timestamps, dishTypeId and the relevance metadata). The response envelope is { corrected, results, pagination, fromCache } with pagination nested under data.", parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }, { name: "tags", in: "query", schema: { type: "string", description: "Comma-separated canonical tag ids (any-match)" } }, { name: "dishType", in: "query", schema: { type: "string", description: "An active DishType id, or ALL" } }, { name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 }, description: "1-based page. A non-integer, zero or negative value is rejected with 400 VALIDATION_ERROR." }, { name: "limit", in: "query", schema: { type: "integer", minimum: 1, default: 20, maximum: 20 }, description: "Page size. A non-integer, zero or negative value is rejected with 400 VALIDATION_ERROR. A value above the maximum is clamped to 20 (not rejected)." }, { name: "minPrice", in: "query", schema: { type: "number" } }, { name: "maxPrice", in: "query", schema: { type: "number" } }, { name: "minRating", in: "query", schema: { type: "number", minimum: 0, maximum: 5 } }, { name: "availableOnly", in: "query", schema: { type: "boolean" } }, { name: "sortBy", in: "query", schema: { type: "string", enum: ["relevance", "priceAsc", "priceDesc", "popularity", "newest", "rating"], default: "relevance" } }], responses: { "200": { description: "Results" }, "400": { description: "Invalid pagination or filter", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } } } } },
+    "/product/p/suggestions": { get: { tags: ["Products"], summary: "Search-box autocomplete suggestions (name + dish type + category + assigned tags; ineligible vendors excluded)", security: [], parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }], responses: { "200": { description: "Suggestions" } } } },
+    "/product/p/most": {
+      get: {
+        tags: ["Products"],
+        summary: "Most popular orderable products",
+        security: [],
+        parameters: [
+          { name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 }, description: "1-based page. A non-integer, zero or negative value is rejected with 400 VALIDATION_ERROR." },
+          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, default: 50, maximum: 50 }, description: "Page size. A non-integer, zero or negative value is rejected with 400 VALIDATION_ERROR. A value above the maximum is clamped to 50 (not rejected)." },
+        ],
+        responses: {
+          "200": { description: "Products" },
+          "400": { description: "Invalid pagination", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+        },
+      },
+    },
+    "/product/p/new": {
+      get: {
+        tags: ["Products"],
+        summary: "Newest products",
+        security: [],
+        parameters: [
+          { name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 }, description: "1-based page. A non-integer, zero or negative value is rejected with 400 VALIDATION_ERROR." },
+          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, default: 20, maximum: 50 }, description: "Page size. A non-integer, zero or negative value is rejected with 400 VALIDATION_ERROR. A value above the maximum is clamped to 50 (not rejected)." },
+          { name: "dishType", in: "query", schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "Products" },
+          "400": { description: "Invalid pagination", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+        },
+      },
+    },
+    "/home/whats-in-the-pot": { get: { tags: ["Discovery"], summary: "Dish types with something orderable right now, ranked by count", security: [], responses: { "200": { description: "Pot" } } } },
     "/delivery/assign": {
       post: {
         tags: ["Delivery"],
@@ -532,6 +600,122 @@ export const openApiDocument = {
         responses: {
           "200": { description: "Logged in", content: { "application/json": { schema: { type: "object" } } } },
           "401": { description: "Invalid credentials", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } } } },
+        },
+      },
+    },
+    // ──────────────────────────────────────────────────────────────────────
+    // Phase 1D — passwordless email OTP login (public endpoints).
+    // See src/routes/auth.routes.ts:288-310 and
+    // src/controllers/auth.controller.ts:2420-2542.
+    "/auth/email/login/request-otp": {
+      post: {
+        tags: ["Auth"],
+        summary: "Request a one-time email login code (passwordless sign-in)",
+        description:
+          "Issues a six-digit login code to the given email address. The response is identical whether or not an account exists for the address, so the endpoint cannot be used to enumerate accounts. Delivery is attempted only for eligible (existing, unblocked) accounts, but the caller cannot observe that distinction.",
+        security: [],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["email"],
+                properties: {
+                  email: { type: "string", format: "email" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description:
+              "If an account exists for this email address, a verification code has been sent. Always returns the same generic shape so account existence cannot be probed.",
+            content: {
+              "application/json": { schema: { type: "object" } },
+            },
+          },
+          "422": {
+            description: "Validation failed",
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } },
+            },
+          },
+          "429": {
+            description: "Too many OTP requests (resend cooldown, per-address or per-IP budget exhausted)",
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } },
+            },
+          },
+          "503": {
+            description: "Email provider or OTP store unavailable",
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } },
+            },
+          },
+        },
+      },
+    },
+    "/auth/email/login/verify-otp": {
+      post: {
+        tags: ["Auth"],
+        summary: "Verify the email login code and issue a full authentication session",
+        description:
+          "Verifies the six-digit code sent to the email address and, on success, issues the same session contract as password login (access token, optional refresh token for mobile clients). Codes are single-use, expire after five minutes, and are limited to five failed verification attempts per address. Blocked accounts cannot authenticate this way.",
+        security: [],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["email", "otp"],
+                properties: {
+                  email: { type: "string", format: "email" },
+                  otp: { type: "string", minLength: 6, maxLength: 6 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Code verified; session issued",
+            content: {
+              "application/json": { schema: { type: "object" } },
+            },
+          },
+          "400": {
+            description: "Invalid or expired code, or no account exists for this address",
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } },
+            },
+          },
+          "403": {
+            description: "Account is blocked",
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } },
+            },
+          },
+          "422": {
+            description: "Validation failed",
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } },
+            },
+          },
+          "429": {
+            description: "Too many verification attempts for this code",
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } },
+            },
+          },
+          "503": {
+            description: "OTP store unavailable",
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/ErrorResponse" } },
+            },
+          },
         },
       },
     },

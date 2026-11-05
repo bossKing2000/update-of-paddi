@@ -7,8 +7,11 @@ jest.mock("../../src/lib/prisma", () => ({
   __esModule: true,
   default: {
     order: { findUnique: jest.fn(), update: jest.fn() },
+    // F4-1: the cancel path reconciles active delivery assignments in-transaction.
+    deliveryAssignment: { updateMany: jest.fn(async () => ({ count: 0 })) },
     payment: { findFirst: jest.fn() },
     refundRequest: { findFirst: jest.fn(), create: jest.fn() },
+    $queryRaw: jest.fn(),
     $transaction: jest.fn(async (cb: any) => {
       const prismaMock = require("../../src/lib/prisma").default;
       return cb(prismaMock);
@@ -52,6 +55,10 @@ const paidOrder = () => ({
   status: "PAYMENT_CONFIRMED",
   paymentStatus: "SUCCESS",
   idempotencyKey: "k-1",
+  // Batch 1D.42: updateOrderStatus now reads the vendor's lifecycle status
+  // from this relation and fails closed when it cannot. A vendor cancelling
+  // their own order is an operating vendor.
+  vendor: { vendorStatus: "ACTIVE" },
 });
 
 beforeEach(() => jest.clearAllMocks());
@@ -63,6 +70,23 @@ describe("cancel with refund", () => {
     db.payment.findFirst.mockResolvedValue({ id: "p-1", reference: "ref-1" });
     db.refundRequest.findFirst.mockResolvedValue(null);
     db.refundRequest.create.mockImplementation(async (args: any) => ({ id: "r-1", ...args.data }));
+
+  // C-2: the paid-cancel path now files the obligation with
+  // `INSERT ... ON CONFLICT DO NOTHING RETURNING ...` (raw SQL) rather than a
+  // typed `create`. Route it back through the existing `create` double so every
+  // assertion below — including the failure-injection one — is unchanged.
+  db.$queryRaw.mockImplementation(
+    async (strings: TemplateStringsArray, ...values: any[]) => {
+      const sql = Array.from(strings as unknown as string[]).join(" ");
+      if (!sql.includes('INSERT INTO "RefundRequest"')) return [];
+      const [id, userId, paymentRef, reason, status, , , orderId, requestedAmountKobo] =
+        values as any[];
+      const row = await db.refundRequest.create({
+        data: { id, userId, paymentRef, reason, status, orderId, requestedAmountKobo },
+      });
+      return row ? [row] : [];
+    },
+  );
 
     const r = res();
     await updateOrderStatus(

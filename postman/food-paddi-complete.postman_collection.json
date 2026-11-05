@@ -721,6 +721,236 @@
           }
         },
         {
+          "name": "Switch active role",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/switch-role",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"VENDOR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Phase 1E session-scoped role switch: changes THIS session only, never User.role. Allowed values: CUSTOMER, VENDOR. The account must hold the requested role. Returns a new access token for the switched session — subsequent requests must use it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "",
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.accessToken) pm.environment.set('accessToken', j.accessToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Change password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/change-password",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"currentPassword\": \"Password123!\",\n  \"newPassword\": \"NewPass123!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Phase 1E authenticated password change. Bumps tokenVersion (kills all prior tokens), signs out every device, and re-establishes the caller on a fresh session. New password must satisfy the registration policy."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "",
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.accessToken) pm.environment.set('accessToken', j.accessToken);",
+                  "if (j.refreshToken) pm.environment.set('refreshToken', j.refreshToken);",
+                  "if (j.user && j.user.id) pm.environment.set('userId', j.user.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Phone login - request OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/phone/login/request-otp",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phoneNumber\": \"+2348012345678\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Phase 1D phone login step 1 (public by necessity — the caller has no session yet). Purpose is fixed server-side to PHONE_LOGIN; numbers are normalized to E.164."
+          }
+        },
+        {
+          "name": "Phone login - verify OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/phone/login/verify-otp",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phoneNumber\": \"+2348012345678\",\n  \"otp\": \"123456\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Phase 1D phone login step 2 (public). Issues the full login session on success. Wrong, expired, and unverified-number responses share one failure body so callers cannot enumerate accounts. Email verification is neither checked nor written."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "",
+                  "pm.test('HTTP status is successful', function () { pm.expect(pm.response.code).to.be.within(200, 299); });",
+                  "let j = {}; try { j = pm.response.json(); } catch (e) {}",
+                  "if (j.accessToken) pm.environment.set('accessToken', j.accessToken);",
+                  "if (j.refreshToken) pm.environment.set('refreshToken', j.refreshToken);",
+                  "if (j.user && j.user.id) pm.environment.set('userId', j.user.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Request phone OTP (authenticated)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/phone/request-otp",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phoneNumber\": \"+2348012345678\",\n  \"purpose\": \"PHONE_VERIFICATION\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Phase 1D authenticated phone verification/change OTP. Allowed purposes: PHONE_VERIFICATION, PHONE_CHANGE. Replacing an already-verified phone on a password account additionally requires currentPassword."
+          }
+        },
+        {
+          "name": "Verify phone OTP (authenticated)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/phone/verify-otp",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{accessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phoneNumber\": \"+2348012345678\",\n  \"otp\": \"123456\",\n  \"purpose\": \"PHONE_VERIFICATION\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Phase 1D OTP confirmation: six-digit one-time code, enforced attempt limits, and verification-only phone assignment."
+          }
+        },
+        {
           "name": "Request password reset code",
           "request": {
             "method": "POST",

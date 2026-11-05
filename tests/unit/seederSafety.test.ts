@@ -239,8 +239,8 @@ describe("fixture earning amounts follow the production rule", () => {
     expect(deriveDeliveryEarningAmounts(0)).toEqual({ baseFee: 0, distanceFee: 0, totalEarned: 0 });
   });
 
-  it("honours DELIVERY_BASE_FEE and its 300 fallback", () => {
-    expect(deliveryBaseFee({} as any)).toBe(300);
+  it("honours DELIVERY_BASE_FEE and its 30000 kobo fallback", () => {
+    expect(deliveryBaseFee({} as any)).toBe(30000);
     expect(deliveryBaseFee({ DELIVERY_BASE_FEE: "400" } as any)).toBe(400);
     expect(deriveDeliveryEarningAmounts(1000, { DELIVERY_BASE_FEE: "400" } as any)).toEqual({
       baseFee: 400,
@@ -256,13 +256,13 @@ describe("fixture earning amounts follow the production rule", () => {
     expect(prod).toMatch(/const totalEarned = order\.deliveryFee;/);
     expect(prod).toMatch(/baseFee: Math\.min\(baseFee, totalEarned\)/);
     expect(prod).toMatch(/const distanceFee = Math\.max\(totalEarned - baseFee, 0\);/);
-    expect(prod).toMatch(/Number\(process\.env\.DELIVERY_BASE_FEE\) \|\| 300/);
+    expect(prod).toMatch(/Number\(process\.env\.DELIVERY_BASE_FEE\) \|\| 30000/);
     expect(prod).toMatch(/walletBalance: \{ increment: totalEarned \}/);
   });
 
   it("derives the F8 fixture instead of hardcoding it", () => {
     expect(fixturesSrc).toMatch(/deriveDeliveryEarningAmounts\(F8_DELIVERY_FEE\)/);
-    expect(fixturesSrc).toMatch(/const F8_DELIVERY_FEE = 500;/);
+    expect(fixturesSrc).toMatch(/const F8_DELIVERY_FEE = 50000;/);
     // No hardcoded split left behind.
     expect(fixturesSrc).not.toMatch(/baseFee: 300,\s*\n\s*distanceFee: 200,\s*\n\s*totalEarned: 500,/);
   });
@@ -532,6 +532,9 @@ describe("F8 rider credit mirrors production increment semantics", () => {
 
   beforeEach(() => {
     process.env.SEED_ALLOW = "yes";
+    // Phase 3A: DELIVERY_BASE_FEE is now interpreted as integer kobo.
+    // Deployers must update .env from 300 (naira) to 30000 (kobo).
+    process.env.DELIVERY_BASE_FEE = "30000";
     jest.resetModules();
     jest.clearAllMocks();
     seeded = {};
@@ -545,8 +548,9 @@ describe("F8 rider credit mirrors production increment semantics", () => {
     }));
     (client.deliveryPerson.update as any).mockResolvedValue({});
     (client.deliveryPerson.findUniqueOrThrow as any).mockResolvedValue({
-      // Post-credit state, as the fixture would leave it: 500 earned, 1 delivery.
-      walletBalance: 500, totalDeliveries: 1,
+      // Post-credit state, as the fixture would leave it: 50000 earned (₦500),
+      // 1 delivery.
+      walletBalance: 50000, totalDeliveries: 1,
     });
     (client.deliveryAssignment.findFirst as any).mockResolvedValue(null);
     (client.deliveryEarning.findFirst as any).mockResolvedValue(null);
@@ -572,15 +576,15 @@ describe("F8 rider credit mirrors production increment semantics", () => {
     const [args] = (client.deliveryPerson.update as jest.Mock).mock.calls[0];
     expect(args.data).toEqual({
       totalDeliveries: { increment: 1 },
-      walletBalance: { increment: 500 },
+      walletBalance: { increment: 50000 },
     });
   });
 
   it("never assigns walletBalance, which would clobber a prior balance", async () => {
     await runFixtures();
     for (const [args] of (client.deliveryPerson.update as jest.Mock).mock.calls) {
-      expect(args.data.walletBalance).not.toBe(500);
-      expect(args.data.walletBalance).toEqual({ increment: 500 });
+      expect(args.data.walletBalance).not.toBe(50000);
+      expect(args.data.walletBalance).toEqual({ increment: 50000 });
       expect(args.data.totalDeliveries).toEqual({ increment: 1 });
     }
   });
@@ -590,7 +594,7 @@ describe("F8 rider credit mirrors production increment semantics", () => {
     (client.deliveryEarning.findFirst as any).mockResolvedValue({
       orderId: "seed-fin-o1",
       deliveryPersonId: "seed-fin-rider-dp",
-      baseFee: 300, distanceFee: 200, totalEarned: 500,
+      baseFee: 30000, distanceFee: 20000, totalEarned: 50000,
     });
     await runFixtures();
     expect(client.deliveryEarning.create).not.toHaveBeenCalled();
@@ -599,7 +603,7 @@ describe("F8 rider credit mirrors production increment semantics", () => {
 
   it("reconciliation rejects a totalDeliveries mismatch even when the wallet matches", async () => {
     (client.deliveryPerson.findUniqueOrThrow as any).mockResolvedValue({
-      walletBalance: 500, // correct
+      walletBalance: 50000, // correct
       totalDeliveries: 0,  // wrong — the original defect's symptom
     });
     const { seedFinancialFixtures } = require("../../src/jobs/seedFinancialFixtures");
@@ -613,12 +617,12 @@ describe("F8 rider credit mirrors production increment semantics", () => {
       walletBalance: 0, totalDeliveries: 1,
     });
     const { seedFinancialFixtures } = require("../../src/jobs/seedFinancialFixtures");
-    await expect(seedFinancialFixtures()).rejects.toThrow(/walletBalance .* is below the 500 earned/);
+    await expect(seedFinancialFixtures()).rejects.toThrow(/walletBalance .* is below the 50000 earned/);
   });
 
   it("reconciliation rejects a DOUBLE increment of totalDeliveries", async () => {
     (client.deliveryPerson.findUniqueOrThrow as any).mockResolvedValue({
-      walletBalance: 500, totalDeliveries: 2,
+      walletBalance: 50000, totalDeliveries: 2,
     });
     const { seedFinancialFixtures } = require("../../src/jobs/seedFinancialFixtures");
     await expect(seedFinancialFixtures()).rejects.toThrow(

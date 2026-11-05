@@ -1,5 +1,5 @@
-import { availableMemory } from "process";
 import { z } from "zod";
+import { normalizeOptionName } from "../services/optionName";
 
 // Stable DishType id (e.g. "JOLLOF", "OFADA", "OTHER"). Existence +
 // active-state are verified service-side against the DishType table;
@@ -10,6 +10,16 @@ export const dishTypeIdSchema = z
   .min(1, "Dish type is required")
   .max(40)
   .regex(/^[A-Z0-9_]+$/, "Invalid dish type format");
+
+// Phase 2 M2: canonical tag id (e.g. "SPICY", "VEGAN"). Same shape rule
+// as dishType ids. Existence + active-state are verified service-side
+// (resolveActiveTagIds) — vendors attach existing rows, never free text.
+export const tagIdSchema = z
+  .string()
+  .trim()
+  .min(1, "Tag is required")
+  .max(40)
+  .regex(/^[A-Z0-9_]+$/, "Invalid tag format");
 
 export const portionLabelSchema = z
   .string()
@@ -24,6 +34,69 @@ const productOptionInputSchema = z.object({
   name: z.string().trim().min(1).max(60),
   price: z.coerce.number().positive().max(1000000),
 });
+
+// Phase 2B.1: nested structured add-on input used inside product create /
+// update. Mirrors createOptionGroupSchema / createOptionGroupItemSchema field
+// validation, but allows `id` (for update-by-id) and an `items` array. When a
+// group is supplied to an update with an `id`, that existing group is updated;
+// groups without an `id` are created. Groups/items not mentioned in an update
+// array are left untouched (omitted = preserve), matching the existing
+// tagIds convention. Cross-product group/item ids are rejected by the
+// database scoping (nested writes are scoped to the parent product) and by
+// the explicit ownership pre-check in the controller.
+//
+// Selection limits (min<=max, required->min>=1) mirror the standalone group
+// schemas; group/item name uniqueness per product (case-insensitive) is
+// enforced by the product-schema refine below.
+const optionGroupItemNestedSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().trim().min(1).max(60),
+  priceAdd: z.coerce
+    .number()
+    .refine((n) => Number.isFinite(n), { message: "priceAdd must be a finite number" })
+    .refine((n) => Math.abs(n) <= 1000000, { message: "priceAdd is out of range" }),
+  isActive: z.boolean().optional().default(true),
+  sortOrder: z.coerce.number().int().min(0).max(1000000).optional().default(0),
+});
+
+const optionGroupNestedSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().trim().min(1).max(60),
+  required: z.boolean(),
+  minSelections: z.coerce.number().int().min(0).max(100),
+  maxSelections: z.coerce.number().int().min(0).max(100),
+  sortOrder: z.coerce.number().int().min(0).max(1000000).optional().default(0),
+  items: z.array(optionGroupItemNestedSchema).optional().default([]),
+})
+  .refine(
+    (v) => v.minSelections <= v.maxSelections,
+    { message: "minSelections must not exceed maxSelections", path: ["maxSelections"] },
+  )
+  .refine(
+    (v) => v.required !== true || v.minSelections >= 1,
+    { message: "A required group must have minSelections >= 1", path: ["minSelections"] },
+  );
+
+// Enforce group + item name uniqueness per product (case-insensitive),
+// mirroring the legacy ProductOption "add-on names must be unique per product"
+// convention so customers can tell add-ons apart at a glance.
+// Comparison uses the canonical `normalizeOptionName` (trim + lowercase) so the
+// within-request check cannot drift from the live write path or the migration.
+function uniqueOptionGroupNames(data: {
+  optionGroups?: unknown;
+}): boolean {
+  const groups: Array<{ name: string; items?: unknown }> =
+    (data.optionGroups as Array<{ name: string; items?: unknown }>) ?? [];
+  const groupNames = groups.map((g) => normalizeOptionName(g.name));
+  if (new Set(groupNames).size !== groupNames.length) return false;
+  for (const g of groups) {
+    const itemNames = ((g.items ?? []) as Array<{ name: string }>).map((i) =>
+      normalizeOptionName(i.name),
+    );
+    if (new Set(itemNames).size !== itemNames.length) return false;
+  }
+  return true;
+}
 
 export const createProductSchema = z.object({
   name: z.string().trim().min(3).max(120),
@@ -54,7 +127,22 @@ export const createProductSchema = z.object({
   images: z.array(z.string().min(1)).optional(),
   video: z.array(z.string()).optional(),
   options: z.array(productOptionInputSchema).max(20).optional(),
-});
+  // Phase 2B.1: structured add-on groups + items, created atomically with
+  // the product. Each entry must be complete (no `id` — these are new rows).
+  // Omitted = no groups.
+  optionGroups: z.array(optionGroupNestedSchema).optional(),
+  // Phase 2 M2: optional canonical tag assignment. Omitted = leave
+  // untouched (create: none). Never free text — ids are resolved
+  // server-side against active Tag rows.
+  tagIds: z.array(tagIdSchema).max(20).optional(),
+})
+  .refine(
+    uniqueOptionGroupNames,
+    {
+      message: "Group and item names must be unique per product",
+      path: ["optionGroups"],
+    },
+  );
 
 export const archiveProductSchema = z.object({
   archived: z.boolean(),
@@ -167,4 +255,79 @@ export const updateProductSchema = z.object({
     )
     .max(20)
     .optional(),
+
+  // Phase 2 M2: omitted = leave associations unchanged; explicit [] =
+  // remove all; a new array replaces the existing set wholesale.
+  tagIds: z.array(tagIdSchema).max(20).optional(),
+  // Phase 2B.1: structured add-on groups + items. Omitted = leave existing
+  // groups untouched. When supplied, each entry with an `id` updates that
+  // existing group (scoped to this product), entries without an `id` are
+  // created, and groups/items not mentioned are preserved (not deleted).
+  // Use the standalone option-group endpoints to delete groups/items.
+  optionGroups: z.array(optionGroupNestedSchema).optional(),
+})
+  .refine(
+    uniqueOptionGroupNames,
+    {
+      message: "Group and item names must be unique per product",
+      path: ["optionGroups"],
+    },
+  );
+
+// Phase 2B.3: structured add-on groups. min<=max and required→min>=1 are
+// enforced here; productId reassignment is not representable (no field).
+const optionGroupBase = z.object({
+  name: z.string().trim().min(1).max(60),
+  required: z.boolean(),
+  minSelections: z.coerce.number().int().min(0).max(100),
+  maxSelections: z.coerce.number().int().min(0).max(100),
+  sortOrder: z.coerce.number().int().min(0).max(1000000).optional().default(0),
+});
+
+function withSelectionInvariants<T extends z.ZodTypeAny>(schema: T) {
+  return schema
+    .refine((v: any) => v.minSelections === undefined || v.maxSelections === undefined || v.minSelections <= v.maxSelections, {
+      message: "minSelections must not exceed maxSelections",
+    })
+    .refine((v: any) => v.required !== true || v.minSelections === undefined || v.minSelections >= 1, {
+      message: "A required group must have minSelections >= 1",
+    });
+}
+
+export const createOptionGroupSchema = withSelectionInvariants(optionGroupBase);
+
+export const updateOptionGroupSchema = withSelectionInvariants(
+  z.object({
+    name: z.string().trim().min(1).max(60).optional(),
+    required: z.boolean().optional(),
+    minSelections: z.coerce.number().int().min(0).max(100).optional(),
+    maxSelections: z.coerce.number().int().min(0).max(100).optional(),
+    sortOrder: z.coerce.number().int().min(0).max(1000000).optional(),
+  }),
+);
+
+// priceAdd is a surcharge in the existing Float/naira convention (same as
+// legacy ProductOption.price). Negative values are representable per the
+// approved model; bounds mirror the product-option price ceiling.
+const optionGroupItemBase = z.object({
+  name: z.string().trim().min(1).max(60),
+  priceAdd: z.coerce
+    .number()
+    .refine((n) => Number.isFinite(n), { message: "priceAdd must be a finite number" })
+    .refine((n) => Math.abs(n) <= 1000000, { message: "priceAdd is out of range" }),
+  isActive: z.boolean().optional().default(true),
+  sortOrder: z.coerce.number().int().min(0).max(1000000).optional().default(0),
+});
+
+export const createOptionGroupItemSchema = optionGroupItemBase;
+
+export const updateOptionGroupItemSchema = z.object({
+  name: z.string().trim().min(1).max(60).optional(),
+  priceAdd: z.coerce
+    .number()
+    .refine((n) => Number.isFinite(n), { message: "priceAdd must be a finite number" })
+    .refine((n) => Math.abs(n) <= 1000000, { message: "priceAdd is out of range" })
+    .optional(),
+  isActive: z.boolean().optional(),
+  sortOrder: z.coerce.number().int().min(0).max(1000000).optional(),
 });

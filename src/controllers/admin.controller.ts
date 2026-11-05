@@ -12,14 +12,19 @@ import {
   ActivityType,
   DiscountType,
   PromotionScope,
+  SuggestionStatus,
   VendorStatus,
 } from "@prisma/client";
 import { z } from "zod";
 import { changeVendorStatus } from "../services/vendorStatus.service";
 import prisma from "../lib/prisma";
+import {
+  isForeignKeyConflictFor,
+  PRODUCT_DELETE_FK_CONSTRAINTS,
+} from "../lib/prismaFkConflict";
 import { AuthRequest } from "../middlewares/auth.middleware";
 import { ensureString } from "../utils/paramUtils";
-import { sendSuccess } from "../utils/apiResponse";
+import { sendSuccess, sendCreated } from "../utils/apiResponse";
 import {
   NotFoundError,
   ValidationError,
@@ -28,22 +33,47 @@ import {
 } from "../errors/AppError";
 import { createAuditLog } from "../utils/auditLog.service";
 import { deleteAllUserSessions } from "../lib/session";
+import {
+  isDispatchableOrderStatus,
+  isTerminalOrderStatus,
+  reconcileActiveDeliveryAssignments,
+} from "../services/deliveryAssignmentReconciliation";
 import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
 import { refundPaymentViaPaystack, classifyRefundSubmitError } from "../services/refundService";
 import { failRefund } from "../services/refundFinalizer.service";
 import {
   createTransferRecipient,
   initiateTransfer,
+  type TransferInitiationOutcome,
 } from "../services/payoutService";
 import { settleVendorPayoutFailed } from "../services/vendorPayoutSettlement.service";
-import { calculatePayoutAmounts } from "./vendorDashboard.service";
+import { calculatePayoutAmounts, previewVendorPayoutAmounts } from "./vendorDashboard.service";
+import { acquireMultiPaymentClaim } from "../services/financialOperationClaim.service";
+import { requireFinancialSubmissionNotFrozen } from "../services/financialSubmissionFreeze.service";
+import {
+  findPayoutSnapshotDefects,
+  isLegacyNullSnapshotOrder,
+  sumSnapshotKoboTotals,
+} from "../services/orderSnapshot.service";
+import {
+  lockPaymentsCoveringOrders,
+  partitionPayoutBlockedOrders,
+} from "../services/payoutEligibility.service";
 import { evaluateVendorStatus } from "../services/vendorStatus.service";
 import { validatePromoDatesAndValue } from "./promoController";
 import { logger } from "../lib/logger";
 import { encrypt, decrypt } from "../utils/encrypt";
 import { invalidateActiveProductPromosCache } from "../services/promotionPricing.service";
-import { invalidateMarketplaceDiscoveryCaches } from "../services/clearCaches";
-import { clearProductCache } from "../services/clearCaches";
+import {
+  invalidateMarketplaceDiscoveryCaches,
+  clearCategoryCache,
+  clearDishTypeCache,
+  clearProductCache,
+  clearTagCache,
+  clearVendorProductDetailCaches,
+  invalidateProductsByDishTypeCategoryChange,
+} from "../services/clearCaches";
+import { assertActiveDishType, clearProductFromCarts } from "../services/product.service";
 
 function getPagination(req: Request) {
   const page = Math.max(1, Number(req.query.page) || 1);
@@ -548,6 +578,21 @@ export const setVendorStatus = async (req: AuthRequest, res: Response) => {
     });
   }
 
+  // Phase 2 M4: any eligibility transition changes what discovery may
+  // show (and every cached orderable flag for this vendor's products), so
+  // sweep the discovery namespaces — previously a suspend left 5h-cached
+  // browse pages presenting the vendor's dishes as orderable.
+  await invalidateMarketplaceDiscoveryCaches();
+
+  // A status transition also changes the correct answer for this vendor's
+  // PRODUCT-DETAIL entries: each one carries an availability snapshot that
+  // `getProductById` reuses on a cache HIT, so an entry written while the
+  // vendor was ACTIVE kept reporting the product as orderable after the
+  // suspension, for the whole detail TTL. The discovery sweep above does not
+  // reach those keys, so they are dropped explicitly — bounded to this
+  // vendor's own products and their product-detail aliases.
+  await clearVendorProductDetailCaches(id);
+
   return sendSuccess(
     res,
     {
@@ -688,10 +733,79 @@ export const adminUpdateOrderStatus = async (
   });
   if (!order) throw new NotFoundError("Order");
 
-  const updated = await prisma.order.update({
-    where: { id },
-    data: { status },
+  const updated = await prisma.$transaction(async (tx) => {
+    // Batch D: terminal orders are immutable through this endpoint. The
+    // override exists to correct live orders, not to resurrect settled
+    // ones — moving COMPLETED/CANCELLED/FAILED_DELIVERY/CANCELLED_UNPAID
+    // (or an expired unpaid order) back into a payable or dispatchable
+    // state would silently orphan refunds, payouts, earnings, and
+    // reconciliation records. Same-state writes stay allowed (no-op).
+    // The CAS on the pre-read status also turns a concurrent transition
+    // into a 409 instead of an overwrite (P2025).
+    if (status !== order.status && (isTerminalOrderStatus(order.status) || order.status === OrderStatus.PAYMENT_EXPIRED)) {
+      throw new ConflictError(
+        "This order is in a terminal state and cannot be moved. Terminal order history is immutable.",
+      );
+    }
+    let u;
+    try {
+      u = await tx.order.update({
+        where: { id, status: order.status },
+        data: { status },
+      });
+    } catch (err: any) {
+      if (err?.code === "P2025") {
+        throw new ConflictError(
+          "This order changed state while the update was in progress. Reload and try again.",
+        );
+      }
+      throw err;
+    }
+
+    // F4-4: an order that already paid a rider is financially settled and must
+    // not be reopened into a dispatchable state.
+    //
+    // `tx.order.update` above has already taken the Order row lock, so this
+    // check is serialized against any concurrent dispatch or completion: no
+    // dispatch can slip between the write and the check. Throwing rolls the
+    // whole transaction back, status change included.
+    //
+    // This closes the only route that could reopen a settled order: the normal
+    // customer/vendor state machine has no backwards transitions, the payment
+    // finalizer and order-expiry jobs only touch `AWAITING_PAYMENT`/`PENDING`,
+    // and the refund finalizer never rewrites a `COMPLETED` order — so this
+    // unconditional admin override was the single path that could move a paid
+    // order back into `READY_FOR_PICKUP`/`OUT_FOR_DELIVERY`.
+    //
+    // No recovery workflow is invented here. Recovering a settled order needs its
+    // own audited design; this only refuses the unsafe transition.
+    if (isDispatchableOrderStatus(status)) {
+      const earning = await tx.deliveryEarning.findUnique({
+        where: { orderId: id },
+        select: { id: true },
+      });
+      if (earning) {
+        throw new ConflictError(
+          "This order has already been paid out to a rider and cannot be returned to a dispatchable state",
+        );
+      }
+    }
+
+    // F4-1 / INV-1: this override is intentionally unconditional (an admin can
+    // correct any state, in either direction), which is exactly why it needed
+    // reconciliation — it was the one terminal writer with no guard at all. A
+    // terminal order must not retain an active DeliveryAssignment, and the
+    // reconciliation commits atomically with the override itself.
+    //
+    // Authorization and transition semantics are untouched: still any valid
+    // OrderStatus, still audited, still no new state machine.
+    if (isTerminalOrderStatus(status)) {
+      await reconcileActiveDeliveryAssignments(tx, id);
+    }
+
+    return u;
   });
+
   await auditAdmin(req, "ADMIN_FORCED_ORDER_STATUS", {
     orderId: id,
     from: order.status,
@@ -841,14 +955,19 @@ export const updateRefundStatus = async (req: AuthRequest, res: Response) => {
       );
     }
 
-    const refundAmountNaira = amount ? Number(amount) : undefined;
+    // Phase 3.0.2: presence is tested with != null, never truthiness. A
+    // supplied zero (or "0") must be REJECTED as an invalid amount — the
+    // previous `amount ? ... : undefined` silently reinterpreted it as
+    // "no amount supplied", which the precedence below would resolve to
+    // the stored amount or the full remaining balance.
+    const refundAmountNaira = amount !== undefined && amount !== null ? Number(amount) : undefined;
     if (
       refundAmountNaira !== undefined &&
       (isNaN(refundAmountNaira) || refundAmountNaira <= 0)
     ) {
       throw new ValidationError("Invalid refund amount");
     }
-    const requestedKobo = refundAmountNaira ? Math.round(refundAmountNaira * 100) : undefined;
+    const requestedKobo = refundAmountNaira !== undefined ? Math.round(refundAmountNaira * 100) : undefined;
 
     // Reserve the amount AND persist a durable PROCESSING record in the
     // SAME transaction, BEFORE ever calling Paystack. This closes the
@@ -884,6 +1003,18 @@ export const updateRefundStatus = async (req: AuthRequest, res: Response) => {
       // requests (the customer self-service path) still fall back to
       // `remaining`, preserving that documented behaviour.
       reservedKobo = requestedKobo ?? refundRequest.requestedAmountKobo ?? remaining;
+      // Phase 3.0.2: strictly positive lower bound. A stored
+      // requestedAmountKobo of zero or less (no in-app writer produces
+      // one, but the column is nullable with no CHECK constraint) must
+      // never reach the ledger or Paystack: zero would be falsy-omitted
+      // by the refund service into a FULL refund with a zero reservation,
+      // and a negative value would decrement the reservation ledger.
+      // Throwing inside the transaction rolls everything back, so an
+      // invalid stored amount reserves nothing and calls nothing. It is
+      // rejected, never clamped or reinterpreted as a full refund.
+      if (!Number.isInteger(reservedKobo) || reservedKobo <= 0) {
+        throw new ValidationError("Invalid refund amount");
+      }
       if (reservedKobo > remaining) {
         throw new ValidationError(
           `Refund amount exceeds remaining refundable balance (₦${(remaining / 100).toFixed(2)})`,
@@ -903,8 +1034,26 @@ export const updateRefundStatus = async (req: AuthRequest, res: Response) => {
       // Durable BEFORE Paystack is ever called. paystackRefundId stays
       // null until Paystack tells us its id — that's fine, matching can
       // still find this row by paymentRef + PROCESSING + no id yet.
-      await tx.refundRequest.update({
-        where: { id },
+      // C-3: this claim must be a COMPARE-AND-SET, not an unconditional write.
+      // The APPROVED precondition was evaluated at :918 against a read taken
+      // OUTSIDE this transaction, so two concurrent admin submissions both saw
+      // APPROVED and both reached this point. The Payment row lock serialises
+      // the *balance*, not the *obligation*: the second submitter simply
+      // re-reserved against the reduced balance and then issued a SECOND
+      // Paystack refund for the same obligation. (A second full refund was
+      // incidentally blocked because the balance hit zero, but partial refunds
+      // are a supported flow and were not protected at all.)
+      //
+      // Constraining the update to its expected source status makes the claim
+      // atomic. Under READ COMMITTED a competing request re-evaluates this
+      // predicate once the winner commits, matches nothing, and throws — which
+      // rolls back its own balance reservation, so it never reaches Paystack.
+      //
+      // The claim still commits BEFORE the external call, and leaves the row in
+      // the exact shape reconciliation expects: PROCESSING with a null
+      // paystackRefundId, findable by paymentRef + PROCESSING + no id yet.
+      const obligationClaim = await tx.refundRequest.updateMany({
+        where: { id, status: RefundStatus.APPROVED },
         data: {
           status: RefundStatus.PROCESSING,
           adminNote: adminNote ?? refundRequest.adminNote,
@@ -913,11 +1062,26 @@ export const updateRefundStatus = async (req: AuthRequest, res: Response) => {
           requestedAmountKobo: reservedKobo,
         },
       });
+      if (obligationClaim.count === 0) {
+        // Another admin submission claimed this obligation first. Throwing
+        // inside the transaction undoes the balance reservation made above, so
+        // the losing request is rejected without moving money twice.
+        throw new ConflictError(
+          "Refund is already being submitted to Paystack — another request claimed it first. No duplicate refund was issued.",
+        );
+      }
     });
 
     let paystackResult;
     try {
-      paystackResult = await refundPaymentViaPaystack(refundRequest.paymentRef, requestedKobo);
+      // Submit the RESERVED amount — the same validated figure persisted
+      // above — never the raw explicit input. When the admin omits an
+      // amount, requestedKobo is undefined and the service would treat the
+      // omission as a full refund, while the ledger reserved only the
+      // order-scoped stored amount (or the remaining balance). Sending
+      // reservedKobo keeps Paystack, the ledger, and the persisted record
+      // identical by construction.
+      paystackResult = await refundPaymentViaPaystack(refundRequest.paymentRef, reservedKobo);
     } catch (err: any) {
       const classification = classifyRefundSubmitError(err);
       logger.error(
@@ -981,16 +1145,46 @@ export const updateRefundStatus = async (req: AuthRequest, res: Response) => {
 
 // GET /admin/payouts/pending — vendors with an available balance to pay out
 export const getPendingPayouts = async (_req: Request, res: Response) => {
-  const vendorsWithEligibleOrders = await prisma.order.groupBy({
-    by: ["vendorId"],
+  // F8: filtered at the order level (not after grouping) so the preview shows
+  // exactly the orders the payout claim would actually pay — an order with a
+  // customer refund is withheld, because a partial refund leaves
+  // Payment.status = SUCCESS and a full refund on a COMPLETED order never
+  // rewrites the order row at all.
+  const payoutCandidates = await prisma.order.findMany({
     where: {
       status: OrderStatus.COMPLETED,
       paymentStatus: PaymentStatus.SUCCESS,
       payoutId: null,
     },
-    _sum: { totalPrice: true, deliveryFee: true },
-    _count: { id: true },
+    select: {
+      id: true,
+      vendorId: true,
+      basePrice: true,
+      totalPrice: true,
+      deliveryFee: true,
+      idempotencyKey: true,
+      commissionKobo: true,
+      vendorPayoutKobo: true,
+      commissionRateSnapshot: true,
+    },
   });
+  const { eligible: pendingCandidates } = await partitionPayoutBlockedOrders(
+    prisma,
+    payoutCandidates,
+  );
+  const byVendor = new Map<
+    string,
+    { vendorId: string; orders: typeof pendingCandidates }
+  >();
+  for (const order of pendingCandidates) {
+    const row = byVendor.get(order.vendorId) ?? {
+      vendorId: order.vendorId,
+      orders: [],
+    };
+    row.orders.push(order);
+    byVendor.set(order.vendorId, row);
+  }
+  const vendorsWithEligibleOrders = [...byVendor.values()];
 
   const vendorIds = vendorsWithEligibleOrders.map((v) => v.vendorId);
   const vendors = await prisma.user.findMany({
@@ -1010,15 +1204,10 @@ export const getPendingPayouts = async (_req: Request, res: Response) => {
 
   const pending = vendorsWithEligibleOrders.map((v) => {
     const vendor = vendors.find((x) => x.id === v.vendorId);
-    const { grossRevenue, commission, netAvailable } = calculatePayoutAmounts(
-      [
-        {
-          totalPrice: v._sum.totalPrice || 0,
-          deliveryFee: v._sum.deliveryFee || 0,
-        },
-      ],
-      vendor?.commissionRate ?? 0.15,
-    );
+    // Batch G: preview from frozen snapshots (same equation as settlement),
+    // not live-rate math — the displayed balance is the claimable balance.
+    const preview = previewVendorPayoutAmounts(v.orders, vendor?.commissionRate ?? 0.15);
+    const { grossRevenue, commission, netAvailable } = preview;
     // Phase 1C payout holds: skipped vendors stay listed (with a reason)
     // but are never auto-paid; their orders keep payoutId null so nothing
     // is lost. NOTE: a missing paystackRecipientCode alone does NOT hold —
@@ -1028,7 +1217,7 @@ export const getPendingPayouts = async (_req: Request, res: Response) => {
     return {
       vendorId: v.vendorId,
       vendorName: vendor?.brandName || vendor?.name,
-      orderCount: v._count.id,
+      orderCount: preview.orderCount,
       grossRevenue,
       commission,
       netAmount: netAvailable,
@@ -1036,6 +1225,12 @@ export const getPendingPayouts = async (_req: Request, res: Response) => {
       transferVerified: !!vendor?.paystackRecipientCode,
       held: hold !== null,
       heldReason: hold,
+      // Additive Batch G metadata: snapshot coverage and whether settlement
+      // itself would refuse this batch (torn snapshots / non-positive net).
+      snapshotOrderCount: preview.snapshotOrderCount,
+      legacyOrderCount: preview.legacyOrderCount,
+      payoutBlocked: preview.blocked,
+      payoutBlockReason: preview.blockReason ?? null,
     };
   });
 
@@ -1095,6 +1290,7 @@ async function initiateVendorPayoutTransfer(
   payout: any,
   vendor: any,
   orderCount: number,
+  transferReference?: string,
 ) {
   if (!vendor.bankName || !vendor.bankAccountNumber || !vendor.bankCode) {
     await auditAdmin(req, "ADMIN_PROCESSED_PAYOUT_MANUAL", {
@@ -1105,7 +1301,10 @@ async function initiateVendorPayoutTransfer(
     return payout;
   }
 
-  const reference = payout.reference || `vendor_payout_${payout.id}`;
+  // Use the claim's idempotency key as the Paystack transfer reference so
+  // that retries with the same key are idempotent at the provider level.
+  // Fall back to the payout's existing reference or a generated one.
+  const reference = transferReference || payout.reference || `vendor_payout_${payout.id}`;
   const claimed = await prisma.vendorPayout.updateMany({
     where: {
       id: payout.id,
@@ -1145,7 +1344,9 @@ async function initiateVendorPayoutTransfer(
     }
 
     await initiateTransfer({
-      amountNaira: payout.amount,
+      // payout.amount is integer kobo (Phase 3A, BigInt). Paystack expects
+      // kobo, so pass it unchanged — no * 100.
+      amountKobo: Number(payout.amount),
       recipientCode,
       reason: `Payout for ${orderCount} order(s)`,
       reference,
@@ -1164,7 +1365,15 @@ async function initiateVendorPayoutTransfer(
       { err: err?.details || err.message, payoutId: payout.id, reference },
       "Payout transfer outcome unknown",
     );
-    if (err?.details?.retryable === false) {
+    // Batch B (P3.2-03): branch on the authoritative transfer outcome, not
+    // the legacy `retryable` flag. Only an explicit provider REJECTION
+    // proves no transfer was created. A timeout, network error, or 5xx is
+    // UNKNOWN — the transfer may exist — so the payout stays PROCESSING
+    // with its order claims held until the webhook/reconciler settles it.
+    // Same semantics as the rider withdrawal path.
+    const outcome: TransferInitiationOutcome =
+      (err?.details?.outcome as TransferInitiationOutcome) || "UNKNOWN";
+    if (outcome === "REJECTED") {
       // N-06: a definite rejection closes this payout AND releases the order
       // claims in one transaction, so the orders become eligible for a future
       // payout again instead of being stranded forever against a dead
@@ -1186,6 +1395,7 @@ async function initiateVendorPayoutTransfer(
       throw new UpstreamServiceError(
         "Paystack",
         "Payout transfer failed; correct the payout details and retry.",
+        { outcome },
       );
     }
     await auditAdmin(req, "ADMIN_PAYOUT_TRANSFER_UNKNOWN", {
@@ -1196,8 +1406,256 @@ async function initiateVendorPayoutTransfer(
     throw new UpstreamServiceError(
       "Paystack",
       "Payout transfer was submitted or may be in progress. Await Paystack confirmation before retrying.",
+      { outcome },
     );
   }
+}
+
+/**
+ * Stage H (E-03): bounded attempts for the Serializable payout-claim
+ * transaction. Only P2034 (PostgreSQL 40001 serialization failure) is
+ * retried — every other error propagates untouched.
+ *
+ * Retry is safe here because the transaction performs pure database
+ * reads/writes (find eligible orders, create VendorPayout, claim orders
+ * via updateMany with a count guard) and NO external side effects. The
+ * Paystack transfer happens after commit in
+ * `initiateVendorPayoutTransfer`, so a retried transaction can never
+ * execute a money movement twice.
+ */
+const PAYOUT_CLAIM_MAX_ATTEMPTS = 3;
+
+function isSerializationFailure(err: unknown): boolean {
+  return (
+    err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2034"
+  );
+}
+
+/**
+ * Stage H (E-03): the Serializable payout-claim transaction, extracted so
+ * the retry loop in `processPayout` can rerun it. Pure database work only —
+ * safe to rerun. SERIALIZABLE is preserved: concurrent claims still allow
+ * exactly one winner; the loser gets P2034.
+ *
+ * Stage J (E-04): payout totals are snapshot-authoritative. Orders carrying
+ * persisted `commissionKobo`/`vendorPayoutKobo` contribute their exact
+ * frozen values (integer sum — never recomputed from aggregate revenue and
+ * never re-rated at the live commission rate). Pre-3.2b orders with NULL
+ * snapshots ("unknown history", never zero) use the pre-existing
+ * aggregate/live-rate fallback for those orders only. Grains are never
+ * mixed within a single order.
+ */
+async function claimVendorPayoutOrders(vendor: {
+  id: string;
+  commissionRate: number;
+}) {
+  return prisma.$transaction(
+    async (tx) => {
+      // Stage 5: Deterministic Order-first locking (mandatory per §5.4)
+      // Lock all candidate Order rows in ascending ID order to prevent deadlocks
+      // and TOCTOU races between eligibility read and reservation write.
+      const payoutCandidates = await tx.$queryRaw<{
+        id: string;
+        basePrice: number;
+        totalPrice: number;
+        deliveryFee: number;
+        createdAt: Date;
+        commissionKobo: bigint | null;
+        vendorPayoutKobo: bigint | null;
+        commissionRateSnapshot: number | null;
+        idempotencyKey: string | null;
+      }[]>`
+        SELECT o.id, o.basePrice, o.totalPrice, o.deliveryFee, o.createdAt,
+               o.commissionKobo, o.vendorPayoutKobo, o.commissionRateSnapshot,
+               o.idempotencyKey
+        FROM "Order" o
+        WHERE o."vendorId" = ${vendor.id}
+          AND o."status" = 'COMPLETED'
+          AND o."paymentStatus" = 'SUCCESS'
+          AND o."payoutId" IS NULL
+        ORDER BY o.id ASC
+        FOR UPDATE
+      `;
+
+      // F8: a customer refund can have consumed some or all of an order's value
+      // while the order row still reads COMPLETED + SUCCESS — the refund paths
+      // only rewrite the order when it sits in REFUND_CANCELLABLE_ORDER_STATUSES,
+      // which deliberately excludes COMPLETED. Lock the covering Payment rows
+      // first (the very lock the refund approval/completion paths already take,
+      // so the two cannot both observe "safe" and both commit), then withhold
+      // any order whose money is in an unresolved or completed refund.
+      //
+      // Nothing is netted off and no reduced payout is computed: this repository
+      // defines no vendor/platform split for refunds, so the only safe action is
+      // to not pay the order until that policy exists. Withheld orders keep
+      // payoutId = null and return to the eligible pool on their own once their
+      // refund is rejected/failed or a policy lands.
+      await lockPaymentsCoveringOrders(
+        tx,
+        [
+          ...new Set(
+            payoutCandidates
+              .map((o) => o.idempotencyKey)
+              .filter((k): k is string => !!k),
+          ),
+        ],
+      );
+      const { eligible: eligibleOrders, blocked: blockedOrders } =
+        await partitionPayoutBlockedOrders(tx, payoutCandidates);
+
+      if (blockedOrders.length > 0) {
+        logger.warn(
+          {
+            vendorId: vendor.id,
+            blockedOrderIds: blockedOrders.map((o) => o.id),
+            blockedOrderCount: blockedOrders.length,
+          },
+          "Payout withheld for orders with a customer refund — no vendor/platform refund allocation policy is defined, so these orders are not paid",
+        );
+      }
+
+      if (payoutCandidates.length > 0 && eligibleOrders.length === 0) {
+        throw new ValidationError(
+          "No payout-eligible orders: every completed order for this vendor has a customer refund whose vendor allocation has not been decided.",
+        );
+      }
+      if (eligibleOrders.length === 0)
+        throw new ValidationError(
+          "This vendor has no eligible orders to pay out",
+        );
+      // E-07: integrity gate BEFORE any financial state is written. An
+      // impossible/torn/contradictory snapshot blocks the whole payout
+      // deterministically instead of being silently skipped by the
+      // aggregation. Pure validation — stored kobo values are never
+      // recomputed from a rate. Legacy all-NULL rows are not defects and
+      // keep the documented fallback below. The throw is not a P2034, so
+      // the Stage H retry loop never re-runs it.
+      const snapshotDefects = findPayoutSnapshotDefects(eligibleOrders);
+      if (snapshotDefects.length > 0) {
+        logger.error(
+          {
+            vendorId: vendor.id,
+            orderIds: eligibleOrders.map((o) => o.id),
+            defects: snapshotDefects,
+          },
+          "Payout blocked: inconsistent order money snapshots",
+        );
+        throw new ConflictError(
+          `Payout blocked: order ${snapshotDefects[0].orderId} has inconsistent financial snapshot data (${snapshotDefects[0].reason}). No payout was created.`,
+          "PAYOUT_SNAPSHOT_INVALID",
+        );
+      }
+
+      // Stage 5: Acquire FinancialOperationClaim for all payments involved.
+      // This serializes payout vs refund per payment before any financial
+      // state is written. Claims are created inside the same transaction so
+      // retries on P2034 re-acquire cleanly (partial unique index prevents
+      // duplicates).
+      const uniquePaymentIds = [
+        ...new Set(
+          eligibleOrders
+            .map((o) => o.idempotencyKey)
+            .filter((k): k is string => !!k)
+            .map((k) => k),
+        ),
+      ];
+      // Map idempotencyKey → paymentId by querying Payment rows
+      const paymentRows = await tx.$queryRaw<{ id: string; idempotencyKey: string }[]>`
+        SELECT id, idempotencyKey FROM "Payment"
+        WHERE idempotencyKey = ANY(${
+          Prisma.join(
+            uniquePaymentIds.filter(Boolean) as string[],
+          )
+        })
+      `;
+      const keyToPaymentId = new Map(
+        paymentRows.map((r) => [r.idempotencyKey, r.id]),
+      );
+      const claimPaymentIds = uniquePaymentIds
+        .filter(Boolean)
+        .map((k) => keyToPaymentId.get(k as string))
+        .filter((id): id is string => !!id);
+
+      const claims = await acquireMultiPaymentClaim(tx, {
+        paymentIds: claimPaymentIds,
+        operationType: "PAYOUT",
+        amountKobo: 0, // placeholder; updated below after VendorPayout creation
+        operationIdempotencyKey: `payout_${vendor.id}_${Date.now()}`,
+      });
+
+      // E-04: exact integer-kobo sum over snapshot-backed orders.
+      const snapshotTotals = sumSnapshotKoboTotals(eligibleOrders);
+      // E-04 legacy fallback (documented pre-existing behavior, E-05 rate
+      // source untouched): aggregate/live-rate math applies ONLY to orders
+      // whose snapshots are entirely NULL. Fully snapshotted batches never
+      // touch Float commission math.
+      const legacyOrders = eligibleOrders.filter(isLegacyNullSnapshotOrder);
+      let legacyGrossKobo = 0n;
+      let legacyCommissionKobo = 0n;
+      let legacyNetKobo = 0n;
+      if (legacyOrders.length > 0) {
+        const legacy = calculatePayoutAmounts(
+          legacyOrders,
+          vendor.commissionRate,
+        );
+        // calculatePayoutAmounts already returns integer kobo — no * 100.
+        legacyGrossKobo = BigInt(legacy.grossRevenue);
+        legacyCommissionKobo = BigInt(legacy.commission);
+        legacyNetKobo = BigInt(legacy.netAvailable);
+      }
+      const grossKobo = snapshotTotals.grossKobo + legacyGrossKobo;
+      const commissionKobo =
+        snapshotTotals.commissionKobo + legacyCommissionKobo;
+      const netKobo =
+        snapshotTotals.vendorPayoutKobo + legacyNetKobo;
+      if (netKobo <= 0n)
+        throw new ValidationError("Payout amount must be greater than zero");
+      // VendorPayout.grossRevenue/commission/amount are integer kobo
+      // (Phase 3A, BigInt). Store exact kobo directly — no naira conversion,
+      // no * 100 / / 100 round-trip.
+      const periodStart = eligibleOrders[0].createdAt;
+      const periodEnd = eligibleOrders[eligibleOrders.length - 1].createdAt;
+      const created = await tx.vendorPayout.create({
+        data: {
+          vendorId: vendor.id,
+          grossRevenue: grossKobo,
+          commission: commissionKobo,
+          amount: netKobo,
+          orderCount: eligibleOrders.length,
+          periodStart,
+          periodEnd,
+          status: PayoutStatus.PENDING,
+        },
+      });
+
+      // Update claims with the actual VendorPayout ID and amount
+      await Promise.all(
+        (claims as Array<{ id: string }>).map((c) =>
+          tx.financialOperationClaim.update({
+            where: { id: c.id },
+            data: {
+              vendorPayoutId: created.id,
+              amountKobo: Number(netKobo),
+            },
+          }),
+        ),
+      );
+
+      const claimed = await tx.order.updateMany({
+        where: {
+          id: { in: eligibleOrders.map((order) => order.id) },
+          payoutId: null,
+        },
+        data: { payoutId: created.id },
+      });
+      if (claimed.count !== eligibleOrders.length)
+        throw new ConflictError(
+          "Another payout process claimed one or more orders; retry this request",
+        );
+      return { payout: created, claims };
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+  );
 }
 
 // POST /admin/payouts/process. Pass payoutId to retry a FAILED payout using
@@ -1209,6 +1667,9 @@ export const processPayout = async (req: AuthRequest, res: Response) => {
   };
   if (!vendorId && !payoutId)
     throw new ValidationError("vendorId or payoutId is required");
+
+  // Stage 5: Financial submission freeze — checked at every entry point
+  await requireFinancialSubmissionNotFrozen();
 
   if (payoutId) {
     const payout = await prisma.vendorPayout.findUnique({
@@ -1265,68 +1726,51 @@ export const processPayout = async (req: AuthRequest, res: Response) => {
     );
   }
 
-  const payout = await prisma.$transaction(
-    async (tx) => {
-      const eligibleOrders = await tx.order.findMany({
-        where: {
-          vendorId: vendor.id,
-          status: OrderStatus.COMPLETED,
-          paymentStatus: PaymentStatus.SUCCESS,
-          payoutId: null,
-        },
-        select: {
-          id: true,
-          totalPrice: true,
-          deliveryFee: true,
-          createdAt: true,
-        },
-        orderBy: { createdAt: "asc" },
-      });
-      if (eligibleOrders.length === 0)
-        throw new ValidationError(
-          "This vendor has no eligible orders to pay out",
+  // E-03: the Serializable claim stays intact. A concurrent claimant loses
+  // with P2034 instead of double-claiming; the loser retries a bounded
+  // number of times and, if still conflicting, receives the same
+  // controlled 409 contract as the existing count-guard path — never a
+  // generic 500, never a false success, never a second money movement
+  // (the Paystack transfer below runs only after this commit).
+  let result: Awaited<ReturnType<typeof claimVendorPayoutOrders>> | undefined;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      result = await claimVendorPayoutOrders(vendor);
+      break;
+    } catch (err) {
+      if (!isSerializationFailure(err)) throw err;
+      if (attempt >= PAYOUT_CLAIM_MAX_ATTEMPTS) {
+        logger.warn(
+          { vendorId: vendor.id, attempt },
+          "Payout claim serialization conflict persists; returning 409",
         );
-      const { grossRevenue, commission, netAvailable } = calculatePayoutAmounts(
-        eligibleOrders,
-        vendor.commissionRate,
-      );
-      if (netAvailable <= 0)
-        throw new ValidationError("Payout amount must be greater than zero");
-      const periodStart = eligibleOrders[0].createdAt;
-      const periodEnd = eligibleOrders[eligibleOrders.length - 1].createdAt;
-      const created = await tx.vendorPayout.create({
-        data: {
-          vendorId: vendor.id,
-          grossRevenue,
-          commission,
-          amount: netAvailable,
-          orderCount: eligibleOrders.length,
-          periodStart,
-          periodEnd,
-          status: PayoutStatus.PENDING,
-        },
-      });
-      const claimed = await tx.order.updateMany({
-        where: {
-          id: { in: eligibleOrders.map((order) => order.id) },
-          payoutId: null,
-        },
-        data: { payoutId: created.id },
-      });
-      if (claimed.count !== eligibleOrders.length)
         throw new ConflictError(
           "Another payout process claimed one or more orders; retry this request",
         );
-      return created;
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-  );
+      }
+      logger.warn(
+        { vendorId: vendor.id, attempt },
+        "Payout claim serialization conflict; retrying",
+      );
+    }
+  }
+  if (!result)
+    throw new ConflictError(
+      "Another payout process claimed one or more orders; retry this request",
+    );
+
+  const { payout, claims } = result;
+
+  // Use the claim's idempotency key as the Paystack transfer reference so
+  // that retries with the same key are idempotent at the provider level.
+  const transferReference = claims[0]?.operationIdempotencyKey;
 
   const updated = await initiateVendorPayoutTransfer(
     req,
     payout,
     vendor,
     payout.orderCount,
+    transferReference,
   );
   return sendSuccess(
     res,
@@ -1908,7 +2352,22 @@ export const adminUpdateProduct = async (req: AuthRequest, res: Response) => {
   if (name !== undefined) updateData.name = name;
   if (description !== undefined) updateData.description = description;
   if (price !== undefined) updateData.price = Number(price);
-  if (dishTypeId !== undefined) updateData.dishType = { connect: { id: dishTypeId } };
+  if (dishTypeId !== undefined) {
+    // Category/DishType invariant: Product.categoryId must always equal
+    // Product.dishType.categoryId. The authoritative value is
+    // DishType.categoryId -- a client-supplied categoryId (req.body
+    // has no such field plumbed through) can never override it.
+    // Mirrors the vendor updateProduct path: same active-state rule,
+    // then derive categoryId, then a single atomic Product update.
+    await assertActiveDishType(dishTypeId);
+    const targetDishType = await prisma.dishType.findUnique({
+      where: { id: dishTypeId },
+      select: { categoryId: true },
+    });
+    if (!targetDishType) throw new ValidationError("Invalid dish type.");
+    updateData.dishType = { connect: { id: dishTypeId } };
+    updateData.category = { connect: { id: targetDishType.categoryId } };
+  }
   if (archived !== undefined) updateData.archived = Boolean(archived);
   if (trackInventory !== undefined) updateData.trackInventory = Boolean(trackInventory);
   if (stock !== undefined) updateData.stock = Number(stock);
@@ -1941,13 +2400,829 @@ export const adminDeleteProduct = async (req: AuthRequest, res: Response) => {
     throw new ConflictError("Product has order history and cannot be deleted — archive it instead");
   }
 
-  await prisma.product.delete({ where: { id } });
+  // Admin deletion must protect customer carts just like the vendor path.
+  const hasCartLines = await prisma.cartItem.findFirst({
+    where: { productId: id },
+    select: { id: true },
+  });
+  if (hasCartLines) {
+    throw new ConflictError(
+      "Product is in a customer's cart and cannot be deleted — archive it instead so customer carts are not changed",
+    );
+  }
+
+  try {
+    await prisma.product.delete({ where: { id } });
+  } catch (err) {
+    // The database RESTRICT constraint decides the race where a cart line is
+    // created after the check. Prisma 6 reports that violation as a
+    // PrismaClientUnknownRequestError carrying PostgreSQL SQLSTATE 23001;
+    // only the expected product constraints become a 409.
+    if (isForeignKeyConflictFor(err, PRODUCT_DELETE_FK_CONSTRAINTS)) {
+      throw new ConflictError(
+        "Product is still referenced by existing orders or customer carts and cannot be deleted — archive it instead",
+      );
+    }
+    throw err;
+  }
   await clearProductCache(id, product.vendorId);
+  await clearProductFromCarts(id);
   await invalidateActiveProductPromosCache();
   await invalidateMarketplaceDiscoveryCaches();
 
   await auditAdmin(req, "ADMIN_DELETED_PRODUCT", { productId: id });
   return sendSuccess(res, {}, "Product deleted");
+};
+
+// ==================== TAXONOMY: CATEGORIES ====================
+
+const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * Derives a stable, uppercase taxonomy id from a display name, matching the
+ * seed convention (e.g. "Rice Dishes" -> "RICE_DISHES", "Spicy" -> "SPICY").
+ * Category, DishType and Tag ids are `@id` with no default, so the server
+ * must supply one; clients never send ids.
+ */
+function taxonomyId(name: string): string {
+  return name
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/, "") || "ITEM";
+}
+
+const categoryCreateSchema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(100),
+  slug: z
+    .string()
+    .trim()
+    .min(1, "Slug is required")
+    .max(100)
+    .regex(SLUG_PATTERN, "Slug must be lowercase and URL-safe (e.g. rice-dishes)"),
+  icon: z.string().trim().max(500).optional().nullable(),
+  sortOrder: z.coerce.number().int().min(0).optional(),
+});
+
+const categoryUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(100).optional(),
+  slug: z
+    .string()
+    .trim()
+    .min(1)
+    .max(100)
+    .regex(SLUG_PATTERN, "Slug must be lowercase and URL-safe (e.g. rice-dishes)")
+    .optional(),
+  icon: z.string().trim().max(500).optional().nullable(),
+  sortOrder: z.coerce.number().int().min(0).optional(),
+});
+
+/** POST /admin/categories — admin-only. Creates a new category. */
+export const createCategory = async (req: AuthRequest, res: Response) => {
+  const parsed = categoryCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new ValidationError("Invalid category input", parsed.error.flatten().fieldErrors);
+  }
+  const { name, slug, icon, sortOrder } = parsed.data;
+
+  // Uniqueness pre-check for a clear client message; P2002 is the backstop.
+  const existing = await prisma.category.findFirst({
+    where: { OR: [{ name }, { slug }] },
+    select: { id: true, name: true, slug: true },
+  });
+  if (existing) {
+    throw new ConflictError(
+      `A category with name "${existing.name}" or slug "${existing.slug}" already exists`,
+    );
+  }
+
+  let category;
+  try {
+    category = await prisma.category.create({
+      data: {
+        id: taxonomyId(name),
+        name,
+        slug,
+        ...(icon !== undefined && { icon: icon === "" ? null : icon }),
+        ...(sortOrder !== undefined && { sortOrder }),
+      },
+    });
+  } catch (error) {
+    if (isPrismaUniqueViolation(error)) {
+      throw new ConflictError("A category with this name or slug already exists");
+    }
+    throw error;
+  }
+
+  await clearCategoryCache(category.id);
+  await invalidateMarketplaceDiscoveryCaches();
+  await auditAdmin(req, "ADMIN_CREATED_CATEGORY", {
+    categoryId: category.id,
+    name,
+    slug,
+  });
+
+  return sendCreated(res, { category }, "Category created");
+};
+
+/** PATCH /admin/categories/:id — admin-only. Updates permitted category fields. */
+export const updateCategory = async (req: AuthRequest, res: Response) => {
+  const id = ensureString(req.params.id);
+  const parsed = categoryUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new ValidationError("Invalid category input", parsed.error.flatten().fieldErrors);
+  }
+
+  const category = await prisma.category.findUnique({ where: { id } });
+  if (!category) throw new NotFoundError("Category");
+
+  const updateData: Prisma.CategoryUpdateInput = {};
+  if (parsed.data.name !== undefined) updateData.name = parsed.data.name;
+  if (parsed.data.slug !== undefined) updateData.slug = parsed.data.slug;
+  if (parsed.data.icon !== undefined) {
+    updateData.icon = parsed.data.icon === "" ? null : parsed.data.icon;
+  }
+  if (parsed.data.sortOrder !== undefined) updateData.sortOrder = parsed.data.sortOrder;
+
+  let updated;
+  try {
+    updated = await prisma.category.update({ where: { id }, data: updateData });
+  } catch (error) {
+    if (isPrismaUniqueViolation(error)) {
+      throw new ConflictError("A category with this name or slug already exists");
+    }
+    throw error;
+  }
+
+  await clearCategoryCache(id);
+  await invalidateMarketplaceDiscoveryCaches();
+  await auditAdmin(req, "ADMIN_UPDATED_CATEGORY", { categoryId: id, changes: updateData });
+
+  return sendSuccess(res, { category: updated }, "Category updated");
+};
+
+/** PATCH /admin/categories/:id/deactivate — admin-only. Soft-deactivates a category. */
+export const deactivateCategory = async (req: AuthRequest, res: Response) => {
+  const id = ensureString(req.params.id);
+  const category = await prisma.category.findUnique({ where: { id } });
+  if (!category) throw new NotFoundError("Category");
+
+  const updated = await prisma.category.update({
+    where: { id },
+    data: { isActive: false },
+  });
+
+  await clearCategoryCache(id);
+  await invalidateMarketplaceDiscoveryCaches();
+  await auditAdmin(req, "ADMIN_DEACTIVATED_CATEGORY", {
+    categoryId: id,
+    name: category.name,
+  });
+
+  return sendSuccess(res, { category: updated }, "Category deactivated");
+};
+
+// ==================== TAXONOMY: DISH TYPES ====================
+
+const dishTypeCreateSchema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(100),
+  description: z.string().trim().max(1000).optional().nullable(),
+  imageUrl: z.string().trim().max(500).optional().nullable(),
+  sortOrder: z.coerce.number().int().min(0).optional(),
+  categoryId: z.string().trim().min(1, "Category is required"),
+});
+
+const dishTypeUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(100).optional(),
+  description: z.string().trim().max(1000).optional().nullable(),
+  imageUrl: z.string().trim().max(500).optional().nullable(),
+  sortOrder: z.coerce.number().int().min(0).optional(),
+  categoryId: z.string().trim().min(1).optional(),
+});
+
+/** POST /admin/dish-types — admin-only. Creates a new dish type under a category. */
+export const createDishType = async (req: AuthRequest, res: Response) => {
+  const parsed = dishTypeCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new ValidationError("Invalid dish type input", parsed.error.flatten().fieldErrors);
+  }
+  const { name, description, imageUrl, sortOrder, categoryId } = parsed.data;
+
+  const category = await prisma.category.findUnique({
+    where: { id: categoryId },
+    select: { id: true },
+  });
+  if (!category) throw new ValidationError("Invalid category reference.");
+
+  let dishType;
+  try {
+    dishType = await prisma.dishType.create({
+      data: {
+        id: taxonomyId(name),
+        name,
+        ...(description !== undefined && { description: description === "" ? null : description }),
+        ...(imageUrl !== undefined && {
+          imageUrl: imageUrl === "" ? null : imageUrl,
+        }),
+        ...(sortOrder !== undefined && { sortOrder }),
+        category: { connect: { id: categoryId } },
+      },
+    });
+  } catch (error) {
+    if (isPrismaUniqueViolation(error)) {
+      throw new ConflictError("A dish type with this name already exists");
+    }
+    throw error;
+  }
+
+  await clearDishTypeCache(dishType.id);
+  await invalidateMarketplaceDiscoveryCaches();
+  await auditAdmin(req, "ADMIN_CREATED_DISH_TYPE", {
+    dishTypeId: dishType.id,
+    name,
+    categoryId,
+  });
+
+  return sendCreated(res, { dishType }, "Dish type created");
+};
+
+/** PATCH /admin/dish-types/:id — admin-only. Updates permitted dish type fields. */
+export const updateDishType = async (req: AuthRequest, res: Response) => {
+  const id = ensureString(req.params.id);
+  const parsed = dishTypeUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new ValidationError("Invalid dish type input", parsed.error.flatten().fieldErrors);
+  }
+
+  const dishType = await prisma.dishType.findUnique({ where: { id } });
+  if (!dishType) throw new NotFoundError("Dish type");
+
+  const updateData: Prisma.DishTypeUpdateInput = {};
+  if (parsed.data.name !== undefined) updateData.name = parsed.data.name;
+  if (parsed.data.description !== undefined) {
+    updateData.description = parsed.data.description === "" ? null : parsed.data.description;
+  }
+  if (parsed.data.imageUrl !== undefined) {
+    updateData.imageUrl = parsed.data.imageUrl === "" ? null : parsed.data.imageUrl;
+  }
+  if (parsed.data.sortOrder !== undefined) updateData.sortOrder = parsed.data.sortOrder;
+  let categoryChanged = false;
+  if (parsed.data.categoryId !== undefined) {
+    const category = await prisma.category.findUnique({
+      where: { id: parsed.data.categoryId },
+      select: { id: true },
+    });
+    if (!category) throw new ValidationError("Invalid category reference.");
+    updateData.category = { connect: { id: parsed.data.categoryId } };
+    categoryChanged = parsed.data.categoryId !== dishType.categoryId;
+  }
+
+  let updated;
+  try {
+    updated = await prisma.dishType.update({ where: { id }, data: updateData });
+  } catch (error) {
+    if (isPrismaUniqueViolation(error)) {
+      throw new ConflictError("A dish type with this name already exists");
+    }
+    throw error;
+  }
+
+  await clearDishTypeCache(id);
+  if (categoryChanged) {
+    await invalidateProductsByDishTypeCategoryChange(id);
+  }
+  await invalidateMarketplaceDiscoveryCaches();
+  await auditAdmin(req, "ADMIN_UPDATED_DISH_TYPE", {
+    dishTypeId: id,
+    changes: updateData,
+  });
+
+  return sendSuccess(res, { dishType: updated }, "Dish type updated");
+};
+
+/** PATCH /admin/dish-types/:id/deactivate — admin-only. Soft-deactivates a dish type. */
+export const deactivateDishType = async (req: AuthRequest, res: Response) => {
+  const id = ensureString(req.params.id);
+  const dishType = await prisma.dishType.findUnique({ where: { id } });
+  if (!dishType) throw new NotFoundError("Dish type");
+
+  const updated = await prisma.dishType.update({
+    where: { id },
+    data: { isActive: false },
+  });
+
+  await clearDishTypeCache(id);
+  await invalidateMarketplaceDiscoveryCaches();
+  await auditAdmin(req, "ADMIN_DEACTIVATED_DISH_TYPE", {
+    dishTypeId: id,
+    name: dishType.name,
+  });
+
+  return sendSuccess(res, { dishType: updated }, "Dish type deactivated");
+};
+
+// ==================== TAXONOMY: TAGS ====================
+
+const tagCreateSchema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(100),
+  type: z.enum(["CUISINE", "DIET", "OCCASION"]),
+});
+
+const tagUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(100).optional(),
+  type: z.enum(["CUISINE", "DIET", "OCCASION"]).optional(),
+});
+
+/** POST /admin/tags — admin-only. Creates a new tag. */
+export const createTag = async (req: AuthRequest, res: Response) => {
+  const parsed = tagCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new ValidationError("Invalid tag input", parsed.error.flatten().fieldErrors);
+  }
+  const { name, type } = parsed.data;
+
+  const existing = await prisma.tag.findFirst({
+    where: { name },
+    select: { id: true, name: true },
+  });
+  if (existing) {
+    throw new ConflictError(`A tag named "${existing.name}" already exists`);
+  }
+
+  let tag;
+  try {
+    tag = await prisma.tag.create({
+      data: {
+        id: taxonomyId(name),
+        name,
+        type,
+      },
+    });
+  } catch (error) {
+    if (isPrismaUniqueViolation(error)) {
+      throw new ConflictError("A tag with this name already exists");
+    }
+    throw error;
+  }
+
+  // Phase 2B.6: a tag change alters the tag list itself and every cached
+  // payload that embeds tag objects, so the tag-specific helper is used
+  // instead of the generic discovery sweep (which does not cover `tags:all` or
+  // product-detail payloads). The helper never throws: a Redis outage must not
+  // turn this committed mutation into a failed response.
+  const tagCache = await clearTagCache(tag.id);
+  if (!tagCache.ok) {
+    logger.warn(
+      { tagId: tag.id, failures: tagCache.failures },
+      "Tag cache invalidation partially failed; the tag list may be served stale until its TTL expires",
+    );
+  }
+  await auditAdmin(req, "ADMIN_CREATED_TAG", { tagId: tag.id, name, type });
+
+  return sendCreated(res, { tag }, "Tag created");
+};
+
+/** PATCH /admin/tags/:id — admin-only. Updates permitted tag fields. */
+export const updateTag = async (req: AuthRequest, res: Response) => {
+  const id = ensureString(req.params.id);
+  const parsed = tagUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new ValidationError("Invalid tag input", parsed.error.flatten().fieldErrors);
+  }
+
+  const tag = await prisma.tag.findUnique({ where: { id } });
+  if (!tag) throw new NotFoundError("Tag");
+
+  const updateData: Prisma.TagUpdateInput = {};
+  if (parsed.data.name !== undefined) updateData.name = parsed.data.name;
+  if (parsed.data.type !== undefined) updateData.type = parsed.data.type;
+
+  let updated;
+  try {
+    updated = await prisma.tag.update({ where: { id }, data: updateData });
+  } catch (error) {
+    if (isPrismaUniqueViolation(error)) {
+      throw new ConflictError("A tag with this name already exists");
+    }
+    throw error;
+  }
+
+  // Phase 2B.6: a rename changes every cached payload that embeds the old tag
+  // name, plus the tag list itself. The helper never throws — see createTag.
+  const tagCache = await clearTagCache(id);
+  if (!tagCache.ok) {
+    logger.warn(
+      { tagId: id, failures: tagCache.failures },
+      "Tag cache invalidation partially failed; the tag list may be served stale until its TTL expires",
+    );
+  }
+  await auditAdmin(req, "ADMIN_UPDATED_TAG", { tagId: id, changes: updateData });
+
+  return sendSuccess(res, { tag: updated }, "Tag updated");
+};
+
+/** PATCH /admin/tags/:id/deactivate — admin-only. Soft-deactivates a tag. */
+export const deactivateTag = async (req: AuthRequest, res: Response) => {
+  const id = ensureString(req.params.id);
+  const tag = await prisma.tag.findUnique({ where: { id } });
+  if (!tag) throw new NotFoundError("Tag");
+
+  const updated = await prisma.tag.update({
+    where: { id },
+    data: { isActive: false },
+  });
+
+  // Phase 2B.6: deactivating a tag removes it from the active tag list and
+  // from every tag-filtered browse result. The helper never throws — see
+  // createTag.
+  const tagCache = await clearTagCache(tag.id);
+  if (!tagCache.ok) {
+    logger.warn(
+      { tagId: tag.id, failures: tagCache.failures },
+      "Tag cache invalidation partially failed; the tag list may be served stale until its TTL expires",
+    );
+  }
+  await auditAdmin(req, "ADMIN_DEACTIVATED_TAG", { tagId: id, name: tag.name });
+
+  return sendSuccess(res, { tag: updated }, "Tag deactivated");
+};
+
+/**
+ * Returns true when `error` is a Prisma unique-constraint violation (P2002).
+ * Used to convert duplicate name/slug writes into controlled ConflictError
+ * responses instead of unhandled 500s.
+ */
+function isPrismaUniqueViolation(error: unknown): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2002"
+  );
+}
+
+// ==================== DISHTYPE SUGGESTIONS (PHASE 2A.2) ====================
+
+/**
+ * Vendors propose new DishTypes for admin approval.
+ *
+ * The CategorySuggestion model already models the full workflow:
+ *   vendorId  -> submitter (server-set, never client-controlled)
+ *   suggestedName / suggestedCategoryId -> the proposal
+ *   status    -> PENDING / APPROVED / REJECTED (default PENDING)
+ *   approvedDishTypeId -> @unique link to the canonical DishType on approval
+ *   reviewedByAdminId / reviewedAt / adminNote -> moderation trace
+ *
+ * No schema change is required; all fields exist. Only HTTP endpoints are
+ * added here, plus admin taxonomy management (2A.1) already exists.
+ */
+
+const dishTypeSuggestionCreateSchema = z.object({
+  suggestedName: z.string().trim().min(1, "Name is required").max(100),
+  suggestedCategoryId: z.string().trim().min(1, "Category is required"),
+});
+
+const suggestionModerationSchema = z.object({
+  adminNote: z.string().trim().max(1000).optional().nullable(),
+});
+
+/**
+ * POST /api/vendor/suggestions — vendor submit a new DishType suggestion.
+ *
+ * Mounted on the vendor router (authenticate + authorizeVendor). The submitter
+ * is always req.user.id (server-side); the client may not supply an owner.
+ * requireVendorNotSuspended is applied to this write route by the router.
+ */
+export const createDishTypeSuggestion = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const parsed = dishTypeSuggestionCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new ValidationError(
+      "Invalid suggestion input",
+      parsed.error.flatten().fieldErrors,
+    );
+  }
+  const { suggestedName, suggestedCategoryId } = parsed.data;
+  const vendorId = req.user!.id;
+
+  // The referenced category must exist (matches createDishType convention:
+  // existence, not isActive, is the gate).
+  const category = await prisma.category.findUnique({
+    where: { id: suggestedCategoryId },
+    select: { id: true },
+  });
+  if (!category) throw new ValidationError("Invalid category reference.");
+
+  // Duplicate pending suggestion: same vendor, same name, same category.
+  const existingPending = await prisma.categorySuggestion.findFirst({
+    where: {
+      vendorId,
+      suggestedName,
+      suggestedCategoryId,
+      status: SuggestionStatus.PENDING,
+    },
+    select: { id: true },
+  });
+  if (existingPending) {
+    throw new ConflictError(
+      "You already have a pending suggestion for this dish type.",
+    );
+  }
+
+  // Duplicate official dish type: name is @unique on DishType.
+  const existingDishType = await prisma.dishType.findFirst({
+    where: { name: suggestedName },
+    select: { id: true },
+  });
+  if (existingDishType) {
+    throw new ConflictError("A dish type with this name already exists.");
+  }
+
+  const suggestion = await prisma.categorySuggestion.create({
+    data: {
+      vendorId,
+      suggestedName,
+      suggestedCategoryId,
+      status: SuggestionStatus.PENDING,
+    },
+  });
+
+  return sendCreated(res, { suggestion }, "Dish type suggestion submitted");
+};
+
+/**
+ * GET /api/vendor/suggestions — vendor views only their own suggestions.
+ */
+export const getMyDishTypeSuggestions = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const vendorId = req.user!.id;
+  const { page, limit, skip } = getPagination(req);
+  const status = req.query.status as SuggestionStatus | undefined;
+
+  const where: Prisma.CategorySuggestionWhereInput = { vendorId };
+  if (status) where.status = status;
+
+  const [suggestions, total] = await Promise.all([
+    prisma.categorySuggestion.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: { createdAt: "desc" },
+      include: {
+        suggestedCategory: { select: { id: true, name: true } },
+        approvedDishType: { select: { id: true, name: true } },
+      },
+    }),
+    prisma.categorySuggestion.count({ where }),
+  ]);
+
+  return sendSuccess(
+    res,
+    { suggestions },
+    "Suggestions retrieved",
+    200,
+    { page, limit, total, totalPages: Math.ceil(total / limit) },
+  );
+};
+
+/**
+ * GET /api/admin/suggestions — admin lists suggestions for moderation.
+ */
+export const listDishTypeSuggestions = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const { page, limit, skip } = getPagination(req);
+  const status = req.query.status as SuggestionStatus | undefined;
+  const vendorId = req.query.vendorId
+    ? ensureString(req.query.vendorId)
+    : undefined;
+
+  const where: Prisma.CategorySuggestionWhereInput = {};
+  if (status) where.status = status;
+  if (vendorId) where.vendorId = vendorId;
+
+  const [suggestions, total] = await Promise.all([
+    prisma.categorySuggestion.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: { createdAt: "desc" },
+      include: {
+        vendor: { select: { id: true, name: true } },
+        suggestedCategory: { select: { id: true, name: true } },
+        approvedDishType: { select: { id: true, name: true } },
+        reviewedByAdmin: { select: { id: true, name: true } },
+      },
+    }),
+    prisma.categorySuggestion.count({ where }),
+  ]);
+
+  return sendSuccess(
+    res,
+    { suggestions },
+    "Suggestions retrieved",
+    200,
+    { page, limit, total, totalPages: Math.ceil(total / limit) },
+  );
+};
+
+/**
+ * GET /api/admin/suggestions/:id — admin retrieves a suggestion for moderation.
+ */
+export const getDishTypeSuggestion = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const id = ensureString(req.params.id);
+  const suggestion = await prisma.categorySuggestion.findUnique({
+    where: { id },
+    include: {
+      vendor: { select: { id: true, name: true } },
+      suggestedCategory: { select: { id: true, name: true } },
+      approvedDishType: { select: { id: true, name: true } },
+      reviewedByAdmin: { select: { id: true, name: true } },
+    },
+  });
+  if (!suggestion) throw new NotFoundError("Suggestion");
+  return sendSuccess(res, { suggestion }, "Suggestion retrieved");
+};
+
+/**
+ * PATCH /api/admin/suggestions/:id/approve — admin approves a pending suggestion.
+ *
+ * Runs in a single Prisma transaction: re-fetch + status check (only PENDING
+ * may be approved), create the canonical DishType (stable id via taxonomyId),
+ * then mark the suggestion APPROVED and link it via approvedDishTypeId.
+ * The @unique constraints (DishType.id, DishType.name,
+ * CategorySuggestion.approvedDishTypeId) are the concurrency backstop: any
+ * duplicate official type surfaces P2002, which is converted to ConflictError
+ * and rolls the transaction back, leaving the suggestion PENDING.
+ */
+export const approveDishTypeSuggestion = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const id = ensureString(req.params.id);
+  const parsed = suggestionModerationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new ValidationError(
+      "Invalid moderation input",
+      parsed.error.flatten().fieldErrors,
+    );
+  }
+  const adminId = req.user!.id;
+  const { adminNote } = parsed.data;
+
+  let result;
+  try {
+    result = await prisma.$transaction(async (tx) => {
+      const suggestion = await tx.categorySuggestion.findUnique({
+        where: { id },
+      });
+      if (!suggestion) throw new NotFoundError("Suggestion");
+      if (suggestion.status !== SuggestionStatus.PENDING) {
+        throw new ConflictError(
+          `This suggestion has already been ${suggestion.status.toLowerCase()}.`,
+        );
+      }
+
+      // No duplicate official dish type (name @unique is the backstop).
+      const existing = await tx.dishType.findFirst({
+        where: { name: suggestion.suggestedName },
+        select: { id: true },
+      });
+      if (existing) {
+        throw new ConflictError(
+          "A dish type with this name already exists.",
+        );
+      }
+
+      const dishType = await tx.dishType.create({
+        data: {
+          id: taxonomyId(suggestion.suggestedName),
+          name: suggestion.suggestedName,
+          categoryId: suggestion.suggestedCategoryId,
+          isActive: true,
+        },
+      });
+
+      // Conditional transition: only a still-PENDING suggestion may be
+      // approved. `updateMany` accepts non-unique where fields (unlike
+      // `update`, whose where is limited to unique fields) and returns the
+      // matched count, so a concurrent moderator that already flipped the
+      // status matches zero rows and we abort the transaction, rolling back
+      // the DishType creation above.
+      const updateResult = await tx.categorySuggestion.updateMany({
+        where: { id, status: SuggestionStatus.PENDING },
+        data: {
+          status: SuggestionStatus.APPROVED,
+          approvedDishTypeId: dishType.id,
+          reviewedByAdminId: adminId,
+          reviewedAt: new Date(),
+          ...(adminNote !== undefined && {
+            adminNote: adminNote === "" ? null : adminNote,
+          }),
+        },
+      });
+      if (updateResult.count === 0) {
+        throw new ConflictError(
+          "This suggestion has already been moderated.",
+        );
+      }
+
+      const updated = await tx.categorySuggestion.findUnique({
+        where: { id },
+      });
+      return { suggestion: updated, dishType };
+    });
+  } catch (error) {
+    if (isPrismaUniqueViolation(error)) {
+      throw new ConflictError("A dish type with this name already exists.");
+    }
+    throw error;
+  }
+
+  await clearDishTypeCache(result.dishType.id);
+  await invalidateMarketplaceDiscoveryCaches();
+  await auditAdmin(req, "ADMIN_APPROVED_DISH_TYPE_SUGGESTION", {
+    suggestionId: id,
+    dishTypeId: result.dishType.id,
+    name: result.dishType.name,
+    categoryId: result.dishType.categoryId,
+  });
+
+  return sendSuccess(
+    res,
+    { suggestion: result.suggestion, dishType: result.dishType },
+    "Dish type suggestion approved",
+  );
+};
+
+/**
+ * PATCH /api/admin/suggestions/:id/reject — admin rejects a pending suggestion.
+ *
+ * Applies only to PENDING suggestions. Preserves the suggestion record
+ * (traceability); does not create or modify any DishType or product. Records
+ * the outcome and reviewer via existing fields (adminNote, reviewedByAdminId,
+ * reviewedAt).
+ */
+export const rejectDishTypeSuggestion = async (
+  req: AuthRequest,
+  res: Response,
+) => {
+  const id = ensureString(req.params.id);
+  const parsed = suggestionModerationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new ValidationError(
+      "Invalid moderation input",
+      parsed.error.flatten().fieldErrors,
+    );
+  }
+  const adminId = req.user!.id;
+  const { adminNote } = parsed.data;
+
+  // Conditional transition: only a still-PENDING suggestion may be rejected.
+  // `updateMany` accepts non-unique where fields and returns the matched
+  // count, so a concurrent approver that already flipped the status matches
+  // zero rows and we report a conflict instead of overwriting their decision.
+  const updateResult = await prisma.categorySuggestion.updateMany({
+    where: { id, status: SuggestionStatus.PENDING },
+    data: {
+      status: SuggestionStatus.REJECTED,
+      reviewedByAdminId: adminId,
+      reviewedAt: new Date(),
+      ...(adminNote !== undefined && {
+        adminNote: adminNote === "" ? null : adminNote,
+      }),
+    },
+  });
+
+  if (updateResult.count === 0) {
+    // Either the suggestion does not exist, or it was already moderated.
+    const existing = await prisma.categorySuggestion.findUnique({
+      where: { id },
+    });
+    if (!existing) throw new NotFoundError("Suggestion");
+    throw new ConflictError(
+      `This suggestion has already been ${existing.status.toLowerCase()}.`,
+    );
+  }
+
+  const updated = await prisma.categorySuggestion.findUnique({
+    where: { id },
+  });
+
+  await auditAdmin(req, "ADMIN_REJECTED_DISH_TYPE_SUGGESTION", {
+    suggestionId: id,
+    name: updated?.suggestedName,
+    reason: adminNote,
+  });
+
+  return sendSuccess(res, { suggestion: updated }, "Dish type suggestion rejected");
 };
 
 // ==================== VENDOR DETAIL ====================

@@ -2,6 +2,7 @@ import prisma from "../../../lib/prisma";
 import { verifyPayment } from "../../../services/paymentService";
 import { finalizePaymentSuccess } from "../../../services/paymentFinalizer.service";
 import { restoreStockForOrders } from "../../../services/inventory.service";
+import { clearProductCache } from "../../../services/clearCaches";
 import { logger } from "../../../lib/logger";
 import { PaymentStatus, OrderStatus } from "@prisma/client";
 
@@ -96,11 +97,32 @@ export async function verifyPendingPayments(batchSize = 50) {
             // never touched. A failure anywhere rolls the whole batch back,
             // so there is no state where the payment is EXPIRED while some
             // siblings are cancelled-and-restored and others are not.
+            const restoredProductIds: string[] = [];
+            // P3.2-02: the candidate above was read before this transaction,
+            // so a concurrent success may have settled the payment since.
+            // Expiry is a conditional transition: only a payment that is
+            // STILL pending may become EXPIRED. count === 0 means this
+            // execution lost (or the payment was already settled), so it
+            // must skip every downstream side effect — no cancellation, no
+            // restore, no notifications. A thrown DB error propagates to the
+            // per-payment catch below and is logged, never counted as
+            // expired.
+            let paymentExpired = false;
             await prisma.$transaction(async (tx) => {
-              await tx.payment.update({
-                where: { id: payment.id },
+              const paymentClaimed = await tx.payment.updateMany({
+                where: {
+                  id: payment.id,
+                  status: { in: [PaymentStatus.PENDING, PaymentStatus.INITIATED] },
+                },
                 data: { status: PaymentStatus.EXPIRED },
               });
+              if (paymentClaimed.count === 0) {
+                logger.warn(
+                  { paymentId: payment.id },
+                  "verifyPendingPayments: payment already settled concurrently; skipping expiry",
+                );
+                return;
+              }
 
               const candidates = await tx.order.findMany({
                 where: expirableOrderScope,
@@ -124,11 +146,36 @@ export async function verifyPendingPayments(batchSize = 50) {
                 });
                 // Winner of this CAS owns the reservation release.
                 if (updated.count === 1) {
-                  await restoreStockForOrders(tx, [candidate.id]);
+                  restoredProductIds.push(
+                    ...(await restoreStockForOrders(tx, [candidate.id])),
+                  );
                 }
               }
+              paymentExpired = true;
             });
-            expired++;
+            // Post-commit: every restored portion is purchasable again, so
+            // sweep the cached rows. Best-effort — a failure only costs
+            // display staleness and must not touch the committed batch.
+            await Promise.all(
+              [...new Set(restoredProductIds)].map((productId) =>
+                clearProductCache(productId)
+                  .then((result) => {
+                    if (result && !result.ok) {
+                      logger.warn(
+                        { productId, paymentId: payment.id, failures: result.failures },
+                        "Product cache invalidation incomplete after expiry stock restore",
+                      );
+                    }
+                  })
+                  .catch((err) => {
+                    logger.warn(
+                      { err, productId, paymentId: payment.id },
+                      "Product cache invalidation threw unexpectedly after expiry stock restore",
+                    );
+                  }),
+              ),
+            );
+            expired += paymentExpired ? 1 : 0;
             continue;
           }
 
@@ -136,7 +183,8 @@ export async function verifyPendingPayments(batchSize = 50) {
           if (data.status === "success") {
             const result = await finalizePaymentSuccess({
               reference: payment.reference,
-              amountInNaira: data.amount / 100,
+              amountKobo: data.amount, // integer kobo from Paystack (Phase 3A)
+              currency: data.currency,
               customerIdFromGateway: data.metadata?.userId,
               channel: data.channel,
               paystackData: data,

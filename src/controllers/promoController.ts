@@ -161,11 +161,9 @@ async function invalidatePromoCaches(): Promise<void> {
   await invalidateActiveProductPromosCache();
   // Discovery payloads (home feed 90s, popular, listings) embed resolved
   // promotions — sweep them so new/edited promos surface promptly.
-  try {
-    await invalidateMarketplaceDiscoveryCaches();
-  } catch {
-    // Best-effort: TTLs bound staleness anyway.
-  }
+  // The helper never throws: it reports failures in its result and logs them.
+  // Best-effort here, as before — TTLs bound staleness anyway.
+  await invalidateMarketplaceDiscoveryCaches();
 }
 
 // POST /promotions — vendor creates a promo scoped to their own store

@@ -21,7 +21,9 @@ jest.mock("../../src/lib/prisma", () => ({
   default: {
     user: {
       findUnique: jest.fn(),
-      findMany: jest.fn(),
+      // Phase 3.2b: the checkout transaction reads vendor commission rates
+      // in-tx for order snapshots; default empty (fallback rate applies).
+      findMany: jest.fn(async () => []),
       update: jest.fn(),
     },
     product: { findUnique: jest.fn(), findMany: jest.fn() },
@@ -34,6 +36,8 @@ jest.mock("../../src/lib/prisma", () => ({
     },
     cartItem: { create: jest.fn(), update: jest.fn(), findMany: jest.fn(), deleteMany: jest.fn() },
     cartItemOption: { deleteMany: jest.fn() },
+    // Phase 2B.5b: checkout batch-loads option groups for new-authority lines.
+    optionGroup: { findMany: jest.fn(async () => []) },
     cartSummarySnapshot: { findUnique: jest.fn(), delete: jest.fn() },
     address: { findFirst: jest.fn() },
     order: { findMany: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
@@ -78,7 +82,9 @@ jest.mock("../../src/lib/redis", () => {
   return {
     __esModule: true,
     redisProducts: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
-    redisSearch: { get: jest.fn(), set: jest.fn() },
+    // `del` is required: the discovery sweep now invalidates BOTH clients,
+    // because `search:*` and `suggestions:*` are written to redisSearch.
+    redisSearch: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
     ShopCartRedis: { get: jest.fn(), set: jest.fn() },
     redisPayments,
   };
@@ -106,7 +112,7 @@ jest.mock("../../src/services/paymentFinalizer.service", () => ({
 }));
 
 import prisma from "../../src/lib/prisma";
-import { ShopCartRedis, redisProducts } from "../../src/lib/redis";
+import { ShopCartRedis, redisProducts, redisSearch } from "../../src/lib/redis";
 import { scanKeys } from "../../src/lib/redisScan";
 import { cartSummaryService } from "../../src/services/cartSummary.service";
 import { initializePayment } from "../../src/services/paymentService";
@@ -170,10 +176,26 @@ describe("PATCH /api/vendor/settings/live — lifecycle", () => {
     expect(db.user.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: { isLive: true } }),
     );
-    // All three vendor-dependent marketplace namespaces are invalidated
-    const scanned = mockedScanKeys.mock.calls.map((c) => c[1]);
-    expect(scanned).toEqual(["home:feed:*", "products:mostPopular:*", "products:all:*"]);
+    // Every vendor-dependent marketplace namespace is invalidated (Phase 2
+    // M4 extended the sweep beyond the original three to cover the new
+    // rail, category pages, search and suggestions).
+    const EXPECTED_PATTERNS = [
+      "home:feed:*",
+      "products:mostPopular:*",
+      "products:all:*",
+      "products:new:*",
+      "products:category:*",
+      "search:*",
+      "suggestions:*",
+    ];
+    // The sweep runs against BOTH Redis clients: `search:*` and
+    // `suggestions:*` live in redisSearch, the rest in redisProducts.
+    const scannedFor = (client: unknown) =>
+      mockedScanKeys.mock.calls.filter((c) => c[0] === client).map((c) => c[1]);
+    expect(scannedFor(redisProducts)).toEqual(EXPECTED_PATTERNS);
+    expect(scannedFor(redisSearch)).toEqual(EXPECTED_PATTERNS);
     expect(redisProducts.del).toHaveBeenCalledWith(["home:feed:x"]);
+    expect(redisSearch.del).toHaveBeenCalledWith(["home:feed:x"]);
   });
 
   it("live → offline: flips state and invalidates the same caches", async () => {
@@ -185,7 +207,8 @@ describe("PATCH /api/vendor/settings/live — lifecycle", () => {
     expect(db.user.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: { isLive: false } }),
     );
-    expect(mockedScanKeys).toHaveBeenCalledTimes(3);
+    // Seven patterns on each of the two Redis clients that hold them.
+    expect(mockedScanKeys).toHaveBeenCalledTimes(14);
   });
 
   it("refuses to go live without VERIFIED KYC and touches nothing", async () => {

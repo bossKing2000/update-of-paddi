@@ -1,5 +1,9 @@
 import { Router } from "express";
 import { authenticate, authorizeDeliveryPerson, authorizeVendor, authorizeCustomer, requireRole } from "../middlewares/auth.middleware";
+import {
+  requireRiderApproved,
+  requireRiderOnShift,
+} from "../middlewares/riderEligibility.middleware";
 import { DeliveryAssignmentController } from "../controllers/deliveryControllers";
 
 const router = Router();
@@ -10,16 +14,25 @@ router.use(authenticate);
 // bug that let any delivery person self-assign — see deliveryControllers.ts.
 router.post("/assign", requireRole("VENDOR", "ADMIN"), DeliveryAssignmentController.assignOrder);
 
-router.patch("/:assignmentId/accept", authorizeDeliveryPerson, DeliveryAssignmentController.acceptAssignment);
-router.patch("/:assignmentId/decline", authorizeDeliveryPerson, DeliveryAssignmentController.declineAssignment);
+// Task 3: authorizeDeliveryPerson proves the account HOLDS DELIVERY; it does
+// not prove the rider is APPROVED and on shift. A profile created by
+// /register or /select-role is INACTIVE until an administrator activates it,
+// so dispatch-facing routes now require the authoritative eligibility read.
+// Going offline stays unguarded on purpose (see setOnlineStatus handler) —
+// a rider must always be able to stop working.
+router.patch("/:assignmentId/accept", authorizeDeliveryPerson, requireRiderOnShift, DeliveryAssignmentController.acceptAssignment);
+router.patch("/:assignmentId/decline", authorizeDeliveryPerson, requireRiderApproved, DeliveryAssignmentController.declineAssignment);
 
 router.get("/my-assignments", authorizeDeliveryPerson, DeliveryAssignmentController.getCurrentAssignments);
-router.get("/offers", authorizeDeliveryPerson, DeliveryAssignmentController.getBroadcastOffers);
-router.patch("/:assignmentId/status", authorizeDeliveryPerson, DeliveryAssignmentController.updateDeliveryStatus);
+router.get("/offers", authorizeDeliveryPerson, requireRiderOnShift, DeliveryAssignmentController.getBroadcastOffers);
+router.patch("/:assignmentId/status", authorizeDeliveryPerson, requireRiderOnShift, DeliveryAssignmentController.updateDeliveryStatus);
 
 // Driver's own live location + online status — previously there was no
 // way to update either after registration at all.
-router.patch("/location", authorizeDeliveryPerson, DeliveryAssignmentController.updateLocation);
+router.patch("/location", authorizeDeliveryPerson, requireRiderOnShift, DeliveryAssignmentController.updateLocation);
+// Going offline is deliberately NOT gated in the router: a suspended or
+// de-activated rider must always be able to stop working. The controller
+// enforces approval only when the caller is trying to go ONLINE.
 router.patch("/online-status", authorizeDeliveryPerson, DeliveryAssignmentController.setOnlineStatus);
 
 router.get("/driver/:driverId/history", authorizeDeliveryPerson, DeliveryAssignmentController.getDriverHistory);

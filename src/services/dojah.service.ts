@@ -6,6 +6,7 @@ import { AuthRequest } from "../middlewares/auth.middleware";
 import { handlePrismaError, resolveOnboardingState } from "../controllers/auth.controller";
 import { evaluateVendorStatus } from "./vendorStatus.service";
 import config from "../config/config";
+import { logger } from "../lib/logger";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VERIFY NIN SERVICE
@@ -176,7 +177,7 @@ export const verifyNINService = async (
     // Phase 1C: a fresh VERIFIED KYC may complete the vendor requirements.
     if (updatedUser.roles.includes("VENDOR")) {
       await evaluateVendorStatus(userId).catch((err) =>
-        console.error("[KYC] evaluateVendorStatus failed:", err?.message ?? err),
+        logger.error({ err, userId }, "KYC evaluateVendorStatus failed"),
       );
     }
 
@@ -194,7 +195,17 @@ export const verifyNINService = async (
   } catch (error: any) {
     // ── DOJAH API ERRORS ────────────────────────
     if (axios.isAxiosError(error)) {
-      console.error("Dojah verification error:", error.response?.data || error.message);
+      // The provider response body can echo the submitted KYC payload, so it
+      // is not logged verbatim. `err` is routed through the shared serializer,
+      // which drops Axios `config` (Authorization header) and `response`.
+      logger.error(
+        {
+          err: error,
+          providerStatus: error.response?.status,
+          providerMessage: typeof error.response?.data?.message === "string" ? error.response.data.message : undefined,
+        },
+        "Dojah verification error",
+      );
 
       const providerMessage = error.response?.data?.error || error.response?.data?.message;
 

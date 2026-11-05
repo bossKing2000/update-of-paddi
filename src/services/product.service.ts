@@ -1,11 +1,18 @@
 import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { redisProducts, redisSearch, redisTotalViews, ShopCartRedis } from "../lib/redis";
+import { scanKeys } from "../lib/redisScan";
 import { CACHE_KEYS, CACHE_TTLS } from "./redisCacheTiming";
 import {
   isVendorOperating,
   isProductCurrentlyAvailable,
 } from "./vendorAvailability.service";
+import {
+  toPublicVendor,
+  type PublicVendor,
+} from "./publicVendor.service";
+import { invalidateProductRatingCaches } from "./clearCaches";
+import { logger } from "../lib/logger";
 import type { EffectivePromotion } from "./promotionPricing.service";
 
 // Catalog sort values accepted by GET /api/product?sortBy=…
@@ -133,6 +140,20 @@ export async function fetchPopularDishTypes(): Promise<PopularDishType[]> {
  * `averageRating`/`reviewCount` columns stay truthful for ranking and
  * `minRating` filtering. Fire-and-forget safe: throws are the caller's
  * choice (controllers await it so listings never serve stale stats).
+ *
+ * CACHE INVALIDATION (B-5)
+ * -----------------------
+ * The stored columns are not the only copy of a product's rating: the
+ * product-detail cache and every catalog-list cache embed the same numbers,
+ * and both live for hours. Refreshing the row therefore also drops the
+ * cached copies, so a new review cannot leave a stale rating visible for
+ * the remaining TTL.
+ *
+ * The invalidation is TARGETED (one product's detail keys plus the
+ * rating-bearing list namespaces) — it never flushes Redis — and it NEVER
+ * throws: a Redis outage must not turn a committed review write into a
+ * failed HTTP response. A failed invalidation is reported through the
+ * structured logger, so the stale-until-TTL window is never silent.
  */
 export async function refreshProductRatingStats(productId: string): Promise<void> {
   const agg = await prisma.productReview.aggregate({
@@ -147,41 +168,49 @@ export async function refreshProductRatingStats(productId: string): Promise<void
       reviewCount: agg._count._all,
     },
   });
+
+  const result = await invalidateProductRatingCaches(productId);
+  if (!result.ok) {
+    logger.warn(
+      { productId, failures: result.failures },
+      "Product rating cache invalidation partially failed — cached rating stats may stay stale until their TTL expires",
+    );
+  }
 }
 
 
 /**
- * Remove product from all user carts caches.
+ * Remove a product from all customer cart cache snapshots.
+ *
+ * Cart snapshots are written by `cartController` to `ShopCartRedis`
+ * (logical DB 5) under `cart:user:<version>:<userId>`; the legacy
+ * unversioned `cart:user:<id>` keys share the same `cart:user:` prefix.
+ * Scanning any other Redis client (previously `redisProducts`) reads the
+ * wrong logical database and leaves real cart snapshots stale.
+ *
+ * Only keys whose serialized snapshot actually contains the product id are
+ * deleted, and no database cart row is touched. This is best-effort: a Redis
+ * failure must never fail an already-completed catalog deletion, and the next
+ * cart read rebuilds from PostgreSQL.
  */
-
 export const clearProductFromCarts = async (productId: string): Promise<void> => {
   try {
-    // 1️⃣ Direct mapping
-    await redisProducts.del(`cart:product:${productId}:users`).catch(() => {});
-
-    // 2️⃣ Scan all cart keys
-    let cursor = "0";
+    const cartKeys = await scanKeys(ShopCartRedis, "cart:user:*");
     const cartKeysToDelete: string[] = [];
 
-    do {
-      // node-redis v5 returns { cursor, keys }
-      const result = await redisProducts.scan(cursor, { MATCH: "cart:*", COUNT: 100 });
-      cursor = result.cursor;
-      const keys = result.keys;
-
-      for (const key of keys) {
-        const value = await redisProducts.get(key).catch(() => "");
-        if (value && value.includes(productId)) {
-          cartKeysToDelete.push(key);
-        }
+    for (const key of cartKeys) {
+      const value = await ShopCartRedis.get(key).catch(() => "");
+      if (value && value.includes(productId)) {
+        cartKeysToDelete.push(key);
       }
-    } while (cursor !== "0");
+    }
 
-if (cartKeysToDelete.length > 0) {
-  await Promise.all(cartKeysToDelete.map((key) => redisProducts.del(key)));
-  console.log(`[CACHE] Cleared ${cartKeysToDelete.length} cart caches containing product ${productId}`);
-}
-
+    if (cartKeysToDelete.length > 0) {
+      await ShopCartRedis.del(cartKeysToDelete);
+      console.log(
+        `[CACHE] Cleared ${cartKeysToDelete.length} cart caches containing product ${productId}`,
+      );
+    }
   } catch (err) {
     console.error(`[CACHE] Error clearing product from carts (${productId}):`, err);
   }
@@ -279,7 +308,13 @@ export interface ProductListItem {
   vendorOperating: boolean;
   /** Marketplace availability (vendor operating + not archived + stock). */
   orderable: boolean;
-  vendor: { id: string; name: string; brandName: string | null; avatarUrl: string | null };
+  /**
+   * Public vendor identity ONLY (never a raw vendor row): the moderation
+   * state and the internal delivery settings are deliberately absent, and
+   * the vendor's operating state is exposed through `vendorOperating`
+   * instead. See src/services/publicVendor.service.ts.
+   */
+  vendor: PublicVendor;
   /**
    * Effective automatic promotion resolved by the canonical promotion
    * resolver (promotionPricing.service). Attached as a post-pass by
@@ -288,6 +323,95 @@ export interface ProductListItem {
    * caller did not resolve promotions.
    */
   promotion?: EffectivePromotion | null;
+}
+
+/**
+ * The row shape every product-card builder consumes.
+ *
+ * Deliberately permissive: the same mapper serves the Prisma list queries
+ * and the raw-SQL search rows, whose column naming differs. Every field is
+ * optional-tolerant so a partially populated row degrades to a safe default
+ * instead of throwing inside a response path.
+ */
+export interface ProductCardRow {
+  id: string;
+  name: string;
+  price: number;
+  dishType?: { id: string; name: string } | null;
+  thumbnail?: string | null;
+  images?: string[] | null;
+  popularityPercent?: number | null;
+  averageRating?: number | null;
+  reviewCount?: number | null;
+  portionLabel?: string | null;
+  trackInventory?: boolean | null;
+  stock?: number | null;
+  archived?: boolean | null;
+  vendor?: {
+    id?: string | null;
+    name?: string | null;
+    brandName?: string | null;
+    brandLogo?: string | null;
+    avatarUrl?: string | null;
+    isLive?: boolean | null;
+    vendorStatus?: string | null;
+    deliveryPreferences?: unknown;
+  } | null;
+}
+
+/**
+ * THE canonical product-card mapper (B-1 / B-3).
+ *
+ * Browse, category browse, search, the home feed rails and the detail
+ * endpoint all derive their customer-facing product fields from here, so the
+ * same card renders identically wherever it is shown.
+ *
+ * Availability is computed from the canonical rules
+ * (src/services/vendorAvailability.service.ts) — a client never re-derives
+ * it — and the vendor is projected through the public projection, so no
+ * internal vendor field can reach an anonymous caller.
+ */
+export function buildProductCard(row: ProductCardRow): ProductListItem {
+  const vendor = row.vendor ?? {};
+  const vendorOperating = isVendorOperating({
+    isLive: vendor.isLive === true,
+    vendorStatus: vendor.vendorStatus ?? null,
+    deliveryPreferences: vendor.deliveryPreferences,
+  });
+  const orderable =
+    vendorOperating &&
+    isProductCurrentlyAvailable({
+      archived: row.archived === true,
+      trackInventory: row.trackInventory === true,
+      stock: row.stock ?? null,
+    });
+
+  const images = Array.isArray(row.images) ? row.images : [];
+  const trackInventory = row.trackInventory === true;
+
+  return {
+    id: row.id,
+    name: row.name,
+    price: row.price,
+    dishType: row.dishType ?? { id: "", name: "" },
+    // Card semantics: the thumbnail when there is one, otherwise the first
+    // image. A customer-facing card shows one picture, not the whole gallery.
+    images: row.thumbnail
+      ? [row.thumbnail]
+      : images.length > 0
+        ? [images[0]]
+        : [],
+    popularityPercent: row.popularityPercent ?? 0,
+    averageRating: row.averageRating ?? 0,
+    reviewCount: row.reviewCount ?? 0,
+    portionLabel: row.portionLabel ?? null,
+    trackInventory,
+    stock: trackInventory ? row.stock ?? null : null,
+    soldOut: trackInventory && (row.stock ?? 0) <= 0,
+    vendorOperating,
+    orderable,
+    vendor: toPublicVendor(vendor),
+  };
 }
 
 /** Active dish types, cached briefly — vendors and discovery read this often. */
@@ -341,6 +465,14 @@ export async function fetchProductPage(opts: {
   take: number;
   dishType?: string;
   vendorId?: string;
+  /** Phase 2 M1: category-scoped browsing (server-resolved Category id). */
+  categoryId?: string;
+  /**
+   * Phase 2 M2: optional tag filter (server-resolved active tag ids).
+   * Any-match semantics: a product qualifies when it carries AT LEAST
+   * ONE of the given tags. Empty/omitted = no tag filtering.
+   */
+  tagIds?: string[];
   /** Marketplace surfaces set this; plain browse (GET /product) does not. */
   vendorMustBeOperating?: boolean;
   /** Catalog sorting: popularity | priceAsc | priceDesc | newest | rating. */
@@ -357,6 +489,8 @@ export async function fetchProductPage(opts: {
     take,
     dishType,
     vendorId,
+    categoryId,
+    tagIds,
     vendorMustBeOperating,
     sortBy,
     minPrice,
@@ -368,6 +502,11 @@ export async function fetchProductPage(opts: {
   const where: Prisma.ProductWhereInput = { archived: false };
   if (dishType) where.dishTypeId = dishType;
   if (vendorId) where.vendorId = vendorId;
+  if (categoryId) where.categoryId = categoryId;
+  if (tagIds && tagIds.length > 0) {
+    // Any-match over the canonical join table — no denormalized copy.
+    where.tags = { some: { tagId: { in: tagIds } } };
+  }
   if (opts.minPrice != null || opts.maxPrice != null) {
     where.price = {
       ...(opts.minPrice != null ? { gte: opts.minPrice } : {}),
@@ -403,25 +542,27 @@ export async function fetchProductPage(opts: {
   }
 
   // Catalog sorting. Default (omitted sortBy) is newest-first.
+  // Every branch ends with the unique id tiebreaker so offset pagination
+  // is deterministic when primary keys tie (identical timestamps/scores).
   let orderBy: Prisma.ProductOrderByWithRelationInput[];
   switch (opts.sortBy) {
     case "popularity":
-      orderBy = [{ popularityScore: "desc" }, { createdAt: "desc" }];
+      orderBy = [{ popularityScore: "desc" }, { createdAt: "desc" }, { id: "asc" }];
       break;
     case "priceAsc":
-      orderBy = [{ price: "asc" }, { createdAt: "desc" }];
+      orderBy = [{ price: "asc" }, { createdAt: "desc" }, { id: "asc" }];
       break;
     case "priceDesc":
-      orderBy = [{ price: "desc" }, { createdAt: "desc" }];
+      orderBy = [{ price: "desc" }, { createdAt: "desc" }, { id: "asc" }];
       break;
     case "rating":
-      orderBy = [{ averageRating: "desc" }, { reviewCount: "desc" }, { createdAt: "desc" }];
+      orderBy = [{ averageRating: "desc" }, { reviewCount: "desc" }, { createdAt: "desc" }, { id: "asc" }];
       break;
     case "newest":
-      orderBy = [{ createdAt: "desc" }];
+      orderBy = [{ createdAt: "desc" }, { id: "asc" }];
       break;
     default:
-      orderBy = [{ createdAt: "desc" }];
+      orderBy = [{ createdAt: "desc" }, { id: "asc" }];
   }
 
   const [dbProducts, total] = await Promise.all([
@@ -445,10 +586,15 @@ export async function fetchProductPage(opts: {
         trackInventory: true,
         stock: true,
         vendor: {
+          // Public identity + the operating signals the availability rules
+          // need. The vendor is projected through toPublicVendor before it
+          // leaves the server, so the moderation state and the internal
+          // delivery settings never reach an anonymous caller (B-1).
           select: {
             id: true,
             name: true,
             brandName: true,
+            brandLogo: true,
             avatarUrl: true,
             isLive: true,
             vendorStatus: true,
@@ -463,36 +609,7 @@ export async function fetchProductPage(opts: {
   // Availability: vendor operating + product available (not archived,
   // in stock). Exposed as `orderable` so discovery clients never
   // recompute availability locally.
-  const products: ProductListItem[] = dbProducts.map((p) => {
-    const vendorOperating = isVendorOperating(p.vendor);
-    const availability = {
-      archived: p.archived,
-      trackInventory: p.trackInventory,
-      stock: p.stock,
-    };
-    const orderable =
-      vendorOperating && isProductCurrentlyAvailable(availability);
-    const soldOut =
-      p.trackInventory === true && (p.stock ?? 0) <= 0;
-
-    return {
-      id: p.id,
-      name: p.name,
-      price: p.price,
-      dishType: p.dishType,
-      images: p.thumbnail ? [p.thumbnail] : p.images.length > 0 ? [p.images[0]] : [],
-      popularityPercent: p.popularityPercent,
-      averageRating: p.averageRating ?? 0,
-      reviewCount: p.reviewCount,
-      portionLabel: p.portionLabel,
-      trackInventory: p.trackInventory,
-      stock: p.trackInventory ? p.stock : null,
-      soldOut,
-      vendorOperating,
-      orderable,
-      vendor: p.vendor,
-    };
-  });
+  const products: ProductListItem[] = dbProducts.map((p) => buildProductCard(p));
 
   return { products, total };
 }
@@ -519,19 +636,20 @@ const productListSelect = {
   thumbnail: true,
   images: true,
   popularityPercent: true,
-  popularityScore: true,
   averageRating: true,
   reviewCount: true,
   portionLabel: true,
   trackInventory: true,
   stock: true,
-  totalViews: true,
   archived: true,
   vendor: {
+    // Public identity + the operating signals the availability rules need.
+    // The row is projected through toPublicVendor before it is served (B-1).
     select: {
       id: true,
       name: true,
       brandName: true,
+      brandLogo: true,
       avatarUrl: true,
       isLive: true,
       vendorStatus: true,
@@ -540,61 +658,38 @@ const productListSelect = {
   },
 } as const;
 
-function toProductListItem(
-  p: {
+/**
+ * Maps a selected product row onto the canonical product card.
+ *
+ * A thin wrapper over the shared `buildProductCard` mapper so the browse,
+ * search and feed surfaces cannot drift apart.
+ */
+function toProductListItem(p: {
+  id: string;
+  name: string;
+  price: number;
+  dishType: { id: string; name: string };
+  thumbnail: string | null;
+  images: string[];
+  popularityPercent: number;
+  averageRating: number | null;
+  reviewCount: number;
+  portionLabel: string | null;
+  archived: boolean;
+  trackInventory: boolean;
+  stock: number | null;
+  vendor: {
     id: string;
     name: string;
-    price: number;
-    dishType: { id: string; name: string };
-    thumbnail: string | null;
-    images: string[];
-    popularityPercent: number;
-    averageRating: number | null;
-    reviewCount: number;
-    portionLabel: string | null;
-    archived: boolean;
-    trackInventory: boolean;
-    stock: number | null;
-    vendor: {
-      id: string;
-      name: string;
-      brandName: string | null;
-      avatarUrl: string | null;
-      isLive: boolean;
-      deliveryPreferences: unknown;
-    };
-  },
-): ProductListItem {
-  const vendorOperating = isVendorOperating(p.vendor);
-  const orderable =
-    vendorOperating &&
-    isProductCurrentlyAvailable({
-      archived: p.archived,
-      trackInventory: p.trackInventory,
-      stock: p.stock,
-    });
-  return {
-    id: p.id,
-    name: p.name,
-    price: p.price,
-    dishType: p.dishType,
-    images: p.thumbnail ? [p.thumbnail] : p.images.length > 0 ? [p.images[0]] : [],
-    popularityPercent: p.popularityPercent,
-    averageRating: p.averageRating ?? 0,
-    reviewCount: p.reviewCount,
-    portionLabel: p.portionLabel,
-    trackInventory: p.trackInventory,
-    stock: p.trackInventory ? p.stock : null,
-    soldOut: p.trackInventory === true && (p.stock ?? 0) <= 0,
-    vendorOperating,
-    orderable,
-    vendor: {
-      id: p.vendor.id,
-      name: p.vendor.name,
-      brandName: p.vendor.brandName,
-      avatarUrl: p.vendor.avatarUrl,
-    },
+    brandName: string | null;
+    brandLogo: string | null;
+    avatarUrl: string | null;
+    isLive: boolean;
+    vendorStatus: string | null;
+    deliveryPreferences: unknown;
   };
+}): ProductListItem {
+  return buildProductCard(p);
 }
 
 export async function fetchMostPopularProducts(opts: {
@@ -615,7 +710,7 @@ export async function fetchMostPopularProducts(opts: {
       where,
       skip,
       take,
-      orderBy: { popularityScore: "desc" },
+      orderBy: [{ popularityScore: "desc" }, { id: "asc" }],
       select: productListSelect,
     }),
     prisma.product.count({ where }),
@@ -637,7 +732,8 @@ export interface NewProductItem {
   archived: boolean;
   vendorOperating: boolean;
   orderable: boolean;
-  vendor: { id: string; name: string; brandName: string | null; avatarUrl: string | null };
+  /** Public vendor identity only (see publicVendor.service). */
+  vendor: PublicVendor;
   /** Effective automatic promotion (see ProductListItem.promotion). */
   promotion?: EffectivePromotion | null;
 }
@@ -663,7 +759,7 @@ export async function fetchLiveProducts(opts: {
     prisma.product.findMany({
       where,
       take,
-      orderBy: [{ popularityScore: "desc" }, { createdAt: "desc" }],
+      orderBy: [{ popularityScore: "desc" }, { createdAt: "desc" }, { id: "asc" }],
       select: productListSelect,
     }),
     prisma.product.count({ where }),
@@ -674,18 +770,29 @@ export async function fetchLiveProducts(opts: {
 
 export async function fetchNewProducts(opts: {
   take: number;
+  /** Offset for the paginated "new" rail (B-4). Defaults to 0. */
+  skip?: number;
   dishType?: string;
 }): Promise<{ items: NewProductItem[]; total: number }> {
-  const { take, dishType } = opts;
+  const { take, skip = 0, dishType } = opts;
 
-  const where: Prisma.ProductWhereInput = { archived: false, isNew: true };
+  // Phase 2 M4: the "new" rail never shows ineligible vendors
+  // ("listings are paused"). Status-only on purpose: a temporarily
+  // offline ACTIVE vendor's new dishes stay discoverable with
+  // orderable=false, matching browse semantics.
+  const where: Prisma.ProductWhereInput = {
+    archived: false,
+    isNew: true,
+    vendor: { vendorStatus: "ACTIVE" },
+  };
   if (dishType) where.dishTypeId = dishType;
 
-const [dbProducts, total] = await Promise.all([
+  const [dbProducts, total] = await Promise.all([
     prisma.product.findMany({
       where,
+      skip,
       take,
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }],
       select: {
         ...productListSelect,
         isNew: true,

@@ -177,25 +177,26 @@ export const createTransferRecipient = async ({
 };
 
 export interface InitiateTransferInput {
-  amountNaira: number;
+  // Integer kobo (Phase 3A). Paystack expects the transfer amount in kobo;
+  // this function sends it to Paystack unchanged — no * 100.
+  amountKobo: number;
   recipientCode: string;
   reason: string;
   reference: string; // our own idempotency reference
 }
 
 export const initiateTransfer = async ({
-  amountNaira,
+  amountKobo,
   recipientCode,
   reason,
   reference,
 }: InitiateTransferInput) => {
-  if (!Number.isFinite(amountNaira) || amountNaira <= 0) {
+  if (!Number.isFinite(amountKobo) || amountKobo <= 0) {
     throw new UpstreamServiceError(
       "Paystack",
       "Payout amount must be greater than zero",
     );
   }
-  const amountKobo = Math.round(amountNaira * 100);
   if (!Number.isSafeInteger(amountKobo) || amountKobo <= 0) {
     throw new UpstreamServiceError(
       "Paystack",

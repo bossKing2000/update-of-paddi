@@ -28,7 +28,10 @@
  *      the production module used to throw.
  *   2. Validate the candidate with the UNCHANGED gate, while the remembered
  *      value is still in place, so the denylist comparison is truthful.
- *   3. Assign the validated URL.
+ *   3. Assign the validated URL, with ONLY its database pathname removed so
+ *      each client's own `database` option selects the intended logical
+ *      database (see `withoutDatabasePath` below). Scheme, host and port are
+ *      unchanged; every guard in step 2 already ran against the full value.
  *   4. Evaluate `src/lib/redis` NOW, while the value is set, so the production
  *      client is constructed against the disposable endpoint.
  *   5. Restore `REDIS_URL` to its original state.
@@ -60,6 +63,46 @@
  */
 import { evaluateDisposableRedisTarget } from "../helpers/localRedisTarget";
 
+/**
+ * Strip ONLY the database pathname from an ALREADY-VALIDATED URL.
+ *
+ * WHY (Task 7.40, root cause proven empirically in Task 7.39)
+ * -------------------------------------------------------
+ * `node-redis` gives a database path in the URL PRECEDENCE over the explicit
+ * `database` option. Verified against the installed version: a client built as
+ * `{ url: "redis://127.0.0.1:6399/9", database: 3 }` writes to database 9.
+ *
+ * `src/lib/redis.ts` builds every client as `createClient({ url: process.env.REDIS_URL, database: db })`
+ * with per-feature indices (`redisUsersSessions` = 4, `ShopCartRedis` = 5,
+ * `redisPayments` = 6). Publishing the validated `/15` therefore silently
+ * dropped EVERY application client onto the OTP suite's database, so a suite
+ * that mixes a production client with its own inspector client
+ * (`webhookHandlerClaimRedis`, handler on the OTP database, inspector on
+ * WEBHOOK_TEST_REDIS_URL's) addressed two different logical databases and failed
+ * three tests.
+ *
+ * Removing the path lets each client's own `database` option select its intended
+ * database, which is both correct and production-faithful.
+ *
+ * WHAT IS NOT TOUCHED
+ * ------------------
+ * The gate above already ran, UNCHANGED, against the COMPLETE candidate — so the
+ * loopback-host rule, the plain-`redis:` scheme rule, the "database index must
+ * be >= 1" rule, and the host+port separation from the ambient application
+ * endpoint all still apply to the full value. This helper is applied strictly
+ * AFTER a successful validation and cannot rescue a refused candidate.
+ *
+ * Scheme, host and port are carried through unchanged by `URL`, and any
+ * userinfo is preserved; nothing is re-parsed, re-resolved, defaulted or
+ * logged. With the pathname empty, `URL.toString()` yields the `redis://host:port/`
+ * form, which was verified to honour the explicit `database` option.
+ */
+function withoutDatabasePath(validatedUrl: string): string {
+  const parsed = new URL(validatedUrl);
+  parsed.pathname = "";
+  return parsed.toString();
+}
+
 // 1. Remember the genuine application endpoint before touching anything.
 const originalRedisUrl = process.env.REDIS_URL;
 
@@ -76,8 +119,11 @@ if (!result.ok) {
   );
 }
 
-// 3. Publish the exact validated value — no reconstruction, no defaults.
-process.env.REDIS_URL = result.url;
+// 3. Publish the validated scheme/host/port with the database pathname removed
+//    (see `withoutDatabasePath`). Every guard above has already run against the
+//    complete candidate; this changes which LOGICAL database the clients select,
+//    never WHICH SERVER they connect to.
+process.env.REDIS_URL = withoutDatabasePath(result.url);
 
 // 4. Evaluate the production module now, so its client is built against the
 //    disposable endpoint while the value is available. It is cached from here on.

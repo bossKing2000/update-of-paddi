@@ -8,7 +8,7 @@
  * into a base and a distance component and credits the wallet:
  *
  *     totalEarned = order.deliveryFee
- *     baseFee     = min(DELIVERY_BASE_FEE || 300, totalEarned)
+ *     baseFee     = min(DELIVERY_BASE_FEE || 30000, totalEarned)
  *     distanceFee = max(totalEarned - baseFee, 0)
  *     walletBalance += totalEarned
  *     totalDeliveries += 1
@@ -31,9 +31,9 @@
  * changes, that test fails and this copy must be updated in the same change.
  */
 
-/** Mirrors `Number(process.env.DELIVERY_BASE_FEE) || 300` in production. */
+/** Mirrors `Number(process.env.DELIVERY_BASE_FEE) || 30000` in production. */
 export function deliveryBaseFee(env: NodeJS.ProcessEnv = process.env): number {
-  return Number(env.DELIVERY_BASE_FEE) || 300;
+  return Number(env.DELIVERY_BASE_FEE) || 30000;
 }
 
 export interface DeliveryEarningAmounts {

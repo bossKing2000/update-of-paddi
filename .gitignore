@@ -29,6 +29,11 @@ Thumbs.db
 *.db
 *.sqlite
 
+# Generated receipt PDFs — runtime artifacts, never source.
+# `generateReceipt` writes these at request time; they are served from disk
+# by the receipt endpoint and are never part of the repository.
+receipts/
+
 # Temporary files
 *.tmp
 *.swp

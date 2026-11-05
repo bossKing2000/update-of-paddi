@@ -8,6 +8,7 @@ import { sendSuccess } from "../utils/apiResponse";
 import { ValidationError } from "../errors/AppError";
 import { createAuditLog } from "../utils/auditLog.service";
 import { encrypt, decrypt } from "../utils/encrypt";
+import { assertVendorNotSuspended } from "../services/vendorStatus.service";
 
 // GET /vendor/payouts
 export const getPayoutSummary = async (req: AuthRequest, res: Response) => {
@@ -65,6 +66,21 @@ export const setBankDetails = async (req: AuthRequest, res: Response) => {
       parsed.error.flatten().fieldErrors,
     );
   const { bankName, bankCode, bankAccountNumber } = parsed.data;
+
+  // Batch 1D.41: a SUSPENDED vendor must not be able to rewrite the account
+  // money is transferred to. The route's `authorizeVendor` cannot catch this
+  // — it reads only the signed `role` claim, never `vendorStatus` — so the
+  // check lives here, on the authoritative mutation boundary.
+  //
+  // Deliberately placed BEFORE resolveBankAccount: a rejected request must
+  // make no external call to the payout provider as well as no write.
+  // Ownership is unchanged and still implicit — the update is keyed on
+  // req.user.id, so there is no vendorId to point at another account.
+  const vendor = await prisma.user.findUnique({
+    where: { id: req.user!.id },
+    select: { vendorStatus: true },
+  });
+  assertVendorNotSuspended(vendor?.vendorStatus ?? null);
 
   // Verified with Paystack BEFORE saving — catches a mistyped account
   // number immediately (with a clear error) instead of only discovering

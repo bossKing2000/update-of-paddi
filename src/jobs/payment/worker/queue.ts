@@ -2,6 +2,7 @@ import prisma from "../../../lib/prisma";
 import { verifyPayment } from "../../../services/paymentService";
 import { finalizePaymentSuccess } from "../../../services/paymentFinalizer.service";
 import { PaymentStatus } from "@prisma/client";
+import { logger } from "../../../lib/logger";
 
 type PaystackWebhookPayload = {
   event: string;
@@ -69,7 +70,7 @@ export async function processWebhooks() {
         if (data.status === "success") {
           await finalizePaymentSuccess({
             reference: data.reference,
-            amountInNaira: data.amount / 100,
+            amountKobo: data.amount, // integer kobo from Paystack (Phase 3A)
             customerIdFromGateway: data.metadata?.userId,
             channel: data.channel,
             paystackData: data,
@@ -77,7 +78,7 @@ export async function processWebhooks() {
           });
         }
       } catch (err) {
-        console.error("[WEBHOOK] Paystack verify failed:", err);
+        logger.error({ err, eventId: evt.id, reference: payload.data.reference }, "Paystack verify failed for queued webhook");
         await prisma.webhookEvent.update({
           where: { id: evt.id },
           data: { status: "failed" },
@@ -91,7 +92,7 @@ export async function processWebhooks() {
         data: { status: "done", processedAt: new Date() },
       });
     } catch (err: any) {
-      console.error("[WEBHOOK] Processing error:", err.message || err);
+      logger.error({ err, eventId: evt.id }, "Queued webhook processing error");
       await prisma.webhookEvent.update({
         where: { id: evt.id },
         data: { status: "failed" },

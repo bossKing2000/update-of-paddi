@@ -51,6 +51,21 @@ export interface CartVendorBreakdown {
   final: number;
 }
 
+export type UnavailableLegacyOptionReason = "INACTIVE" | "MISSING";
+
+/**
+ * A legacy ProductOption selection that can no longer be purchased. The
+ * stored CartItemOption row is intentionally left untouched so the customer
+ * can identify and remove the stale selection.
+ */
+export interface UnavailableLegacyOption {
+  cartItemId: string;
+  cartItemOptionId: string;
+  productOptionId: string;
+  name: string;
+  reason: UnavailableLegacyOptionReason;
+}
+
 export interface CartSummaryResult {
   subtotal: number;
   discount: number;
@@ -65,8 +80,19 @@ export interface CartSummaryResult {
   /** Live items excluded because their vendor hasn't gone live / schedule
    * window hasn't opened yet — these stay in the cart but can't check out. */
   excludedOfflineItemCount: number;
+  /** Legacy ProductOption selections that are inactive or missing. Their
+   * cart lines are excluded from priced totals because checkout rejects them
+   * and their stored unit price cannot be safely repaired here. */
+  unavailableLegacyOptions: UnavailableLegacyOption[];
   warnings: string[];
 }
+
+type StoredCartOption = {
+  id: string;
+  name: string;
+  productOptionId: string | null;
+  productOption?: { isActive: boolean } | null;
+};
 
 const round = (v: number) => Number(v.toFixed(2));
 
@@ -81,7 +107,11 @@ export const cartSummaryService = async ({
       items: {
         include: {
           product: { include: { vendor: true } },
-          options: true,
+          options: {
+            include: {
+              productOption: { select: { isActive: true } },
+            },
+          },
         },
       },
     },
@@ -97,6 +127,7 @@ export const cartSummaryService = async ({
     promo: { code: null, applied: false, promoId: null, meta: { reason: "Cart is empty" } },
     vendorBreakdown: [],
     excludedOfflineItemCount: 0,
+    unavailableLegacyOptions: [],
     warnings: [],
   };
 
@@ -107,7 +138,7 @@ export const cartSummaryService = async ({
   // (vendor live + accepting orders AND product not archived + in stock),
   // so the total shown here always matches what checkout will actually
   // charge.
-  const purchasableItems = cart.items.filter((item) => {
+  const marketplaceAvailableItems = cart.items.filter((item) => {
     const product = item.product;
     if (product.archived) return false;
     const vendorOperating = isVendorOperating(item.product.vendor as {
@@ -125,10 +156,46 @@ export const cartSummaryService = async ({
     );
   });
 
-  const excludedOfflineItemCount = cart.items.length - purchasableItems.length;
+  // Legacy ProductOption selections are validated against current option
+  // activity at checkout. The summary cannot safely patch the stored unit
+  // price for a stale selection because quantity-only updates may already
+  // have removed its surcharge, so the entire affected line is excluded from
+  // pricing and surfaced separately for the customer to remove.
+  const unavailableLegacyOptions: UnavailableLegacyOption[] = [];
+  const staleLegacyItemIds = new Set<string>();
+
+  for (const item of cart.items) {
+    for (const option of ((item.options ?? []) as StoredCartOption[])) {
+      if (!option.productOptionId) continue;
+      if (option.productOption?.isActive === true) continue;
+
+      unavailableLegacyOptions.push({
+        cartItemId: item.id,
+        cartItemOptionId: option.id,
+        productOptionId: option.productOptionId,
+        name: option.name,
+        reason: option.productOption ? "INACTIVE" : "MISSING",
+      });
+      staleLegacyItemIds.add(item.id);
+    }
+  }
+
+  const staleOptionNames = [...new Set(unavailableLegacyOptions.map((option) => option.name))];
+  const unavailableLegacyWarnings = staleOptionNames.length > 0
+    ? [`Some selected extras are no longer available: ${staleOptionNames.join(", ")}. Remove them from your cart to continue.`]
+    : [];
+
+  const purchasableItems = marketplaceAvailableItems.filter((item) => !staleLegacyItemIds.has(item.id));
+  const excludedOfflineItemCount = cart.items.length - marketplaceAvailableItems.length;
 
   if (purchasableItems.length === 0) {
-    return { ...empty, excludedOfflineItemCount, promo: { ...empty.promo, meta: { reason: "No purchasable items" } } };
+    return {
+      ...empty,
+      excludedOfflineItemCount,
+      unavailableLegacyOptions,
+      warnings: unavailableLegacyWarnings,
+      promo: { ...empty.promo, meta: { reason: "No purchasable items" } },
+    };
   }
 
   // Automatic product promotions (canonical resolver): the same effective
@@ -188,7 +255,7 @@ export const cartSummaryService = async ({
     string,
     { fee: number; distanceKm: number | null; withinRange: boolean; freeDelivery: boolean }
   > = {};
-  const warnings: string[] = [];
+  const warnings: string[] = [...unavailableLegacyWarnings];
 
   if (addressId) {
     const vendorIds = Object.keys(grouped);
@@ -328,6 +395,7 @@ export const cartSummaryService = async ({
     },
     vendorBreakdown,
     excludedOfflineItemCount,
+    unavailableLegacyOptions,
     warnings,
   };
 };

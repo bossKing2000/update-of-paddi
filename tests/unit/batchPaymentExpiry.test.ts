@@ -89,6 +89,9 @@ beforeEach(() => {
     typeof arg === "function" ? arg(db) : arg,
   );
   db.payment.update.mockResolvedValue({});
+  // P3.2-02: expiry is a conditional transition — only a still-pending
+  // payment may become EXPIRED.
+  db.payment.updateMany.mockResolvedValue({ count: 1 });
   db.order.findMany.mockResolvedValue([{ id: "order-A" }]);
   db.order.updateMany.mockResolvedValue({ count: 3 });
   mockedVerify.mockResolvedValue({ status: "failed" });
@@ -99,8 +102,8 @@ describe("N-04 — batch payment expiry", () => {
     queuePayments([expiredCandidate({ idempotencyKey: null })]);
     await verifyPendingPayments(10);
 
-    expect(db.payment.update).toHaveBeenCalledWith({
-      where: { id: "pay-1" },
+    expect(db.payment.updateMany).toHaveBeenCalledWith({
+      where: { id: "pay-1", status: { in: ["PENDING", "INITIATED"] } },
       data: { status: "EXPIRED" },
     });
     // No batch key -> the pre-existing primary-order fallback is preserved.
@@ -132,8 +135,11 @@ describe("N-04 — batch payment expiry", () => {
       status: { in: ["AWAITING_PAYMENT", "PENDING"] },
     });
     expect(orderSelectionCall().where.id).toBeUndefined();
-    expect(db.payment.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { status: "EXPIRED" } }),
+    expect(db.payment.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "pay-1", status: { in: ["PENDING", "INITIATED"] } },
+        data: { status: "EXPIRED" },
+      }),
     );
   });
 
@@ -202,7 +208,7 @@ describe("N-04 — batch payment expiry", () => {
     expect(db.$transaction).toHaveBeenCalledTimes(1);
     const arg = db.$transaction.mock.calls[0][0];
     expect(typeof arg).toBe("function");
-    expect(db.payment.update).toHaveBeenCalledTimes(1);
+    expect(db.payment.updateMany).toHaveBeenCalledTimes(1);
     expect(db.order.findMany).toHaveBeenCalledTimes(1);
   });
 

@@ -72,8 +72,8 @@ const paystackPost = (paystack as unknown as { post: jest.Mock }).post;
 
 const WITHDRAWAL_ID = "11111111-1111-1111-1111-111111111111";
 const REFERENCE = `rider_withdrawal_${WITHDRAWAL_ID}`;
-const AMOUNT = 5000;
-const KOBO = AMOUNT * 100;
+const AMOUNT = 500000; // integer kobo (₦5,000), matching withdrawal.amount (Phase 3A)
+const KOBO = AMOUNT; // Paystack reports integer kobo; no * 100 needed
 
 function processingWithdrawal(overrides: Record<string, unknown> = {}) {
   return {

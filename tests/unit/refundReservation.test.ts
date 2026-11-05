@@ -75,10 +75,19 @@ describe("admin.controller.ts — refund submission ordering and retry safety (s
   it("writes the durable PROCESSING RefundRequest inside the SAME transaction as the reservation, before ever calling Paystack (FIX 2)", () => {
     const txIdx = source.indexOf('await tx.$queryRaw`SELECT id FROM "Payment"');
     const processingWriteIdx = source.indexOf("status: RefundStatus.PROCESSING,", txIdx);
-    const paystackCallIdx = source.indexOf("refundPaymentViaPaystack(refundRequest.paymentRef, requestedKobo)");
+    const paystackCallIdx = source.indexOf("refundPaymentViaPaystack(refundRequest.paymentRef, reservedKobo)");
     expect(txIdx).toBeGreaterThan(-1);
     expect(processingWriteIdx).toBeGreaterThan(txIdx);
+    expect(paystackCallIdx).toBeGreaterThan(-1);
     expect(processingWriteIdx).toBeLessThan(paystackCallIdx);
+  });
+
+  it("submits the RESERVED amount to Paystack, never the raw explicit input (Phase 3.0.1)", () => {
+    // The ledger reserves `requestedKobo ?? stored ?? remaining` and persists
+    // it as requestedAmountKobo; the Paystack call must carry that same
+    // reserved figure so an omitted admin amount cannot become a full refund.
+    expect(source).toContain("refundPaymentViaPaystack(refundRequest.paymentRef, reservedKobo)");
+    expect(source).not.toContain("refundPaymentViaPaystack(refundRequest.paymentRef, requestedKobo)");
   });
 
   it("classifies the submit error instead of unconditionally releasing the reservation", () => {

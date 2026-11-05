@@ -23,6 +23,13 @@ if (!process.env.OPENSEARCH_NODE)
 if (!process.env.ENCRYPTION_KEY || Buffer.from(process.env.ENCRYPTION_KEY).length !== 32)
   throw new Error("Missing or invalid environment variable: ENCRYPTION_KEY (must be exactly 32 characters)");
 
+// Phone OTP HMAC secret (see src/services/phoneOtp.service.ts). Production
+// refuses to boot without it rather than signing OTP digests with a
+// fallback; dev/test may run without it until the OTP API layer (1D.3)
+// needs it, and the service itself throws fail-closed on every use.
+if (process.env.NODE_ENV === "production" && !process.env.PHONE_OTP_SECRET)
+  throw new Error("Missing environment variable: PHONE_OTP_SECRET");
+
 export default {
   port: process.env.PORT ? Number(process.env.PORT) : 5000,
 
@@ -31,6 +38,8 @@ export default {
 
   jwtSecret: process.env.JWT_SECRET!,
   jwtResetSecret: process.env.JWT_RESET_SECRET!,
+
+  phoneOtpSecret: process.env.PHONE_OTP_SECRET,
 
   bcryptSaltRounds: Number(process.env.BCRYPT_SALT_ROUNDS) || 10,
 

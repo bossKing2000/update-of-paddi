@@ -4,6 +4,7 @@ import { OrderStatus } from "@prisma/client";
 import prisma from "../../config/prismaClient";
 import { logger } from "../../lib/logger";
 import { restoreStockForOrders } from "../../services/inventory.service";
+import { clearProductCache } from "../../services/clearCaches";
 
 /**
  * 🧹 Automatically cancels expired or offline orders in batches
@@ -106,30 +107,73 @@ export const runOrderCleanupJob = async (batchSize = 1000) => {
 
           const offline = productOffline || vendorOffline;
           if (!latestPayment || (offline && paymentExpired)) {
-            // Atomic: only cancel if still AWAITING_PAYMENT and no SUCCESS payment inserted concurrently
-            const updated = await prisma.order.updateMany({
-              where: {
-                id: order.id,
-                status: OrderStatus.AWAITING_PAYMENT,
-                payments: { none: { status: "SUCCESS" as any } },
-              },
-              data: {
-                status: OrderStatus.CANCELLED,
-                cancelledAt: now,
-                cancellationReason: productOffline
-                  ? "PRODUCT_WENT_OFFLINE_BEFORE_PAYMENT"
-                  : vendorOffline
-                    ? "VENDOR_WENT_OFFLINE_BEFORE_PAYMENT"
-                    : "PAYMENT_EXPIRED",
-                paymentStatus: "FAILED",
-              },
-            });
-            if (updated.count > 0) {
-              offlineUpdated++;
-              // Release the checkout-time stock reservation (see
-              // expireAwaitingPaymentJob — same winner-takes-restore rule).
-              await restoreStockForOrders(prisma, [order.id]).catch((err) =>
-                logger.error({ err, orderId: order.id }, "Failed to restore stock for cleaned-up order"),
+            // Cancellation and stock restoration commit TOGETHER — see the
+            // matching comment in expireAwaitingPaymentJob. Previously the CAS
+            // ran on the root client and the restore was fire-and-forget, so a
+            // failed restore left an order that had already left AWAITING_PAYMENT
+            // with no durable record that a restoration was owed.
+            let cancelled = false;
+            let cancelledProductIds: string[] = [];
+            try {
+              await prisma.$transaction(async (tx) => {
+                // Atomic: only cancel if still AWAITING_PAYMENT and no SUCCESS
+                // payment was inserted concurrently.
+                const updated = await tx.order.updateMany({
+                  where: {
+                    id: order.id,
+                    status: OrderStatus.AWAITING_PAYMENT,
+                    payments: { none: { status: "SUCCESS" as any } },
+                  },
+                  data: {
+                    status: OrderStatus.CANCELLED,
+                    cancelledAt: now,
+                    cancellationReason: productOffline
+                      ? "PRODUCT_WENT_OFFLINE_BEFORE_PAYMENT"
+                      : vendorOffline
+                        ? "VENDOR_WENT_OFFLINE_BEFORE_PAYMENT"
+                        : "PAYMENT_EXPIRED",
+                    paymentStatus: "FAILED",
+                  },
+                });
+                if (updated.count === 0) return;
+
+                cancelled = true;
+                offlineUpdated++;
+                // Winner of this CAS owns the reservation release.
+                cancelledProductIds = await restoreStockForOrders(tx, [order.id]);
+              });
+            } catch (err) {
+              // Rolled back: the order remains AWAITING_PAYMENT and the next run
+              // retries it. Identifiers only, no secrets.
+              logger.error(
+                { err, orderId: order.id },
+                "Failed to clean up order and restore its stock reservation; will retry",
+              );
+              cancelled = false;
+            }
+
+            if (cancelled) {
+              // Post-commit: the restored portions are purchasable again, so
+              // sweep the cached rows. Best-effort — a failure only costs
+              // display staleness and must not touch the committed restore.
+              await Promise.all(
+                [...new Set(cancelledProductIds)].map((productId) =>
+                  clearProductCache(productId)
+                    .then((result) => {
+                      if (result && !result.ok) {
+                        logger.warn(
+                          { productId, orderId: order.id, failures: result.failures },
+                          "Product cache invalidation incomplete after cleanup stock restore",
+                        );
+                      }
+                    })
+                    .catch((err) => {
+                      logger.warn(
+                        { err, productId, orderId: order.id },
+                        "Product cache invalidation threw unexpectedly after cleanup stock restore",
+                      );
+                    }),
+                ),
               );
               await prisma.auditLog
                 .create({

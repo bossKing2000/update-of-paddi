@@ -2,6 +2,7 @@ import { Response } from "express";
 import { z } from "zod";
 import axios from "axios";
 import { initializePayment, verifyPayment } from "../services/paymentService";
+import { resolveRefundOrderId } from "../services/orderSnapshot.service";
 import { finalizePaymentSuccess } from "../services/paymentFinalizer.service";
 import { createAuditLog } from "../utils/auditLog.service";
 import prisma from "../lib/prisma";
@@ -13,6 +14,7 @@ import {
   PaymentStatus,
   ActivityType,
   RefundStatus,
+  Prisma,
 } from "@prisma/client";
 import { recordActivityBundle } from "../utils/activityUtils";
 import { assertVendorAvailableForOrdering } from "../services/vendorAvailability.service";
@@ -29,7 +31,7 @@ import { ensureString } from "../utils/paramUtils";
 import { nowUtc, toUtc, addMinutesUtc, isBeforeUtc } from "../utils/time";
 import { logger } from "../lib/logger";
 import { redisPayments } from "../lib/redis";
-import { acquireLock, releaseLock } from "../lib/redisLock";
+import { acquireLock, releaseLock, PAYMENT_LOCK_COMMAND_TIMEOUT_MS } from "../lib/redisLock";
 import { SUPPORTED_CHANNELS } from "../services/paymentService";
 
 // Single source — paymentService is authority for allowed channels.
@@ -49,6 +51,26 @@ export const startPaymentSchema = z.object({
  * they're all eligible for payment together — one Paystack transaction
  * covers the whole batch.
  */
+
+// Stage F (E-02): shared active-payment lookup backing the P2002
+// race-loser path. Matches the pre-charge reuse lookups exactly:
+// newest PENDING/INITIATED row for this (user, key).
+async function findActivePayment(userId: string, idempotencyKey: string) {
+  return prisma.payment.findFirst({
+    where: {
+      idempotencyKey,
+      userId,
+      status: { in: [PaymentStatus.PENDING, PaymentStatus.INITIATED] },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+function isUniqueConflict(err: unknown): boolean {
+  return (
+    err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002"
+  );
+}
 async function getPayableOrderBatch(idempotencyKey: string, userId: string) {
   const orders = await prisma.order.findMany({
     where: { idempotencyKey, customerId: userId },
@@ -146,12 +168,13 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
   const now = nowUtc();
   const paymentWindowMinutes = 15;
   const finalPaymentExpiresAt = addMinutesUtc(now, paymentWindowMinutes);
-  const totalAmount = orders.reduce((sum, o) => sum + o.totalPrice, 0);
+  const totalAmount = orders.reduce((sum, o) => sum + o.totalPrice, 0); // integer kobo (Phase 3A)
 
   if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
     throw new ValidationError("Invalid order amount", { totalAmount });
   }
-  if (totalAmount * 100 < 100) {
+  // totalAmount is already integer kobo; Paystack's minimum is ₦1.00 = 100 kobo.
+  if (totalAmount < 100) {
     throw new ValidationError("Amount too small for Paystack (minimum ₦1.00)");
   }
 
@@ -229,7 +252,9 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
   // in `finally`, and NX means a crash before release just costs the
   // next request a short wait for the TTL rather than corrupting state.
   const initLockKey = `payment:init:${userId}:${idempotencyKey}`;
-  const lock = await acquireLock(redisPayments, initLockKey, 20);
+  const lock = await acquireLock(redisPayments, initLockKey, 20, {
+    timeoutMs: PAYMENT_LOCK_COMMAND_TIMEOUT_MS,
+  });
   if (lock === null) {
     // Someone else is mid-initialization for this exact batch right now.
     // Don't create a competing Paystack transaction — surface a
@@ -285,7 +310,7 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
     });
 
     const basePaymentData = {
-      amount: Math.round(totalAmount * 100), // kobo
+      amount: totalAmount, // integer kobo (Phase 3A) — Paystack expects kobo
       status: PaymentStatus.PENDING,
       startedAt: now,
       expiresAt: finalPaymentExpiresAt,
@@ -365,16 +390,43 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
         channels,
       } as any);
     }
-    await prisma.payment.create({
-      data: {
-        ...basePaymentData,
-        reference: paymentInit.reference,
-        paystackData: {
-          authorization_url: paymentInit.authorization_url,
-          access_code: (paymentInit as any).access_code,
-        } as any,
-      },
-    });
+    // Stage F (E-02): the partial unique backstop
+    // (Payment_userId_idempotencyKey_active_key) turns a lost lookup race
+    // into P2002 instead of a duplicate row. Reread the winner and reuse
+    // it — never initialize Paystack twice, never create a second row.
+    try {
+      await prisma.payment.create({
+        data: {
+          ...basePaymentData,
+          reference: paymentInit.reference,
+          paystackData: {
+            authorization_url: paymentInit.authorization_url,
+            access_code: (paymentInit as any).access_code,
+          } as any,
+        },
+      });
+    } catch (err) {
+      if (!isUniqueConflict(err)) throw err;
+      const winner = await findActivePayment(userId, idempotencyKey);
+      if (!winner || !winner.expiresAt) throw err;
+      const winnerUrl = (winner.paystackData as any)
+        ?.authorization_url as string | undefined;
+      logger.info(
+        { idempotencyKey, winnerReference: winner.reference },
+        "Payment create raced on active backstop; reusing winner",
+      );
+      return sendCreated(
+        res,
+        {
+          paymentUrl:
+            winnerUrl || `https://checkout.paystack.com/${winner.reference}`,
+          reference: winner.reference,
+          startedAt: (winner.startedAt || winner.createdAt).toISOString(),
+          expiresAt: winner.expiresAt.toISOString(),
+        },
+        "Payment already initialized",
+      );
+    }
 
     return sendCreated(
       res,
@@ -387,7 +439,9 @@ export const initiateOrderPayment = async (req: AuthRequest, res: Response) => {
       "Payment initialized successfully",
     );
   } finally {
-    const released = await releaseLock(redisPayments, lock);
+    const released = await releaseLock(redisPayments, lock, {
+      timeoutMs: PAYMENT_LOCK_COMMAND_TIMEOUT_MS,
+    });
     if (!released) {
       logger.warn(
         { initLockKey },
@@ -424,18 +478,32 @@ export const confirmPayment = async (req: AuthRequest, res: Response) => {
 
   const result = await finalizePaymentSuccess({
     reference,
-    amountInNaira: paymentData.amount / 100,
+    amountKobo: paymentData.amount, // integer kobo from Paystack (Phase 3A)
+    currency: paymentData.currency,
     customerIdFromGateway: paymentData.metadata?.userId,
     channel: paymentData.channel,
     paystackData: paymentData,
     authorization: paymentData.authorization,
   });
 
-  if (result.outcome === "SUCCESS" || result.outcome === "ALREADY_PROCESSED") {
+  if (
+    result.outcome === "SUCCESS" ||
+    result.outcome === "ALREADY_PROCESSED" ||
+    result.outcome === "SUCCESS_REFUND_PENDING"
+  ) {
+    // Phase 3.2.6 (F-A3): the charge is real and captured, but one or more
+    // orders were already cancelled, so a refund request was filed for them
+    // instead of confirming fulfilment. The customer is told their money is
+    // being returned rather than that the order is confirmed.
     return sendSuccess(
       res,
-      { orders: result.orders },
-      "Payment verified and order(s) confirmed",
+      {
+        orders: result.orders,
+        refundPendingOrderIds: result.refundPendingOrderIds ?? [],
+      },
+      result.outcome === "SUCCESS_REFUND_PENDING"
+        ? "Payment received. This order was already cancelled, so a refund has been requested."
+        : "Payment verified and order(s) confirmed",
     );
   }
 
@@ -445,6 +513,11 @@ export const confirmPayment = async (req: AuthRequest, res: Response) => {
     CUSTOMER_MISMATCH: "This payment doesn't belong to your account.",
     LATE_PAYMENT:
       "This payment arrived after the order's payment window expired.",
+    // FIN-07-02: the charge is real but the order can no longer be fulfilled.
+    // The obligation is filed and waits for administrative approval; saying so
+    // is more honest than the generic fallback below.
+    LATE_CAPTURE_REFUND_FILED:
+      "This payment arrived after the order expired, so a refund has been requested.",
     LOCKED:
       "This payment is already being processed — please check back in a moment.",
     PAYMENT_NOT_FOUND: "Payment not found.",
@@ -533,31 +606,92 @@ export const getAllPaymentsForUser = async (
 // POST /api/payments/refund
 export const requestRefund = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
-  const { reference, reason } = req.body as {
+  const { reference, reason, requestedAmountKobo } = req.body as {
     reference?: string;
     reason?: string;
+    requestedAmountKobo?: number | null;
   };
   if (!reference || !reason)
     throw new ValidationError("reference and reason are required");
+
+  // Validate an explicitly-supplied partial refund amount before it ever
+  // reaches the database. Null/undefined means "full remaining balance"
+  // (the documented customer self-service default) and is resolved to a
+  // concrete kobo value at admin-approval time. A supplied amount must be
+  // a finite, strictly-positive integer kobo — zero or negative has no
+  // meaning as a customer refund request, and non-integers would silently
+  // corrupt the kobo ledger.
+  let validatedKobo: number | null = null;
+  if (requestedAmountKobo !== undefined && requestedAmountKobo !== null) {
+    if (
+      typeof requestedAmountKobo !== "number" ||
+      !Number.isFinite(requestedAmountKobo) ||
+      !Number.isInteger(requestedAmountKobo) ||
+      requestedAmountKobo < 1
+    ) {
+      throw new ValidationError("requestedAmountKobo must be a positive integer in kobo");
+    }
+    validatedKobo = requestedAmountKobo;
+  }
 
   const payment = await prisma.payment.findUnique({ where: { reference } });
   if (!payment || payment.userId !== userId) throw new NotFoundError("Payment");
   if (payment.status !== PaymentStatus.SUCCESS)
     throw new ValidationError("Only successful payments can be refunded");
 
+  // Batch G: recoverability. A prior request blocks a new one only while
+  // it can still move money (PENDING/APPROVED/PROCESSING) or already moved
+  // it (COMPLETED). Terminal FAILED/REJECTED requests hold no reservation
+  // (released on failure; never reserved on rejection), so the customer
+  // may re-request after fixing the underlying issue instead of requiring
+  // database intervention. Over-refund protection is unchanged: the admin
+  // submit path still bounds every approval by the remaining balance.
   const alreadyRequested = await prisma.refundRequest.findFirst({
-    where: { paymentRef: reference },
+    where: {
+      paymentRef: reference,
+      status: {
+        in: [
+          RefundStatus.PENDING,
+          RefundStatus.APPROVED,
+          RefundStatus.PROCESSING,
+          RefundStatus.COMPLETED,
+        ],
+      },
+    },
   });
   if (alreadyRequested)
     throw new ConflictError("Refund already requested for this payment");
 
+  // Phase 3.2b: attribute to the exact order when the payment maps to
+  // precisely one of this user's orders (multi-order batches stay NULL).
+  const refundOrderId = await resolveRefundOrderId(prisma, payment, userId);
+
+  const refundData: {
+    userId: string;
+    paymentRef: string;
+    reason: string;
+    status: RefundStatus;
+    orderId: string | null;
+    requestedAmountKobo?: number | null;
+  } = {
+    userId,
+    paymentRef: reference,
+    reason,
+    status: RefundStatus.PENDING,
+    orderId: refundOrderId,
+  };
+  // Only persist an explicitly-supplied amount. An amountless (null/undefined)
+  // request leaves the column NULL — "full remaining balance" is resolved at
+  // admin-approval time — so the key is absent rather than stored as an
+  // explicit NULL that the legacy `requestedAmountKobo ?? remaining` fallback
+  // would treat identically either way, but keeping the key absent preserves
+  // the documented amountless contract.
+  if (validatedKobo !== null) {
+    refundData.requestedAmountKobo = validatedKobo;
+  }
+
   await prisma.refundRequest.create({
-    data: {
-      userId,
-      paymentRef: reference,
-      reason,
-      status: RefundStatus.PENDING,
-    },
+    data: refundData,
   });
 
   const order = await prisma.order.findUnique({
@@ -613,6 +747,8 @@ export const getMyRefunds = async (req: AuthRequest, res: Response) => {
       paymentRef: true,
       reason: true,
       status: true,
+      requestedAmountKobo: true,
+      paystackRefundId: true,
       createdAt: true,
       updatedAt: true,
     },
@@ -751,14 +887,16 @@ export const chargeSavedCard = async (req: AuthRequest, res: Response) => {
   assertProductsStillLive(orders);
   await assertVendorsStillOperating(orders);
 
-  const totalAmount = orders.reduce((sum, o) => sum + o.totalPrice, 0);
+  const totalAmount = orders.reduce((sum, o) => sum + o.totalPrice, 0); // integer kobo (Phase 3A)
   const now = nowUtc();
 
   // Same concurrent-double-charge race as initiateOrderPayment — see the
   // comment there. A double-tap on "pay with saved card" can otherwise
   // fire two charge_authorization calls for the same batch.
   const initLockKey = `payment:init:${userId}:${idempotencyKey}`;
-  const lock = await acquireLock(redisPayments, initLockKey, 20);
+  const lock = await acquireLock(redisPayments, initLockKey, 20, {
+    timeoutMs: PAYMENT_LOCK_COMMAND_TIMEOUT_MS,
+  });
   if (lock === null) {
     throw new ConflictError(
       "Payment is already being initialized for this order — please wait a moment and retry.",
@@ -766,6 +904,49 @@ export const chargeSavedCard = async (req: AuthRequest, res: Response) => {
   }
 
   try {
+    // Phase 3.2b idempotency: reuse the existing active Payment for this
+    // exact (user, idempotencyKey) instead of charging Paystack again —
+    // same lookup semantics as initiateOrderPayment above. Sequential
+    // retries (client timeout, double-tap after lock release, abandoned
+    // OTP) must not mint a second Payment row or a second Paystack charge.
+    // No amount comparison, matching the normal-path reuse contract.
+    const existingActive = await prisma.payment.findFirst({
+      where: {
+        idempotencyKey,
+        userId,
+        status: { in: [PaymentStatus.PENDING, PaymentStatus.INITIATED] },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (
+      existingActive &&
+      existingActive.expiresAt &&
+      isBeforeUtc(now, toUtc(existingActive.expiresAt))
+    ) {
+      logger.info(
+        { idempotencyKey, existingReference: existingActive.reference },
+        "chargeSavedCard: reusing existing active payment",
+      );
+      if (existingActive.status === PaymentStatus.INITIATED) {
+        return sendSuccess(
+          res,
+          { requiresOtp: true, reference: existingActive.reference },
+          "OTP required to complete this charge",
+        );
+      }
+      return sendSuccess(
+        res,
+        {
+          reference: existingActive.reference,
+          startedAt: (
+            existingActive.startedAt || existingActive.createdAt
+          ).toISOString(),
+          expiresAt: existingActive.expiresAt.toISOString(),
+        },
+        "Payment already in progress for this order",
+      );
+    }
+
     await prisma.order.updateMany({
       where: { id: { in: orders.map((o) => o.id) } },
       data: { paymentInitiatedAt: now },
@@ -778,7 +959,7 @@ export const chargeSavedCard = async (req: AuthRequest, res: Response) => {
         {
           authorization_code: card.cardToken,
           email: userEmail,
-          amount: Math.round(totalAmount * 100),
+          amount: totalAmount, // integer kobo (Phase 3A) — Paystack expects kobo
         },
         { headers: { Authorization: `Bearer ${config.paystackSecret}` } },
       );
@@ -795,18 +976,47 @@ export const chargeSavedCard = async (req: AuthRequest, res: Response) => {
     // Some cards require an OTP even when charging a saved token — the
     // client needs to collect it and call submitOtp with this reference.
     if (data.status === "send_otp") {
-      await prisma.payment.create({
-        data: {
-          userId,
-          orderId: orders[0].id,
-          idempotencyKey,
-          reference: data.reference,
-          amount: Math.round(totalAmount * 100),
-          status: PaymentStatus.INITIATED,
-          channel: "saved_card",
-          expiresAt: addMinutesUtc(now, 15),
-        },
-      });
+      // Stage F (E-02): same race-loser reuse as the success branch —
+      // return the winner's OTP continuation instead of a duplicate row.
+      try {
+        await prisma.payment.create({
+          data: {
+            userId,
+            orderId: orders[0].id,
+            idempotencyKey,
+            reference: data.reference,
+            amount: totalAmount, // integer kobo (Phase 3A) — Paystack expects kobo
+            status: PaymentStatus.INITIATED,
+            channel: "saved_card",
+            expiresAt: addMinutesUtc(now, 15),
+          },
+        });
+      } catch (err) {
+        if (!isUniqueConflict(err)) throw err;
+        const winner = await findActivePayment(userId, idempotencyKey);
+        if (!winner) throw err;
+        logger.info(
+          { idempotencyKey, winnerReference: winner.reference },
+          "Saved-card OTP create raced on active backstop; reusing winner",
+        );
+        if (winner.status === PaymentStatus.INITIATED) {
+          return sendSuccess(
+            res,
+            { requiresOtp: true, reference: winner.reference },
+            "OTP required to complete this charge",
+          );
+        }
+        if (!winner.expiresAt) throw err;
+        return sendSuccess(
+          res,
+          {
+            reference: winner.reference,
+            startedAt: (winner.startedAt || winner.createdAt).toISOString(),
+            expiresAt: winner.expiresAt.toISOString(),
+          },
+          "Payment already in progress for this order",
+        );
+      }
       return sendSuccess(
         res,
         { requiresOtp: true, reference: data.reference },
@@ -826,22 +1036,54 @@ export const chargeSavedCard = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    await prisma.payment.create({
-      data: {
-        userId,
-        orderId: orders[0].id,
-        idempotencyKey,
-        reference: data.reference,
-        amount: Math.round(totalAmount * 100),
-        status: PaymentStatus.PENDING,
-        channel: "saved_card",
-        expiresAt: addMinutesUtc(now, 15),
-      },
-    });
+    // Stage F (E-02): lost lookup race lands here as P2002 from the
+    // active-payment backstop. Reuse the winner's reference/response
+    // instead of recording a duplicate row. (The loser's Paystack charge,
+    // if it succeeded, is an orphan for reconciliation — the Redis lock
+    // remains the primary double-charge protection; see Stage E notes.)
+    try {
+      await prisma.payment.create({
+        data: {
+          userId,
+          orderId: orders[0].id,
+          idempotencyKey,
+          reference: data.reference,
+          amount: totalAmount, // integer kobo (Phase 3A) — Paystack expects kobo
+          status: PaymentStatus.PENDING,
+          channel: "saved_card",
+          expiresAt: addMinutesUtc(now, 15),
+        },
+      });
+    } catch (err) {
+      if (!isUniqueConflict(err)) throw err;
+      const winner = await findActivePayment(userId, idempotencyKey);
+      if (!winner || !winner.expiresAt) throw err;
+      logger.info(
+        { idempotencyKey, winnerReference: winner.reference },
+        "Saved-card create raced on active backstop; reusing winner",
+      );
+      if (winner.status === PaymentStatus.INITIATED) {
+        return sendSuccess(
+          res,
+          { requiresOtp: true, reference: winner.reference },
+          "OTP required to complete this charge",
+        );
+      }
+      return sendSuccess(
+        res,
+        {
+          reference: winner.reference,
+          startedAt: (winner.startedAt || winner.createdAt).toISOString(),
+          expiresAt: winner.expiresAt.toISOString(),
+        },
+        "Payment already in progress for this order",
+      );
+    }
 
     const result = await finalizePaymentSuccess({
       reference: data.reference,
-      amountInNaira: data.amount / 100,
+      amountKobo: data.amount, // integer kobo from Paystack (Phase 3A)
+      currency: data.currency,
       customerIdFromGateway: userId,
       channel: "saved_card",
       paystackData: data,
@@ -864,7 +1106,9 @@ export const chargeSavedCard = async (req: AuthRequest, res: Response) => {
       "Payment successful",
     );
   } finally {
-    const released = await releaseLock(redisPayments, lock);
+    const released = await releaseLock(redisPayments, lock, {
+      timeoutMs: PAYMENT_LOCK_COMMAND_TIMEOUT_MS,
+    });
     if (!released) {
       logger.warn(
         { initLockKey },
@@ -915,7 +1159,8 @@ export const submitOtp = async (req: AuthRequest, res: Response) => {
   if (data.status === true && data.data.status === "success") {
     const result = await finalizePaymentSuccess({
       reference,
-      amountInNaira: data.data.amount / 100,
+      amountKobo: data.data.amount, // integer kobo from Paystack (Phase 3A)
+      currency: data.data.currency,
       customerIdFromGateway: userId,
       paystackData: data.data,
     });

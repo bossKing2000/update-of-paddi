@@ -1,0 +1,429 @@
+/**
+ * Phase 1C — vendor onboarding lifecycle over REAL PostgreSQL (+ REAL Redis).
+ *
+ * Mounts the real auth router and the real admin router and drives them with
+ * supertest, so `become-vendor`, the profile/KYC triggers for
+ * `evaluateVendorStatus`, and the admin status machine all execute for real.
+ * Assertions are made on HTTP status plus the resulting database rows — never
+ * on a re-implementation of the state machine.
+ *
+ * The lifecycle under test (src/services/vendorStatus.service.ts):
+ *   null -> NEW -> ACTIVE | PENDING_REVIEW -> ACTIVE | NEW
+ *   ACTIVE -> SUSPENDED -> ACTIVE
+ * ACTIVE requires `requirementsMet`: brandName AND a verified canonical phone
+ * (phoneNumberE164 present AND isPhoneVerified) AND kycStatus VERIFIED. The
+ * target state is ACTIVE when VENDOR_AUTO_APPROVE is not "false" (the default)
+ * and PENDING_REVIEW otherwise.
+ *
+ * The phone-verification proof itself is not re-derived here — it is covered
+ * end to end by tests/integration/authHttpFlows.test.ts over the same real
+ * Redis. This file seeds the already-proven phone state so the vendor state
+ * machine is what is under test.
+ *
+ * Rate limiters are pass-through (dedicated unit coverage exists); every
+ * request gets a distinct client address so no Redis budget is shared.
+ *
+ * Fails closed unless REDIS_URL names an authorized loopback target.
+ */
+import express from "express";
+import cookieParser from "cookie-parser";
+import request from "supertest";
+import bcrypt from "bcryptjs";
+
+import prisma from "../../src/lib/prisma";
+import {
+  redisUsersSessions,
+  redisProducts,
+  connectRedis,
+} from "../../src/lib/redis";
+import { generateAccessToken } from "../../src/utils/generateToken";
+import authRoutes from "../../src/routes/auth.routes";
+import adminRoutes from "../../src/routes/admin.routes";
+import { errorHandler } from "../../src/middlewares/error.middleware";
+import { VendorStatus, KycStatus, type Role } from "@prisma/client";
+
+jest.mock("../../src/middlewares/rateLimiter.middleware", () => {
+  const passthrough = (_req: unknown, _res: unknown, next: () => void) => next();
+  return {
+    authRateLimiter: passthrough,
+    paymentRateLimiter: passthrough,
+    checkoutRateLimiter: passthrough,
+    otpRateLimiter: passthrough,
+    phoneOtpRateLimiter: passthrough,
+    passwordChangeRateLimiter: passthrough,
+    secureResetRateLimiter: passthrough,
+    cartSummaryRateLimiter: passthrough,
+    aiRateLimiter: passthrough,
+    emailOtpRateLimiter: passthrough,
+  };
+});
+
+jest.mock("../../src/middlewares/geo.middleware", () => ({
+  geoMiddleware: (_req: unknown, _res: unknown, next: () => void) => next(),
+}));
+
+jest.mock("../../src/middlewares/tracking.middleware", () => ({
+  trackUserAction: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+}));
+
+jest.mock("../../src/middlewares/upload.middleware", () => ({}), { virtual: true });
+
+const REDIS_URL = process.env.REDIS_URL ?? "";
+if (!/^redis:\/\/127\.0\.0\.1:\d+/.test(REDIS_URL)) {
+  throw new Error(
+    "[vendorLifecycleHttp] BLOCKED: REDIS_URL must name the authorized disposable loopback target.",
+  );
+}
+
+const app = express();
+app.set("trust proxy", 1);
+app.use(express.json());
+app.use(cookieParser());
+app.use("/api/auth", authRoutes);
+app.use("/api/admin", adminRoutes);
+app.use(errorHandler);
+
+const PASSWORD = "Str0ngPass!";
+
+const createdUserIds: string[] = [];
+
+let ipCounter = 0;
+function nextClientIp(): string {
+  ipCounter += 1;
+  return `198.19.${Math.floor(ipCounter / 250) % 250}.${(ipCounter % 250) + 1}`;
+}
+
+const RUN_TAG = 1000 + Math.floor(Math.random() * 9000);
+let phoneCounter = 0;
+function nextLocalPhone(): string {
+  phoneCounter += 1;
+  return "081" + String(RUN_TAG * 10 + phoneCounter).padStart(8, "0");
+}
+
+function toE164(local: string): string {
+  return "+234" + local.slice(1);
+}
+
+function uniqueEmail(tag: string): string {
+  return (
+    `${tag}-${process.pid}-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}@vlh.test`
+  );
+}
+
+type MakeUserOptions = {
+  role?: Role;
+  roles?: Role[];
+  isEmailVerified?: boolean;
+  isBlocked?: boolean;
+  brandName?: string | null;
+  phoneNumberE164?: string | null;
+  isPhoneVerified?: boolean;
+  kycStatus?: KycStatus;
+  vendorStatus?: VendorStatus | null;
+  isLive?: boolean;
+};
+
+async function makeUser(opts: MakeUserOptions = {}) {
+  const role = opts.role ?? "CUSTOMER";
+  const user = await prisma.user.create({
+    data: {
+      name: "Vendor Lifecycle User",
+      email: uniqueEmail("vlh"),
+      password: bcrypt.hashSync(PASSWORD, 10),
+      role,
+      roles: opts.roles ?? [role],
+      tokenVersion: 1,
+      isEmailVerified: opts.isEmailVerified ?? true,
+      isBlocked: opts.isBlocked ?? false,
+      brandName: opts.brandName ?? null,
+      phoneNumberE164: opts.phoneNumberE164 ?? null,
+      isPhoneVerified: opts.isPhoneVerified ?? false,
+      kycStatus: opts.kycStatus ?? KycStatus.PENDING,
+      vendorStatus: opts.vendorStatus ?? null,
+      isLive: opts.isLive ?? false,
+    },
+    select: { id: true, email: true },
+  });
+  createdUserIds.push(user.id);
+  return user;
+}
+
+/** Real UserSession row + the Redis document `src/lib/session.ts` reads back. */
+async function makeSession(userId: string, activeRole: Role) {
+  const sessionId = `${userId}-sess`;
+  const ttlSeconds = 30 * 24 * 3600;
+  await prisma.userSession.create({
+    data: {
+      userId,
+      sessionId,
+      activeRole,
+      expiresAt: new Date(Date.now() + ttlSeconds * 1000),
+    },
+  });
+  await redisUsersSessions.set(
+    `session:user:${userId}:${sessionId}`,
+    JSON.stringify({ activeRole, lastLoginAt: new Date().toISOString() }),
+    { EX: ttlSeconds },
+  );
+  return generateAccessToken(userId, activeRole, sessionId, 1);
+}
+
+function authed(method: "post" | "patch" | "get", prefix: string, path: string, token: string) {
+  return request(app)[method](`${prefix}${path}`)
+    .set("X-Forwarded-For", nextClientIp())
+    .set("Authorization", `Bearer ${token}`);
+}
+
+/**
+ * becomeVendorSchema requires brandName (min 2 chars), so brand naming is part
+ * of the acquisition request itself rather than a later profile edit.
+ */
+function becomeVendor(token: string, brandName = "Ilekukun Kitchen") {
+  return authed("post", "/api/auth", "/become-vendor", token).send({ brandName });
+}
+
+async function readVendorStatus(userId: string) {
+  return prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      role: true,
+      roles: true,
+      vendorStatus: true,
+      vendorStatusReason: true,
+      isLive: true,
+      brandName: true,
+      kycStatus: true,
+      phoneNumberE164: true,
+      isPhoneVerified: true,
+    },
+  });
+}
+
+beforeAll(async () => {
+  // redisUsersSessions: sessions. redisProducts: the discovery-cache sweep that
+  // runs on every admin eligibility transition. Both are required — an
+  // unconnected client throws "The client is closed" and turns a legitimate
+  // transition into a 500.
+  await connectRedis(redisUsersSessions, "UserSessions").catch(() => undefined);
+  await connectRedis(redisProducts, "Products").catch(() => undefined);
+});
+
+afterAll(async () => {
+  for (const userId of createdUserIds) {
+    await prisma.userSession.deleteMany({ where: { userId } }).catch(() => undefined);
+    await prisma.auditLog.deleteMany({ where: { userId } }).catch(() => undefined);
+    await prisma.user.deleteMany({ where: { id: userId } }).catch(() => undefined);
+  }
+  await redisUsersSessions.quit().catch(() => undefined);
+  await redisProducts.quit().catch(() => undefined);
+});
+
+describe("Phase 1C — vendor onboarding lifecycle over real PostgreSQL", () => {
+  it("lets an eligible CUSTOMER acquire VENDOR without changing the active role", async () => {
+    const user = await makeUser({ role: "CUSTOMER", isEmailVerified: true });
+    const token = await makeSession(user.id, "CUSTOMER");
+
+    const response = await becomeVendor(token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.message).toBe(
+      "VENDOR role added. Switch to it via POST /api/auth/switch-role.",
+    );
+
+    const stored = await readVendorStatus(user.id);
+    // Acquisition adds a HELD role; the active role must not silently change.
+    expect(stored?.role).toBe("CUSTOMER");
+    expect(stored?.roles).toEqual(expect.arrayContaining(["CUSTOMER", "VENDOR"]));
+    // Entering the lifecycle as NEW: requirements are not met yet.
+    expect(stored?.vendorStatus).toBe(VendorStatus.NEW);
+  });
+
+  it("refuses vendor acquisition for ineligible accounts", async () => {
+    const unverified = await makeUser({ isEmailVerified: false });
+    const unverifiedToken = await makeSession(unverified.id, "CUSTOMER");
+    const unverifiedRes = await becomeVendor(unverifiedToken);
+    expect(unverifiedRes.status).toBe(403);
+    expect(unverifiedRes.body.message).toBe(
+      "Please verify your email before becoming a vendor.",
+    );
+
+    const admin = await makeUser({ role: "ADMIN", roles: ["ADMIN"] });
+    const adminToken = await makeSession(admin.id, "ADMIN");
+    const adminRes = await becomeVendor(adminToken);
+    expect(adminRes.status).toBe(403);
+    expect(adminRes.body.message).toBe("ADMIN and DELIVERY accounts cannot become vendors");
+
+    const delivery = await makeUser({ role: "CUSTOMER", roles: ["CUSTOMER", "DELIVERY"] });
+    const deliveryToken = await makeSession(delivery.id, "DELIVERY");
+    const deliveryRes = await becomeVendor(deliveryToken);
+    expect(deliveryRes.status).toBe(403);
+
+    // An account that already holds VENDOR is refused by the early snapshot check
+    // with 400. (409 is the other legitimate outcome: returned from the locked
+    // write path when a concurrent request wins the race after that read.)
+    const already = await makeUser({ role: "CUSTOMER", roles: ["CUSTOMER", "VENDOR"] });
+    const alreadyToken = await makeSession(already.id, "CUSTOMER");
+    const alreadyRes = await becomeVendor(alreadyToken);
+    expect(alreadyRes.status).toBe(400);
+    expect(alreadyRes.body.message).toBe("Account already holds VENDOR role");
+  });
+
+  it("holds a vendor at NEW until brandName, a verified phone and VERIFIED KYC all exist", async () => {
+    const user = await makeUser({ role: "CUSTOMER", isEmailVerified: true });
+    const customerToken = await makeSession(user.id, "CUSTOMER");
+
+    // become-vendor carries brandName, so brand is satisfied immediately; the
+    // verified phone and VERIFIED KYC are not, so the vendor must stay NEW.
+    expect((await becomeVendor(customerToken)).status).toBe(200);
+    const onEntry = await readVendorStatus(user.id);
+    expect(onEntry?.brandName).toBe("Ilekukun Kitchen");
+    expect(onEntry?.vendorStatus).toBe(VendorStatus.NEW);
+
+    const admin = await makeUser({ role: "ADMIN", roles: ["ADMIN"] });
+    const adminToken = await makeSession(admin.id, "ADMIN");
+
+    // brand + verified phone, but KYC still PENDING.
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { phoneNumberE164: toE164(nextLocalPhone()), isPhoneVerified: true },
+    });
+    const afterPhone = await authed("patch", "/api/auth", "/profile", customerToken)
+      .send({ bio: "Real kitchen, real food." })
+      .expect(200);
+    expect(afterPhone.status).toBe(200);
+    expect((await readVendorStatus(user.id))?.vendorStatus).toBe(VendorStatus.NEW);
+
+    // KYC VERIFIED is the last requirement; the admin KYC write triggers
+    // evaluateVendorStatus, which promotes NEW -> ACTIVE (auto-approve default).
+    await authed("patch", "/api/admin", `/users/${user.id}/kyc-status`, adminToken)
+      .send({ kycStatus: "VERIFIED" })
+      .expect(200);
+
+    const active = await readVendorStatus(user.id);
+    expect(active?.vendorStatus).toBe(VendorStatus.ACTIVE);
+    expect(active?.brandName).toBe("Ilekukun Kitchen");
+    expect(active?.kycStatus).toBe("VERIFIED");
+  });
+
+  it("routes a fully-provisioned vendor to PENDING_REVIEW when auto-approve is off", async () => {
+    const previous = process.env.VENDOR_AUTO_APPROVE;
+    process.env.VENDOR_AUTO_APPROVE = "false";
+    try {
+      const user = await makeUser({
+        role: "CUSTOMER",
+        isEmailVerified: true,
+        brandName: "Pending Kitchen",
+        phoneNumberE164: toE164(nextLocalPhone()),
+        isPhoneVerified: true,
+        kycStatus: KycStatus.VERIFIED,
+      });
+      const token = await makeSession(user.id, "CUSTOMER");
+
+      expect(
+        (await becomeVendor(token)).status,
+      ).toBe(200);
+
+      // requirementsMet is satisfied, but auto-approve is disabled, so the
+      // vendor waits for a human instead of going straight live.
+      expect((await readVendorStatus(user.id))?.vendorStatus).toBe(
+        VendorStatus.PENDING_REVIEW,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.VENDOR_AUTO_APPROVE;
+      else process.env.VENDOR_AUTO_APPROVE = previous;
+    }
+  });
+
+  it("lets an admin suspend and reactivate a vendor, enforcing the transition map", async () => {
+    const vendor = await makeUser({
+      role: "CUSTOMER",
+      roles: ["CUSTOMER", "VENDOR"],
+      isEmailVerified: true,
+      brandName: "Suspendable Kitchen",
+      phoneNumberE164: toE164(nextLocalPhone()),
+      isPhoneVerified: true,
+      kycStatus: KycStatus.VERIFIED,
+      vendorStatus: VendorStatus.ACTIVE,
+      isLive: true,
+    });
+    const admin = await makeUser({ role: "ADMIN", roles: ["ADMIN"] });
+    const adminToken = await makeSession(admin.id, "ADMIN");
+
+    // NEW -> SUSPENDED is not in the transition map, so it must be refused.
+    const fresh = await makeUser({
+      role: "CUSTOMER",
+      roles: ["CUSTOMER", "VENDOR"],
+      vendorStatus: VendorStatus.NEW,
+    });
+    const illegal = await authed("patch", "/api/admin", `/vendors/${fresh.id}/status`, adminToken)
+      .send({ status: "SUSPENDED", reason: "not a legal edge" });
+    expect(illegal.status).toBeGreaterThanOrEqual(400);
+    expect(illegal.status).toBeLessThan(500);
+    expect((await readVendorStatus(fresh.id))?.vendorStatus).toBe(VendorStatus.NEW);
+
+    // A suspension with no reason must be refused (it is an admin decision).
+    const noReason = await authed("patch", "/api/admin", `/vendors/${vendor.id}/status`, adminToken)
+      .send({ status: "SUSPENDED" });
+    expect(noReason.status).toBeGreaterThanOrEqual(400);
+    expect((await readVendorStatus(vendor.id))?.vendorStatus).toBe(VendorStatus.ACTIVE);
+
+    // ACTIVE -> SUSPENDED is legal and takes the storefront offline.
+    const suspended = await authed(
+      "patch",
+      "/api/admin",
+      `/vendors/${vendor.id}/status`,
+      adminToken,
+    ).send({ status: "SUSPENDED", reason: "Policy breach under review" });
+    expect(suspended.status).toBe(200);
+    expect(suspended.body.success).toBe(true);
+    expect(suspended.body.data.vendorStatus).toBe(VendorStatus.SUSPENDED);
+
+    const afterSuspend = await readVendorStatus(vendor.id);
+    expect(afterSuspend?.vendorStatus).toBe(VendorStatus.SUSPENDED);
+    expect(afterSuspend?.vendorStatusReason).toBe("Policy breach under review");
+    expect(afterSuspend?.isLive).toBe(false);
+
+    // SUSPENDED -> ACTIVE is legal and restores eligibility.
+    const reinstated = await authed(
+      "patch",
+      "/api/admin",
+      `/vendors/${vendor.id}/status`,
+      adminToken,
+    ).send({ status: "ACTIVE" });
+    expect(reinstated.status).toBe(200);
+    expect(reinstated.body.data.vendorStatus).toBe(VendorStatus.ACTIVE);
+    expect((await readVendorStatus(vendor.id))?.vendorStatus).toBe(VendorStatus.ACTIVE);
+  });
+
+  it("refuses the admin status endpoint to a non-ADMIN session", async () => {
+    const vendor = await makeUser({
+      role: "CUSTOMER",
+      roles: ["CUSTOMER", "VENDOR"],
+      vendorStatus: VendorStatus.ACTIVE,
+    });
+    const customerToken = await makeSession(vendor.id, "CUSTOMER");
+
+    // A vendor must not be able to approve or un-suspend themselves.
+    const response = await authed(
+      "patch",
+      "/api/admin",
+      `/vendors/${vendor.id}/status`,
+      customerToken,
+    ).send({ status: "SUSPENDED", reason: "self service" });
+
+    expect(response.status).toBe(403);
+    expect((await readVendorStatus(vendor.id))?.vendorStatus).toBe(VendorStatus.ACTIVE);
+  });
+
+  it("refuses vendor acquisition while the account is blocked", async () => {
+    const blocked = await makeUser({ role: "CUSTOMER", isBlocked: true });
+    const token = await makeSession(blocked.id, "CUSTOMER");
+    const response = await becomeVendor(token);
+
+    expect(response.status).toBe(403);
+    expect(response.body.message).toBe("This account has been blocked.");
+    expect((await readVendorStatus(blocked.id))?.vendorStatus).toBeNull();
+  });
+});

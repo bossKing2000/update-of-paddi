@@ -20,6 +20,7 @@ import bcrypt from "bcryptjs";
 import { seedFinancialFixtures } from "./seedFinancialFixtures";
 import { assertSeedAllowed } from "./seedGuard";
 import { DEMO_RIDER_FINANCIALS } from "./seedFinancialRules";
+import { ensureSeedFixture } from "./seedFixtureRecovery";
 
 // // npx ts-node src/jobs/seed.ts
 // // npx prisma db push --force-reset
@@ -60,9 +61,10 @@ function envRange(
 }
 
 /** Change these defaults, or override any value with the matching SEED_* env variable. */
-export const SEED_CONFIG = {  vendors: envInt("SEED_VENDORS", 200),
-  customers: envInt("SEED_CUSTOMERS", 1000),
-  deliveryPeople: envInt("SEED_DELIVERY", 20),
+export const SEED_CONFIG = {
+  vendors: envInt("SEED_VENDORS", 1200),
+  customers: envInt("SEED_CUSTOMERS", 5000),
+  deliveryPeople: envInt("SEED_DELIVERY", 500),
   addressesPerUser: envRange("SEED_ADDRESSES_MIN", "SEED_ADDRESSES_MAX", 1, 2),
   productsPerVendor: envRange("SEED_PRODUCTS_MIN", "SEED_PRODUCTS_MAX", 1, 10),
   optionsPerProduct: envRange("SEED_OPTIONS_MIN", "SEED_OPTIONS_MAX", 1, 3),
@@ -119,7 +121,7 @@ export const SEED_CONFIG = {  vendors: envInt("SEED_VENDORS", 200),
     0,
     5,
   ),
-  dateRangeDays: envRange("SEED_DATE_DAYS_MIN", "SEED_DATE_DAYS_MAX", 10, 10),
+  dateRangeDays: envRange("SEED_DATE_DAYS_MIN", "SEED_DATE_DAYS_MAX", 30, 30),
   clearRedis: process.env.SEED_CLEAR_REDIS === "true",
 };
 
@@ -314,7 +316,10 @@ const DISH_KEYWORDS: [string, RegExp][] = [
   ["AGIDI_PAP", /agidi|akamu|custard|\bpap\b|\bogi\b/i],
   ["CHICKEN", /chicken|turkey/i],
   ["GOAT_MEAT", /goat/i],
-  ["FISH", /fish|croaker|tilapia|catfish|titus|stockfish|seafood|shrimp|prawn/i],
+  [
+    "FISH",
+    /fish|croaker|tilapia|catfish|titus|stockfish|seafood|shrimp|prawn/i,
+  ],
   ["SMALL_CHOPS", /small chop|samosa|spring roll/i],
   ["SNACKS", /meat pie|sausage|gala|egg roll|scotch egg|chin chin/i],
   ["SHAWARMA", /shawarma/i],
@@ -627,7 +632,10 @@ const round2 = (v: number) => Number(v.toFixed(2));
 // exactly like app-generated ones (not arbitrary SEED_ strings).
 function seedReferralCode(name: string): string {
   const prefix =
-    name.replace(/[^A-Za-z]/g, "").slice(0, 5).toUpperCase() || "PADDI";
+    name
+      .replace(/[^A-Za-z]/g, "")
+      .slice(0, 5)
+      .toUpperCase() || "PADDI";
   const suffix = faker.string
     .hexadecimal({ length: 6, casing: "upper" })
     .replace(/^0x/i, "");
@@ -639,7 +647,11 @@ function seedReferralCode(name: string): string {
 // orderable = vendor.isLive AND !archived AND (untracked OR stock > 0).
 // deliveryPreferences==null means accepting orders (Bulk seed leaves it null).
 function isSeedProductOrderable(
-  product: { archived: boolean; trackInventory: boolean | null; stock: number | null },
+  product: {
+    archived: boolean;
+    trackInventory: boolean | null;
+    stock: number | null;
+  },
   vendorIsLive: boolean,
 ) {
   if (!vendorIsLive) return false;
@@ -692,13 +704,17 @@ async function assertTaxonomySeeded(): Promise<void> {
   ]);
   const problems: string[] = [];
   if (categoryCount < REQUIRED_TAXONOMY.categories)
-    problems.push(`categories ${categoryCount}/${REQUIRED_TAXONOMY.categories}`);
+    problems.push(
+      `categories ${categoryCount}/${REQUIRED_TAXONOMY.categories}`,
+    );
   if (dishTypeCount < REQUIRED_TAXONOMY.dishTypes)
     problems.push(`dishTypes ${dishTypeCount}/${REQUIRED_TAXONOMY.dishTypes}`);
   if (tagCount < REQUIRED_TAXONOMY.tags)
     problems.push(`tags ${tagCount}/${REQUIRED_TAXONOMY.tags}`);
   if (!fallback)
-    problems.push(`DishType "${REQUIRED_TAXONOMY.fallbackDishTypeId}" missing (required category fallback)`);
+    problems.push(
+      `DishType "${REQUIRED_TAXONOMY.fallbackDishTypeId}" missing (required category fallback)`,
+    );
   if (problems.length > 0) {
     throw new Error(
       `Demo seeder prerequisite missing: incomplete catalog taxonomy (${problems.join("; ")}). ` +
@@ -752,7 +768,10 @@ async function seedDatabase() {
   // Stage A auth correction: hash once up front. Bulk demo users share one
   // hash of a random secret (they are volume, not login fixtures — never
   // plaintext). Designated test accounts below get the known-password hash.
-  const bulkPasswordHash = await bcrypt.hash(faker.string.alphanumeric(24), BCRYPT_ROUNDS);
+  const bulkPasswordHash = await bcrypt.hash(
+    faker.string.alphanumeric(24),
+    BCRYPT_ROUNDS,
+  );
   const testPasswordHash = await bcrypt.hash(SEED_TEST_PASSWORD, BCRYPT_ROUNDS);
   const addUsers = (role: Role, count: number, prefix: string) => {
     for (let index = 0; index < count; index++) {
@@ -764,7 +783,10 @@ async function seedDatabase() {
         password: bulkPasswordHash,
         role,
         roles: [role],
-        preferences: take(["JOLLOF", "SUYA", "OFADA", "AMALA", "BOLI", "EGUSI"], 2),
+        preferences: take(
+          ["JOLLOF", "SUYA", "OFADA", "AMALA", "BOLI", "EGUSI"],
+          2,
+        ),
         authProviders: ["local"],
         bio: faker.lorem.sentence(),
         avatarUrl: faker.image.avatar(),
@@ -795,7 +817,12 @@ async function seedDatabase() {
     isLive?: boolean;
     kycStatus?: KycStatus;
   }[] = [
-    { name: "Demo Admin", email: "admin.demo@foodpaddi.test", username: "demo_admin", role: Role.ADMIN },
+    {
+      name: "Demo Admin",
+      email: "admin.demo@foodpaddi.test",
+      username: "demo_admin",
+      role: Role.ADMIN,
+    },
     {
       name: "Demo Vendor",
       email: "vendor.demo@foodpaddi.test",
@@ -805,8 +832,19 @@ async function seedDatabase() {
       isLive: true,
       kycStatus: KycStatus.VERIFIED,
     },
-    { name: "Demo Customer", email: "customer.demo@foodpaddi.test", username: "demo_customer", role: Role.CUSTOMER },
-    { name: "Demo Rider", email: "rider.demo@foodpaddi.test", username: "demo_rider", role: Role.DELIVERY, kycStatus: KycStatus.VERIFIED },
+    {
+      name: "Demo Customer",
+      email: "customer.demo@foodpaddi.test",
+      username: "demo_customer",
+      role: Role.CUSTOMER,
+    },
+    {
+      name: "Demo Rider",
+      email: "rider.demo@foodpaddi.test",
+      username: "demo_rider",
+      role: Role.DELIVERY,
+      kycStatus: KycStatus.VERIFIED,
+    },
   ];
   const existingDemoEmails = new Set(
     (
@@ -836,7 +874,9 @@ async function seedDatabase() {
   await createMany((data) => prisma.user.createMany({ data }), users);
   setProgress(10, `Created ${users.length} users`);
 
-  const vendors = await prisma.user.findMany({ where: { roles: { has: Role.VENDOR } } });
+  const vendors = await prisma.user.findMany({
+    where: { roles: { has: Role.VENDOR } },
+  });
   const customers = await prisma.user.findMany({
     where: { roles: { has: Role.CUSTOMER } },
   });
@@ -852,24 +892,29 @@ async function seedDatabase() {
   if (vendors.length >= 5) {
     const flipCandidates = vendors.filter((v) => !v.email.includes(".demo@"));
     if (flipCandidates.length < 5) {
-      console.warn("Skipping KYC showcase flips: fewer than 5 non-demo vendors available.");
+      console.warn(
+        "Skipping KYC showcase flips: fewer than 5 non-demo vendors available.",
+      );
     } else {
-    const kycShowcase: { kycStatus: "PENDING" | "VERIFIED" | "REJECTED"; isLive: boolean }[] = [
-      { kycStatus: "PENDING", isLive: false },
-      { kycStatus: "PENDING", isLive: false },
-      { kycStatus: "VERIFIED", isLive: false },
-      { kycStatus: "VERIFIED", isLive: false },
-      { kycStatus: "REJECTED", isLive: false },
-    ];
-    for (let i = 0; i < kycShowcase.length; i++) {
-      const v = flipCandidates[i];
-      await prisma.user.update({
-        where: { id: v.id },
-        data: { kycStatus: kycShowcase[i].kycStatus, isLive: false },
-      });
-      v.kycStatus = kycShowcase[i].kycStatus as unknown as typeof v.kycStatus;
-      v.isLive = false;
-    }
+      const kycShowcase: {
+        kycStatus: "PENDING" | "VERIFIED" | "REJECTED";
+        isLive: boolean;
+      }[] = [
+        { kycStatus: "PENDING", isLive: false },
+        { kycStatus: "PENDING", isLive: false },
+        { kycStatus: "VERIFIED", isLive: false },
+        { kycStatus: "VERIFIED", isLive: false },
+        { kycStatus: "REJECTED", isLive: false },
+      ];
+      for (let i = 0; i < kycShowcase.length; i++) {
+        const v = flipCandidates[i];
+        await prisma.user.update({
+          where: { id: v.id },
+          data: { kycStatus: kycShowcase[i].kycStatus, isLive: false },
+        });
+        v.kycStatus = kycShowcase[i].kycStatus as unknown as typeof v.kycStatus;
+        v.isLive = false;
+      }
     }
   }
   const deliveryProfiles: Prisma.DeliveryPersonCreateManyInput[] =
@@ -922,7 +967,9 @@ async function seedDatabase() {
   // Phase 2B.1 compat: categoryId is server-derived from the classified
   // dish type (same authoritative chain as product creation).
   const dishCategoryById = new Map(
-    (await prisma.dishType.findMany({ select: { id: true, categoryId: true } })).map((d) => [d.id, d.categoryId] as const),
+    (
+      await prisma.dishType.findMany({ select: { id: true, categoryId: true } })
+    ).map((d) => [d.id, d.categoryId] as const),
   );
   const products: Prisma.ProductCreateManyInput[] = [];
   for (const vendor of vendors)
@@ -952,7 +999,8 @@ async function seedDatabase() {
         } ${name.toLowerCase()} prepared with care by ${vendor.brandName || vendor.name}.`,
         price: money(),
         dishTypeId,
-        categoryId: dishCategoryById.get(dishTypeId) ?? dishCategoryById.get("OTHER")!,
+        categoryId:
+          dishCategoryById.get(dishTypeId) ?? dishCategoryById.get("OTHER")!,
         archived: false,
         vendorId: vendor.id,
         images: randomImages(),
@@ -1156,7 +1204,12 @@ async function seedDatabase() {
     paymentStartedAt: Date;
     paidAt: Date | null;
     isFutureOrder: boolean;
-    items: { productId: string; quantity: number; unitPrice: number; subtotal: number }[];
+    items: {
+      productId: string;
+      quantity: number;
+      unitPrice: number;
+      subtotal: number;
+    }[];
     basePrice: number;
     totalPrice: number;
   };
@@ -1227,7 +1280,9 @@ async function seedDatabase() {
     totalPrice: s.totalPrice,
     customerApproval: true,
     status: s.isFutureOrder ? OrderStatus.PENDING : OrderStatus.COMPLETED,
-    paymentStatus: s.isFutureOrder ? PaymentStatus.PENDING : PaymentStatus.SUCCESS,
+    paymentStatus: s.isFutureOrder
+      ? PaymentStatus.PENDING
+      : PaymentStatus.SUCCESS,
     createdAt: s.orderDate,
     updatedAt: s.orderDate,
     paidAt: s.paidAt ?? undefined,
@@ -1272,7 +1327,9 @@ async function seedDatabase() {
   }
   await createMany((data) => prisma.orderItem.createMany({ data }), orderItems);
   await createMany((data) => prisma.payment.createMany({ data }), payments);
-  const orderDates = new Map(bulkScenarios.map((s) => [s.orderId, s.orderDate]));
+  const orderDates = new Map(
+    bulkScenarios.map((s) => [s.orderId, s.orderDate]),
+  );
   void scenarioByOrderId;
   setProgress(
     65,
@@ -1285,7 +1342,9 @@ async function seedDatabase() {
   const purchasedProductsByCustomer = new Map<string, Set<string>>();
   const purchasingCustomersByProduct = new Map<string, string[]>();
   {
-    const orderCustomerById = new Map(savedOrders.map((o) => [o.id, o.customerId]));
+    const orderCustomerById = new Map(
+      savedOrders.map((o) => [o.id, o.customerId]),
+    );
     for (const item of orderItems) {
       const customerId = orderCustomerById.get(item.orderId);
       if (!customerId) continue;
@@ -1305,10 +1364,15 @@ async function seedDatabase() {
   const productReviews: Prisma.ProductReviewCreateManyInput[] = [];
   for (const product of savedProducts) {
     const buyers = purchasingCustomersByProduct.get(product.id) ?? [];
-    for (let index = 0; index < randomRange(SEED_CONFIG.productReviewsPerProduct); index++) {
+    for (
+      let index = 0;
+      index < randomRange(SEED_CONFIG.productReviewsPerProduct);
+      index++
+    ) {
       // ~70% of reviews come from real buyers (verified), the rest are
       // explicitly non-verified browse reviews. Ratings now span 1-5 (P1).
-      const useVerified = buyers.length > 0 && faker.datatype.boolean({ probability: 0.7 });
+      const useVerified =
+        buyers.length > 0 && faker.datatype.boolean({ probability: 0.7 });
       if (useVerified) {
         const customerId = faker.helpers.arrayElement(buyers);
         productReviews.push({
@@ -1322,7 +1386,9 @@ async function seedDatabase() {
       } else {
         const customer = pick(customers);
         if (!customer) continue;
-        const actuallyBought = purchasedProductsByCustomer.get(customer.id)?.has(product.id) ?? false;
+        const actuallyBought =
+          purchasedProductsByCustomer.get(customer.id)?.has(product.id) ??
+          false;
         productReviews.push({
           productId: product.id,
           customerId: customer.id,
@@ -1352,7 +1418,10 @@ async function seedDatabase() {
     }
     const orderCountByProduct = new Map<string, number>();
     for (const item of orderItems)
-      orderCountByProduct.set(item.productId, (orderCountByProduct.get(item.productId) ?? 0) + 1);
+      orderCountByProduct.set(
+        item.productId,
+        (orderCountByProduct.get(item.productId) ?? 0) + 1,
+      );
     const nowMs = Date.now();
     const scores = new Map<string, number>();
     let maxScore = 0;
@@ -1362,9 +1431,14 @@ async function seedDatabase() {
       const orderCount = orderCountByProduct.get(p.id) ?? 0;
       const totalViews = p.totalViews ?? 0;
       const createdMs = new Date(p.createdAt).getTime();
-      const daysSinceCreation = Number.isFinite(createdMs) ? Math.max(0, (nowMs - createdMs) / DAY_MS) : 0;
+      const daysSinceCreation = Number.isFinite(createdMs)
+        ? Math.max(0, (nowMs - createdMs) / DAY_MS)
+        : 0;
       const score =
-        totalViews * 0.1 + orderCount * 2 + avg * count * 5 + Math.max(0, 30 - daysSinceCreation);
+        totalViews * 0.1 +
+        orderCount * 2 +
+        avg * count * 5 +
+        Math.max(0, 30 - daysSinceCreation);
       scores.set(p.id, score);
       if (score > maxScore) maxScore = score;
     }
@@ -1375,7 +1449,10 @@ async function seedDatabase() {
       const score = scores.get(p.id) ?? 0;
       const percent =
         maxScore > 0 && denom > 0
-          ? Math.min(99.9, Number(((Math.log(score + 1) / denom) * 100).toFixed(2)))
+          ? Math.min(
+              99.9,
+              Number(((Math.log(score + 1) / denom) * 100).toFixed(2)),
+            )
           : 0;
       await prisma.product.update({
         where: { id: p.id },
@@ -1403,9 +1480,18 @@ async function seedDatabase() {
     const deliveryPerson = pick(deliveryProfilesSaved);
     if (deliveryPerson) {
       // Coherent timeline: assigned -> accepted -> started -> completed.
-      const acceptedAt = addMilliseconds(order.createdAt, faker.number.int({ min: 30_000, max: 120_000 }));
-      const startedAt = addMilliseconds(acceptedAt, faker.number.int({ min: 120_000, max: 300_000 }));
-      const completedAt = addMilliseconds(startedAt, faker.number.int({ min: 600_000, max: 1_800_000 }));
+      const acceptedAt = addMilliseconds(
+        order.createdAt,
+        faker.number.int({ min: 30_000, max: 120_000 }),
+      );
+      const startedAt = addMilliseconds(
+        acceptedAt,
+        faker.number.int({ min: 120_000, max: 300_000 }),
+      );
+      const completedAt = addMilliseconds(
+        startedAt,
+        faker.number.int({ min: 600_000, max: 1_800_000 }),
+      );
       assignments.push({
         orderId: order.id,
         deliveryPersonId: deliveryPerson.id,
@@ -1431,7 +1517,14 @@ async function seedDatabase() {
       key: string;
       orderStatus: OrderStatus;
       paymentStatus: PaymentStatus;
-      paymentState: "pending" | "initiated" | "success" | "failed" | "expired" | "late" | "mismatch";
+      paymentState:
+        | "pending"
+        | "initiated"
+        | "success"
+        | "failed"
+        | "expired"
+        | "late"
+        | "mismatch";
       cancellationReason?: string;
       assign?: {
         status: DeliveryStatus;
@@ -1439,24 +1532,103 @@ async function seedDatabase() {
       };
     };
     const specs: ShowcaseSpec[] = [
-      { key: "waiting-vendor", orderStatus: OrderStatus.WAITING_VENDOR_CONFIRMATION, paymentStatus: PaymentStatus.PENDING, paymentState: "pending" },
-      { key: "waiting-customer", orderStatus: OrderStatus.WAITING_CUSTOMER_APPROVAL, paymentStatus: PaymentStatus.PENDING, paymentState: "pending" },
-      { key: "awaiting-payment", orderStatus: OrderStatus.AWAITING_PAYMENT, paymentStatus: PaymentStatus.INITIATED, paymentState: "initiated" },
-      { key: "payment-confirmed", orderStatus: OrderStatus.PAYMENT_CONFIRMED, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.PICKED_UP } },
-      { key: "cooking", orderStatus: OrderStatus.COOKING, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.ASSIGNED, extra: "cancelled-history" } },
-      { key: "ready-pickup", orderStatus: OrderStatus.READY_FOR_PICKUP, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.ACCEPTED } },
-      { key: "out-delivery", orderStatus: OrderStatus.OUT_FOR_DELIVERY, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.EN_ROUTE, extra: "declined-history" } },
-      { key: "cancelled", orderStatus: OrderStatus.CANCELLED, paymentStatus: PaymentStatus.FAILED, paymentState: "failed", cancellationReason: "USER_CANCELLED" },
-      { key: "failed-delivery", orderStatus: OrderStatus.FAILED_DELIVERY, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.FAILED } },
+      {
+        key: "waiting-vendor",
+        orderStatus: OrderStatus.WAITING_VENDOR_CONFIRMATION,
+        paymentStatus: PaymentStatus.PENDING,
+        paymentState: "pending",
+      },
+      {
+        key: "waiting-customer",
+        orderStatus: OrderStatus.WAITING_CUSTOMER_APPROVAL,
+        paymentStatus: PaymentStatus.PENDING,
+        paymentState: "pending",
+      },
+      {
+        key: "awaiting-payment",
+        orderStatus: OrderStatus.AWAITING_PAYMENT,
+        paymentStatus: PaymentStatus.INITIATED,
+        paymentState: "initiated",
+      },
+      {
+        key: "payment-confirmed",
+        orderStatus: OrderStatus.PAYMENT_CONFIRMED,
+        paymentStatus: PaymentStatus.SUCCESS,
+        paymentState: "success",
+        assign: { status: DeliveryStatus.PICKED_UP },
+      },
+      {
+        key: "cooking",
+        orderStatus: OrderStatus.COOKING,
+        paymentStatus: PaymentStatus.SUCCESS,
+        paymentState: "success",
+        assign: { status: DeliveryStatus.ASSIGNED, extra: "cancelled-history" },
+      },
+      {
+        key: "ready-pickup",
+        orderStatus: OrderStatus.READY_FOR_PICKUP,
+        paymentStatus: PaymentStatus.SUCCESS,
+        paymentState: "success",
+        assign: { status: DeliveryStatus.ACCEPTED },
+      },
+      {
+        key: "out-delivery",
+        orderStatus: OrderStatus.OUT_FOR_DELIVERY,
+        paymentStatus: PaymentStatus.SUCCESS,
+        paymentState: "success",
+        assign: { status: DeliveryStatus.EN_ROUTE, extra: "declined-history" },
+      },
+      {
+        key: "cancelled",
+        orderStatus: OrderStatus.CANCELLED,
+        paymentStatus: PaymentStatus.FAILED,
+        paymentState: "failed",
+        cancellationReason: "USER_CANCELLED",
+      },
+      {
+        key: "failed-delivery",
+        orderStatus: OrderStatus.FAILED_DELIVERY,
+        paymentStatus: PaymentStatus.SUCCESS,
+        paymentState: "success",
+        assign: { status: DeliveryStatus.FAILED },
+      },
       // RETURNED is only reachable from FAILED in DELIVERY_TRANSITIONS, so this
       // scenario carries the failed leg for the first rider and the returned leg
       // for the reassigned one. Both mirror the order to FAILED_DELIVERY, which
       // matches the showcase order status.
-      { key: "returned", orderStatus: OrderStatus.FAILED_DELIVERY, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.RETURNED, extra: "failed-history" } },
-      { key: "payment-expired", orderStatus: OrderStatus.PAYMENT_EXPIRED, paymentStatus: PaymentStatus.EXPIRED, paymentState: "expired", cancellationReason: "PAYMENT_EXPIRED" },
-      { key: "cancelled-unpaid", orderStatus: OrderStatus.CANCELLED_UNPAID, paymentStatus: PaymentStatus.EXPIRED, paymentState: "expired", cancellationReason: "USER_CANCELLED" },
-      { key: "late-payment", orderStatus: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.LATE_PAYMENT, paymentState: "late" },
-      { key: "amount-mismatch", orderStatus: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.AMOUNT_MISMATCH, paymentState: "mismatch" },
+      {
+        key: "returned",
+        orderStatus: OrderStatus.FAILED_DELIVERY,
+        paymentStatus: PaymentStatus.SUCCESS,
+        paymentState: "success",
+        assign: { status: DeliveryStatus.RETURNED, extra: "failed-history" },
+      },
+      {
+        key: "payment-expired",
+        orderStatus: OrderStatus.PAYMENT_EXPIRED,
+        paymentStatus: PaymentStatus.EXPIRED,
+        paymentState: "expired",
+        cancellationReason: "PAYMENT_EXPIRED",
+      },
+      {
+        key: "cancelled-unpaid",
+        orderStatus: OrderStatus.CANCELLED_UNPAID,
+        paymentStatus: PaymentStatus.EXPIRED,
+        paymentState: "expired",
+        cancellationReason: "USER_CANCELLED",
+      },
+      {
+        key: "late-payment",
+        orderStatus: OrderStatus.COMPLETED,
+        paymentStatus: PaymentStatus.LATE_PAYMENT,
+        paymentState: "late",
+      },
+      {
+        key: "amount-mismatch",
+        orderStatus: OrderStatus.COMPLETED,
+        paymentStatus: PaymentStatus.AMOUNT_MISMATCH,
+        paymentState: "mismatch",
+      },
     ];
     const showcaseOrders: Prisma.OrderCreateManyInput[] = [];
     const showcaseItems: Prisma.OrderItemCreateManyInput[] = [];
@@ -1466,7 +1638,9 @@ async function seedDatabase() {
       const customer = pick(customers);
       const vendor = pick(orderVendorPool);
       if (!customer || !vendor) continue;
-      const vendorProducts = orderableProducts.filter((p) => p.vendorId === vendor.id);
+      const vendorProducts = orderableProducts.filter(
+        (p) => p.vendorId === vendor.id,
+      );
       if (!vendorProducts.length) continue;
       const chosen = take(vendorProducts, faker.number.int({ min: 1, max: 2 }));
       if (!chosen.length) continue;
@@ -1482,7 +1656,10 @@ async function seedDatabase() {
       const basePrice = round2(items.reduce((s, i) => s + i.subtotal, 0));
       const totalPrice = round2(basePrice + 250 + 500);
       const orderDate = randomSeedDate();
-      const paymentStartedAt = addMilliseconds(orderDate, faker.number.int({ min: 1_000, max: 30_000 }));
+      const paymentStartedAt = addMilliseconds(
+        orderDate,
+        faker.number.int({ min: 1_000, max: 30_000 }),
+      );
       const protectedUntil = addMilliseconds(orderDate, 15 * 60000);
       let completedAt: Date | null = null;
       let expiresAt = addMilliseconds(orderDate, DAY_MS);
@@ -1494,18 +1671,28 @@ async function seedDatabase() {
       // to a later reviewed stage, so no REFUNDED showcase exists.
       if (spec.paymentState === "success" || spec.paymentState === "late") {
         if (spec.paymentState === "late")
-          completedAt =
-            addMilliseconds(protectedUntil, 5 * 60000 + faker.number.int({ min: 0, max: 300_000 }))
-          else
-            completedAt = addMilliseconds(paymentStartedAt, faker.number.int({ min: 1_000, max: 60_000 }));
+          completedAt = addMilliseconds(
+            protectedUntil,
+            5 * 60000 + faker.number.int({ min: 0, max: 300_000 }),
+          );
+        else
+          completedAt = addMilliseconds(
+            paymentStartedAt,
+            faker.number.int({ min: 1_000, max: 60_000 }),
+          );
       } else if (spec.paymentState === "mismatch") {
-        completedAt = addMilliseconds(paymentStartedAt, faker.number.int({ min: 1_000, max: 60_000 }));
+        completedAt = addMilliseconds(
+          paymentStartedAt,
+          faker.number.int({ min: 1_000, max: 60_000 }),
+        );
         amount = Math.round(totalPrice * 100) + 1000; // intentional +₦10 mismatch case
       } else if (spec.paymentState === "initiated") {
         expiresAt = addMilliseconds(paymentStartedAt, 30 * 60000);
       }
       const orderId = faker.string.uuid();
-      const address = pick(customerAddresses.filter((a) => a.userId === customer.id));
+      const address = pick(
+        customerAddresses.filter((a) => a.userId === customer.id),
+      );
       const needsCancelStamp =
         spec.orderStatus === OrderStatus.CANCELLED ||
         spec.orderStatus === OrderStatus.CANCELLED_UNPAID ||
@@ -1520,7 +1707,9 @@ async function seedDatabase() {
         deliveryFee: 500,
         totalPrice,
         customerApproval:
-          spec.orderStatus === OrderStatus.WAITING_CUSTOMER_APPROVAL ? false : true,
+          spec.orderStatus === OrderStatus.WAITING_CUSTOMER_APPROVAL
+            ? false
+            : true,
         status: spec.orderStatus,
         paymentStatus: spec.paymentStatus,
         createdAt: orderDate,
@@ -1529,7 +1718,9 @@ async function seedDatabase() {
         paymentStartedAt,
         protectedUntil,
         paymentGraceMinutes: 15,
-        cancelledAt: needsCancelStamp ? (completedAt ?? addMilliseconds(orderDate, 20 * 60000)) : undefined,
+        cancelledAt: needsCancelStamp
+          ? (completedAt ?? addMilliseconds(orderDate, 20 * 60000))
+          : undefined,
         cancellationReason: spec.cancellationReason,
       });
       showcaseOrderIds.push(orderId);
@@ -1562,9 +1753,13 @@ async function seedDatabase() {
       });
       const driver = pick(deliveryProfilesSaved);
       if (driver && spec.assign) {
-        const assignedAt = addMilliseconds(orderDate, faker.number.int({ min: 60_000, max: 300_000 }));
+        const assignedAt = addMilliseconds(
+          orderDate,
+          faker.number.int({ min: 60_000, max: 300_000 }),
+        );
         const buildTimeline = (status: DeliveryStatus) => {
-          if (status === DeliveryStatus.ASSIGNED) return { assignedAt } as const;
+          if (status === DeliveryStatus.ASSIGNED)
+            return { assignedAt } as const;
           if (status === DeliveryStatus.ACCEPTED)
             return {
               assignedAt,
@@ -1596,8 +1791,18 @@ async function seedDatabase() {
           // A returned leg follows a failed one; completedAt marks when the
           // return was handed back, not a successful delivery.
           if (status === DeliveryStatus.RETURNED)
-            return { assignedAt, acceptedAt, startedAt, completedAt: completedAt2 } as const;
-          return { assignedAt, acceptedAt, startedAt, completedAt: completedAt2 } as const;
+            return {
+              assignedAt,
+              acceptedAt,
+              startedAt,
+              completedAt: completedAt2,
+            } as const;
+          return {
+            assignedAt,
+            acceptedAt,
+            startedAt,
+            completedAt: completedAt2,
+          } as const;
         };
         // History case: a first driver declined/cancelled, then reassigned.
         if (spec.assign.extra === "declined-history") {
@@ -1635,9 +1840,18 @@ async function seedDatabase() {
         });
       }
     }
-    await createMany((data) => prisma.order.createMany({ data }), showcaseOrders);
-    await createMany((data) => prisma.orderItem.createMany({ data }), showcaseItems);
-    await createMany((data) => prisma.payment.createMany({ data }), showcasePayments);
+    await createMany(
+      (data) => prisma.order.createMany({ data }),
+      showcaseOrders,
+    );
+    await createMany(
+      (data) => prisma.orderItem.createMany({ data }),
+      showcaseItems,
+    );
+    await createMany(
+      (data) => prisma.payment.createMany({ data }),
+      showcasePayments,
+    );
     await createMany(
       (data) => prisma.deliveryAssignment.createMany({ data }),
       showcaseAssignments,
@@ -1785,14 +1999,18 @@ async function seedDatabase() {
 
       // Usages tied to real COMPLETED bulk orders of the same vendor.
       const vendorCompletedOrders = savedOrders.filter(
-        (o) => o.vendorId === promoVendor.id && o.status === OrderStatus.COMPLETED,
+        (o) =>
+          o.vendorId === promoVendor.id && o.status === OrderStatus.COMPLETED,
       );
       const usageTargets = vendorCompletedOrders.slice(0, 2);
       const fixedPromo = await prisma.promotion.findFirst({
         where: { id: { in: showcasePromoIds }, type: DiscountType.FIXED },
       });
       const singlePromo = await prisma.promotion.findFirst({
-        where: { id: { in: showcasePromoIds }, scope: PromotionScope.SINGLE_PRODUCT },
+        where: {
+          id: { in: showcasePromoIds },
+          scope: PromotionScope.SINGLE_PRODUCT,
+        },
       });
       const usageRows: Prisma.PromotionUsageCreateManyInput[] = [];
       if (fixedPromo && usageTargets[0])
@@ -1812,7 +2030,10 @@ async function seedDatabase() {
           discount: 250,
         });
       if (usageRows.length) {
-        await createMany((data) => prisma.promotionUsage.createMany({ data }), usageRows);
+        await createMany(
+          (data) => prisma.promotionUsage.createMany({ data }),
+          usageRows,
+        );
         for (const row of usageRows)
           await prisma.promotion.update({
             where: { id: row.promotionId },
@@ -1906,7 +2127,9 @@ async function seedDatabase() {
     const customer = pick(customers);
     const product = pick(orderableProducts);
     if (customer && product) {
-      const address = pick(customerAddresses.filter((a) => a.userId === customer.id));
+      const address = pick(
+        customerAddresses.filter((a) => a.userId === customer.id),
+      );
       const request = await prisma.specialOrderRequest.create({
         data: {
           customerId: customer.id,
@@ -1985,12 +2208,22 @@ async function seedDatabase() {
   // PAID + one CANCELLED (admin-settled states).
   {
     const rewardCount = randomRange(SEED_CONFIG.referralRewards);
-    const pairCount = Math.min(rewardCount + 2, Math.floor(customers.length / 2));
+    const pairCount = Math.min(
+      rewardCount + 2,
+      Math.floor(customers.length / 2),
+    );
     const usedReferralCodes = new Set<string>();
-    const pairs: { referrerId: string; referredId: string; orderId: string | null }[] = [];
+    const pairs: {
+      referrerId: string;
+      referredId: string;
+      orderId: string | null;
+    }[] = [];
     const completedOrderByCustomer = new Map<string, string>();
     for (const o of savedOrders)
-      if (o.status === OrderStatus.COMPLETED && !completedOrderByCustomer.has(o.customerId))
+      if (
+        o.status === OrderStatus.COMPLETED &&
+        !completedOrderByCustomer.has(o.customerId)
+      )
         completedOrderByCustomer.set(o.customerId, o.id);
     for (const showcaseId of showcaseOrderIds) {
       // showcaseOrderIds are bulk-external; their customers are already in
@@ -2008,7 +2241,10 @@ async function seedDatabase() {
         code = seedReferralCode(`${referrer.name}${guard}`);
       usedReferralCodes.add(code);
       try {
-        await prisma.user.update({ where: { id: referrer.id }, data: { referralCode: code } });
+        await prisma.user.update({
+          where: { id: referrer.id },
+          data: { referralCode: code },
+        });
       } catch {
         continue; // collision with pre-existing data: skip this pair
       }
@@ -2026,20 +2262,23 @@ async function seedDatabase() {
         });
       }
     }
-    const referralRewards: Prisma.ReferralRewardCreateManyInput[] = pairs.map((p, idx) => ({
-      referrerId: p.referrerId,
-      referredId: p.referredId,
-      orderId: p.orderId,
-      amount: 500,
-      status:
-        idx === 0 && p.orderId
-          ? ReferralRewardStatus.PAID
-          : idx === 1
-            ? ReferralRewardStatus.CANCELLED
-            : ReferralRewardStatus.PENDING,
-    }));
+    const referralRewards: Prisma.ReferralRewardCreateManyInput[] = pairs.map(
+      (p, idx) => ({
+        referrerId: p.referrerId,
+        referredId: p.referredId,
+        orderId: p.orderId,
+        amount: 500,
+        status:
+          idx === 0 && p.orderId
+            ? ReferralRewardStatus.PAID
+            : idx === 1
+              ? ReferralRewardStatus.CANCELLED
+              : ReferralRewardStatus.PENDING,
+      }),
+    );
     await createMany(
-      (data) => prisma.referralReward.createMany({ data, skipDuplicates: true }),
+      (data) =>
+        prisma.referralReward.createMany({ data, skipDuplicates: true }),
       referralRewards,
     );
   }
@@ -2098,9 +2337,12 @@ async function seedDatabase() {
     orderItemNewId: "seed-showcase-orderitem-1",
     orderItemLegacyId: "seed-showcase-orderitem-2",
   };
-  const showcaseCategoryId = dishCategoryById.get("JOLLOF") ?? dishCategoryById.get("OTHER");
+  const showcaseCategoryId =
+    dishCategoryById.get("JOLLOF") ?? dishCategoryById.get("OTHER");
   if (!showcaseCategoryId) {
-    throw new Error("Showcase fixtures require DishType taxonomy (JOLLOF/OTHER).");
+    throw new Error(
+      "Showcase fixtures require DishType taxonomy (JOLLOF/OTHER).",
+    );
   }
 
   const showcaseVendor =
@@ -2126,7 +2368,11 @@ async function seedDatabase() {
   // The bulk address loop runs before this section, so the showcase
   // vendor gets its own kitchen address (delivery-fee flows resolve
   // vendor location from addresses).
-  if (!(await prisma.address.findUnique({ where: { id: "seed-showcase-vendor-address" } }))) {
+  if (
+    !(await prisma.address.findUnique({
+      where: { id: "seed-showcase-vendor-address" },
+    }))
+  ) {
     await prisma.address.create({
       data: {
         id: "seed-showcase-vendor-address",
@@ -2146,12 +2392,15 @@ async function seedDatabase() {
   // Product A — plain: no structured option groups (legacy extra only, see
   // below for why it exists). Live/orderable under current semantics.
   const showcasePlain =
-    (await prisma.product.findUnique({ where: { id: SHOWCASE.productPlainId } })) ??
+    (await prisma.product.findUnique({
+      where: { id: SHOWCASE.productPlainId },
+    })) ??
     (await prisma.product.create({
       data: {
         id: SHOWCASE.productPlainId,
         name: "Seed Showcase Plain Rice",
-        description: "Deterministic showcase product with no structured option groups.",
+        description:
+          "Deterministic showcase product with no structured option groups.",
         price: 2500,
         dishTypeId: "JOLLOF",
         categoryId: showcaseCategoryId,
@@ -2163,12 +2412,15 @@ async function seedDatabase() {
     }));
   // Product B — structured: required single group + two optional groups.
   const showcaseStructured =
-    (await prisma.product.findUnique({ where: { id: SHOWCASE.productStructuredId } })) ??
+    (await prisma.product.findUnique({
+      where: { id: SHOWCASE.productStructuredId },
+    })) ??
     (await prisma.product.create({
       data: {
         id: SHOWCASE.productStructuredId,
         name: "Seed Showcase Party Jollof",
-        description: "Deterministic showcase product with structured option groups.",
+        description:
+          "Deterministic showcase product with structured option groups.",
         price: 3000,
         dishTypeId: "JOLLOF",
         categoryId: showcaseCategoryId,
@@ -2183,12 +2435,15 @@ async function seedDatabase() {
   // orderCutoffTime, dailyCap, or ProductDailyCounter, so these values
   // must not be interpreted as proof that runtime scheduling exists.
   const showcaseScheduled =
-    (await prisma.product.findUnique({ where: { id: SHOWCASE.productScheduledId } })) ??
+    (await prisma.product.findUnique({
+      where: { id: SHOWCASE.productScheduledId },
+    })) ??
     (await prisma.product.create({
       data: {
         id: SHOWCASE.productScheduledId,
         name: "Seed Showcase Scheduled Feast",
-        description: "Scheduling/cap fixture. Inert until enforcement is implemented.",
+        description:
+          "Scheduling/cap fixture. Inert until enforcement is implemented.",
         price: 2000,
         dishTypeId: "JOLLOF",
         categoryId: showcaseCategoryId,
@@ -2208,11 +2463,20 @@ async function seedDatabase() {
   const counterDate = new Date(new Date().setUTCHours(0, 0, 0, 0));
   if (
     !(await prisma.productDailyCounter.findUnique({
-      where: { productId_date: { productId: SHOWCASE.productScheduledId, date: counterDate } },
+      where: {
+        productId_date: {
+          productId: SHOWCASE.productScheduledId,
+          date: counterDate,
+        },
+      },
     }))
   ) {
     await prisma.productDailyCounter.create({
-      data: { productId: SHOWCASE.productScheduledId, date: counterDate, count: 0 },
+      data: {
+        productId: SHOWCASE.productScheduledId,
+        date: counterDate,
+        count: 0,
+      },
     });
   }
 
@@ -2222,7 +2486,9 @@ async function seedDatabase() {
   // keeps both frozen compatibility branches represented. Showcase
   // structured products intentionally carry no legacy options.
   const showcaseLegacyOption =
-    (await prisma.productOption.findUnique({ where: { id: SHOWCASE.legacyOptionId } })) ??
+    (await prisma.productOption.findUnique({
+      where: { id: SHOWCASE.legacyOptionId },
+    })) ??
     (await prisma.productOption.create({
       data: {
         id: SHOWCASE.legacyOptionId,
@@ -2236,10 +2502,31 @@ async function seedDatabase() {
   // optionGroup.service.ts: min <= max; required => min >= 1).
   const ensureGroup = async (
     id: string,
-    data: { name: string; required: boolean; minSelections: number; maxSelections: number; sortOrder: number },
+    data: {
+      name: string;
+      required: boolean;
+      minSelections: number;
+      maxSelections: number;
+      sortOrder: number;
+    },
   ) =>
-    (await prisma.optionGroup.findUnique({ where: { id } })) ??
-    (await prisma.optionGroup.create({ data: { id, productId: showcaseStructured.id, ...data } }));
+    ensureSeedFixture({
+      fixture: "OptionGroup",
+      id,
+      findById: () => prisma.optionGroup.findUnique({ where: { id } }),
+      create: () =>
+        prisma.optionGroup.create({
+          data: { id, productId: showcaseStructured.id, ...data },
+        }),
+      expected: {
+        productId: showcaseStructured.id,
+        name: data.name,
+        required: data.required,
+        minSelections: data.minSelections,
+        maxSelections: data.maxSelections,
+        sortOrder: data.sortOrder,
+      },
+    });
   await ensureGroup(SHOWCASE.groupSizeId, {
     name: "Size",
     required: true,
@@ -2263,10 +2550,27 @@ async function seedDatabase() {
   });
   const ensureGroupItem = async (
     id: string,
-    data: { optionGroupId: string; name: string; priceAdd: number; isActive?: boolean; sortOrder: number },
+    data: {
+      optionGroupId: string;
+      name: string;
+      priceAdd: number;
+      isActive?: boolean;
+      sortOrder: number;
+    },
   ) =>
-    (await prisma.optionGroupItem.findUnique({ where: { id } })) ??
-    (await prisma.optionGroupItem.create({ data: { id, ...data } }));
+    ensureSeedFixture({
+      fixture: "OptionGroupItem",
+      id,
+      findById: () => prisma.optionGroupItem.findUnique({ where: { id } }),
+      create: () => prisma.optionGroupItem.create({ data: { id, ...data } }),
+      expected: {
+        optionGroupId: data.optionGroupId,
+        name: data.name,
+        priceAdd: data.priceAdd,
+        isActive: data.isActive ?? true,
+        sortOrder: data.sortOrder,
+      },
+    });
   await ensureGroupItem(SHOWCASE.itemSmallId, {
     optionGroupId: SHOWCASE.groupSizeId,
     name: "Small",
@@ -2335,7 +2639,9 @@ async function seedDatabase() {
     select: { id: true },
   });
   if (!showcaseCustomer) {
-    console.warn("Skipping showcase cart/order: demo customer account is missing.");
+    console.warn(
+      "Skipping showcase cart/order: demo customer account is missing.",
+    );
   } else {
     // New-authority line: Medium (+500) + Promo Chicken (-200).
     // unitPrice = 3000 + 500 - 200 = 3300 (production pricing semantics:
@@ -2344,9 +2650,18 @@ async function seedDatabase() {
     const showcaseCart =
       (await prisma.cart.findUnique({ where: { id: SHOWCASE.cartId } })) ??
       (await prisma.cart.create({
-        data: { id: SHOWCASE.cartId, customerId: showcaseCustomer.id, basePrice: 9700, totalPrice: 9700 },
+        data: {
+          id: SHOWCASE.cartId,
+          customerId: showcaseCustomer.id,
+          basePrice: 9700,
+          totalPrice: 9700,
+        },
       }));
-    if (!(await prisma.cartItem.findUnique({ where: { id: SHOWCASE.cartItemNewId } }))) {
+    if (
+      !(await prisma.cartItem.findUnique({
+        where: { id: SHOWCASE.cartItemNewId },
+      }))
+    ) {
       const newLine = await prisma.cartItem.create({
         data: {
           id: SHOWCASE.cartItemNewId,
@@ -2359,12 +2674,26 @@ async function seedDatabase() {
       });
       await prisma.cartItemOption.createMany({
         data: [
-          { cartItemId: newLine.id, optionGroupItemId: SHOWCASE.itemMediumId, name: "Medium", price: 500 },
-          { cartItemId: newLine.id, optionGroupItemId: SHOWCASE.itemPromoChickenId, name: "Promo Chicken (-200)", price: -200 },
+          {
+            cartItemId: newLine.id,
+            optionGroupItemId: SHOWCASE.itemMediumId,
+            name: "Medium",
+            price: 500,
+          },
+          {
+            cartItemId: newLine.id,
+            optionGroupItemId: SHOWCASE.itemPromoChickenId,
+            name: "Promo Chicken (-200)",
+            price: -200,
+          },
         ],
       });
     }
-    if (!(await prisma.cartItem.findUnique({ where: { id: SHOWCASE.cartItemLegacyId } }))) {
+    if (
+      !(await prisma.cartItem.findUnique({
+        where: { id: SHOWCASE.cartItemLegacyId },
+      }))
+    ) {
       const legacyLine = await prisma.cartItem.create({
         data: {
           id: SHOWCASE.cartItemLegacyId,
@@ -2420,8 +2749,16 @@ async function seedDatabase() {
                 updatedAt: now,
                 options: {
                   create: [
-                    { optionGroupItemId: SHOWCASE.itemMediumId, name: "Medium", price: 500 },
-                    { optionGroupItemId: SHOWCASE.itemPromoChickenId, name: "Promo Chicken (-200)", price: -200 },
+                    {
+                      optionGroupItemId: SHOWCASE.itemMediumId,
+                      name: "Medium",
+                      price: 500,
+                    },
+                    {
+                      optionGroupItemId: SHOWCASE.itemPromoChickenId,
+                      name: "Promo Chicken (-200)",
+                      price: -200,
+                    },
                   ],
                 },
               },
@@ -2434,7 +2771,13 @@ async function seedDatabase() {
                 createdAt: now,
                 updatedAt: now,
                 options: {
-                  create: [{ optionId: showcaseLegacyOption.id, name: "Extra Meat", price: 600 }],
+                  create: [
+                    {
+                      optionId: showcaseLegacyOption.id,
+                      name: "Extra Meat",
+                      price: 600,
+                    },
+                  ],
                 },
               },
             ],

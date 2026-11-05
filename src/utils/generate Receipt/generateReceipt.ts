@@ -2,6 +2,7 @@ import PDFDocument from "pdfkit";
 import fs from "fs";
 import path from "path";
 import prisma from "../../lib/prisma";
+import { ensureReceiptsDir, getReceiptFileName } from "../receiptsPath";
 
 /**
  * 🧾 generateReceipt(paymentId)
@@ -27,11 +28,15 @@ export async function generateReceipt(paymentId: string) {
 
   if (!payment) throw new Error("Payment not found");
 
-  const receiptsDir = "./receipts";
-  if (!fs.existsSync(receiptsDir)) fs.mkdirSync(receiptsDir, { recursive: true });
+  // The on-disk location comes from the shared resolver so the writer and the
+  // `getReceipt` reader always agree. The default is unchanged
+  // (`process.cwd()/receipts`); only an explicit RECEIPTS_DIR override moves
+  // it, and only tests set that.
+  const receiptsDir = ensureReceiptsDir();
 
-  const fileName = `receipt_${payment.reference}.pdf`;
+  const fileName = getReceiptFileName(payment.reference);
   const filePath = path.join(receiptsDir, fileName);
+  // The public URL is a contract and is NOT affected by the on-disk location.
   const baseUrl = process.env.BASE_URL || "https://food-paddi-backend.onrender.com";
   const pdfUrl = `${baseUrl}/receipts/${fileName}`;
 

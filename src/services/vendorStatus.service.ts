@@ -2,7 +2,7 @@ import { Role, VendorStatus } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { createAuditLog } from "../utils/auditLog.service";
 import { sendNotification } from "../utils/activityUtils/notify";
-import { NotFoundError, ValidationError } from "../errors/AppError";
+import { ForbiddenError, NotFoundError, ValidationError } from "../errors/AppError";
 
 // Phase 1C vendor onboarding lifecycle.
 //
@@ -13,7 +13,9 @@ import { NotFoundError, ValidationError } from "../errors/AppError";
 //                 (only when VENDOR_AUTO_APPROVE=false, default true)
 // - SUSPENDED   : admin-set, cannot sell
 //
-// Requirements for ACTIVE: brandName + phoneNumber + kycStatus VERIFIED.
+// Requirements for ACTIVE (Phase 1D.4): brandName + verified canonical
+// phone (phoneNumberE164 present AND isPhoneVerified) + kycStatus VERIFIED.
+// The raw phoneNumber display field is never proof of verification.
 // Bank details are NOT required to go live.
 
 export function isVendorAutoApprove(): boolean {
@@ -34,12 +36,69 @@ export function allowedVendorTransitions(from: NullableStatus): VendorStatus[] {
   return TRANSITIONS[String(from)] ?? [];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Suspension policy — the ONE definition, enforced on every vendor write path.
+//
+// Batch 1D.41. Before this, `SUSPENDED` was enforced on some write surfaces
+// (products, promos, uploads, settings) but not on two money/fulfilment
+// surfaces: rewriting the payout bank account, and driving an order they
+// already hold. `authorizeVendor` cannot cover either — it reads only the
+// signed `role` claim, never `vendorStatus`, so a vendor suspended by an
+// admin keeps passing it until their 15-minute access token expires.
+//
+// NEW / PENDING_REVIEW deliberately pass: they may prepare menus and payout
+// details while onboarding. Orderability is gated separately by
+// `vendorStatus === ACTIVE` in vendorAvailability.service.ts. Only
+// SUSPENDED — an admin decision to stop this account — is refused here.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const VENDOR_SUSPENDED_MESSAGE =
+  "Your vendor account is suspended and cannot make changes right now. Contact support.";
+
+export function isVendorSuspended(status: NullableStatus | undefined): boolean {
+  return status === VendorStatus.SUSPENDED;
+}
+
+/**
+ * Throw if the acting vendor is SUSPENDED. Callers must invoke this BEFORE
+ * any write and BEFORE any external call (Paystack, notifications), so a
+ * rejected request leaves no partial state and no provider side effect.
+ */
+export function assertVendorNotSuspended(status: NullableStatus | undefined): void {
+  if (isVendorSuspended(status)) throw new ForbiddenError(VENDOR_SUSPENDED_MESSAGE);
+}
+
+export const VENDOR_STATUS_UNRESOLVED_MESSAGE =
+  "We could not confirm your vendor account status, so this action was not completed. Please try again or contact support.";
+
+/**
+ * True when a lifecycle status was actually read from storage.
+ *
+ * `null` counts as established: the schema models it deliberately as "holds
+ * VENDOR, status system has not run yet" (see the lifecycle table above), so
+ * every other enforcement site in this codebase treats it as a real value.
+ * `undefined` means the row or the field simply was not read, which is
+ * different — that is a gap in what we know, not a status.
+ *
+ * Batch 1D.42: an order transition must not read a missing vendor relation
+ * as "not suspended".
+ */
+export function isVendorStatusEstablishable(status: unknown): boolean {
+  return status === null || Object.values(VendorStatus).includes(status as VendorStatus);
+}
+
 export function requirementsMet(user: {
   brandName: string | null;
-  phoneNumber: string | null;
+  phoneNumberE164: string | null;
+  isPhoneVerified: boolean;
   kycStatus: string;
 }): boolean {
-  return !!user.brandName && !!user.phoneNumber && user.kycStatus === "VERIFIED";
+  return (
+    !!user.brandName &&
+    !!user.phoneNumberE164 &&
+    user.isPhoneVerified === true &&
+    user.kycStatus === "VERIFIED"
+  );
 }
 
 /**
@@ -63,7 +122,14 @@ export async function ensureVendorStatusNew(userId: string): Promise<void> {
 export async function evaluateVendorStatus(userId: string): Promise<NullableStatus> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { roles: true, vendorStatus: true, kycStatus: true, brandName: true, phoneNumber: true },
+    select: {
+      roles: true,
+      vendorStatus: true,
+      kycStatus: true,
+      brandName: true,
+      phoneNumberE164: true,
+      isPhoneVerified: true,
+    },
   });
   if (!user || !user.roles.includes(Role.VENDOR)) return user?.vendorStatus ?? null;
   if (user.vendorStatus === VendorStatus.SUSPENDED || user.vendorStatus === VendorStatus.PENDING_REVIEW) {

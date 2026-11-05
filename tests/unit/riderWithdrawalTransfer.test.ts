@@ -67,6 +67,21 @@ jest.mock("../../src/lib/redis", () => ({
   },
 }));
 
+// Phase 3.2.8: the handler drives the inflight/done replay claim. These
+// suites exercise the financial settlement paths, not the claim state
+// machine (covered in webhookReplayClaim.test.ts), so the claim is stubbed
+// to always acquire and complete — preserving each suite's original
+// duplicate/replay semantics via the real settlement CAS.
+jest.mock("../../src/services/webhookReplayClaim.service", () => ({
+  __esModule: true,
+  newClaimToken: jest.fn(() => "mock-owner-token"),
+  acquireWebhookClaim: jest.fn(async () => "ACQUIRED"),
+  completeWebhookClaim: jest.fn(async () => true),
+  releaseWebhookClaim: jest.fn(async () => true),
+  WEBHOOK_INFLIGHT_TTL_SECONDS: 300,
+  WEBHOOK_DONE_TTL_SECONDS: 259200,
+}));
+
 jest.mock("../../src/services/paymentFinalizer.service", () => ({
   finalizePaymentSuccess: jest.fn(async () => ({ outcome: "SUCCESS" })),
 }));
@@ -90,7 +105,7 @@ const paystackPost = paystack.post as unknown as jest.Mock;
 
 const WITHDRAWAL_ID = "11111111-1111-1111-1111-111111111111";
 const REFERENCE = `rider_withdrawal_${WITHDRAWAL_ID}`;
-const AMOUNT = 5000;
+const AMOUNT = 500000; // integer kobo (₦5,000), matching withdrawal.amount (Phase 3A)
 
 function processingWithdrawal(overrides: Record<string, unknown> = {}) {
   return {
@@ -174,7 +189,7 @@ describe("1-5. gateway outcome classification", () => {
   it("classify: the legacy `retryable` flag is preserved (vendor payouts unchanged)", async () => {
     paystackPost.mockRejectedValueOnce(httpError(500));
     await expect(
-      initiateTransfer({ amountNaira: 100, recipientCode: "RCP", reason: "r", reference: "ref-1" }),
+      initiateTransfer({ amountKobo: 100, recipientCode: "RCP", reason: "r", reference: "ref-1" }),
     ).rejects.toMatchObject({
       details: expect.objectContaining({ retryable: false, outcome: "UNKNOWN" }),
     });
@@ -265,7 +280,7 @@ describe("1-5. gateway outcome classification", () => {
 // ---------------------------------------------------------------------------
 // Webhook helpers
 // ---------------------------------------------------------------------------
-function transferEvent(event: string, reference = REFERENCE, amount = AMOUNT * 100) {
+function transferEvent(event: string, reference = REFERENCE, amount = AMOUNT) {
   return Buffer.from(
     JSON.stringify({
       event,

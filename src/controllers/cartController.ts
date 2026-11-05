@@ -2,13 +2,12 @@ import { Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { AuthRequest } from "../middlewares/auth.middleware";
 import prisma from "../lib/prisma";
-import { ActivityType, OrderStatus } from "@prisma/client";
-import { recordActivityBundle } from "../utils/activityUtils/recordActivityBundle";
+import { OrderStatus } from "@prisma/client";
+import { createAuditLog } from "../utils/auditLog.service";
 import { addToCartSchema, updateCartItemSchema } from "../validations/cartSchema";
 import { z } from "zod";
 import { ShopCartRedis } from "../lib/redis";
-import { sendSuccess, sendCreated } from "../utils/apiResponse";
-import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnprocessableEntityError } from "../errors/AppError";
+import { sendSuccess, sendCreated, toJsonSafe, koboToNaira } from "../utils/apiResponse";import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnprocessableEntityError } from "../errors/AppError";
 import { cartSummaryService } from "../services/cartSummary.service";
 import {
   loadActiveProductPromos,
@@ -31,7 +30,20 @@ import {
   checkoutPayloadHash,
 } from "../services/checkoutIdempotency.service";
 import { clearProductCache } from "../services/clearCaches";
+import {
+  buildOrderMoneySnapshot,
+  resolveCommissionRate,
+} from "../services/orderSnapshot.service";
 import { logger } from "../lib/logger";
+import { DateTime } from "luxon";
+import {
+  LAGOS_TZ,
+  parseScheduledAt,
+  validateCutOff,
+  lagosDayStart,
+  reserveDailyCap,
+  releaseDailyCap,
+} from "../services/scheduling.service";
 
 // Normalize Express params/query values to string
 function ensureString(v: any): string {
@@ -41,6 +53,11 @@ function ensureString(v: any): string {
 
 const CART_TTL_SECONDS = 3600; // 1 hour
 const MAX_SNAPSHOT_AGE_MS = 30 * 60 * 1000; // 30 minutes
+// F-2.17: versioned cart cache key. Readers ignore old `cart:user:<id>`
+// entries, which expire naturally via CART_TTL_SECONDS. The existing
+// `cart:user:` maintenance sweep still matches both old and new formats.
+const CART_CACHE_VERSION = "v2";
+const cartCacheKey = (userId: string) => `cart:user:${CART_CACHE_VERSION}:${userId}`;
 const round = (v: number) => Number(v.toFixed(2));
 
 // Helper: Calculate cart totals (base = total; discounts happen at
@@ -50,10 +67,115 @@ const calculateCartTotals = (items: Array<{ unitPrice: number; quantity: number 
   return { basePrice, totalPrice: basePrice };
 };
 
+type CartOptionRow = {
+  productOptionId: string | null;
+  optionGroupItemId: string | null;
+  name: string;
+  price: number;
+};
+
+// Phase 2B.4b: line identity is representation-aware. A new-authority line
+// and a legacy-authority line never match, even if UUIDs collided across
+// tables; option order never affects identity (sorted comparison).
+function lineSelection(options: Pick<CartOptionRow, "productOptionId" | "optionGroupItemId">[]): {
+  kind: "empty" | "legacy" | "new" | "mixed";
+  ids: string[];
+} {
+  if (options.length === 0) return { kind: "empty", ids: [] };
+  const legacy = options.filter((o) => o.productOptionId != null);
+  const neo = options.filter((o) => o.optionGroupItemId != null);
+  if (neo.length > 0 && legacy.length === 0)
+    return { kind: "new", ids: neo.map((o) => o.optionGroupItemId as string).sort() };
+  if (legacy.length > 0 && neo.length === 0)
+    return { kind: "legacy", ids: legacy.map((o) => o.productOptionId as string).sort() };
+  return { kind: "mixed", ids: [] };
+}
+
+interface ResolvedNewSelection {
+  snapshots: Array<{ optionGroupItemId: string; name: string; price: number }>;
+  optionsPrice: number;
+}
+
+// Shape returned by `prisma.optionGroup.findMany({ include: { items: true } })`.
+type CheckoutOptionGroup = {
+  id: string;
+  productId: string;
+  name: string;
+  required: boolean;
+  minSelections: number;
+  maxSelections: number;
+  sortOrder: number;
+  items: Array<{ id: string; name: string; priceAdd: number; isActive: boolean }>;
+};
+
+// Phase 2B.4b: authoritative validation for new-authority selections.
+// Every rule is enforced against live PostgreSQL rows (never Redis, never
+// client input): ownership chain, active state, per-group min/max
+// completeness across ALL of the product's groups, duplicates.
+async function resolveNewOptionSelection(
+  productId: string,
+  itemIds: string[],
+  preloadedGroups?: CheckoutOptionGroup[],
+): Promise<ResolvedNewSelection> {
+  if (new Set(itemIds).size !== itemIds.length)
+    throw new ValidationError("Duplicate option selection");
+
+  // No empty shortcut: an explicit [] must still satisfy required groups.
+  // `preloadedGroups` lets checkout batch the fetch across all cart lines
+  // instead of issuing one query per line; an empty array means "this
+  // product has no groups" (already known, so no query is issued).
+  const groups =
+    preloadedGroups ??
+    (await prisma.optionGroup.findMany({
+      where: { productId },
+      include: { items: true },
+    }));
+  const itemById = new Map<string, { id: string; name: string; priceAdd: number; isActive: boolean; optionGroupId: string }>();
+  for (const group of groups) {
+    for (const item of group.items) itemById.set(item.id, { ...item, optionGroupId: group.id });
+  }
+
+  const invalid = itemIds.filter((id) => !itemById.has(id));
+  if (invalid.length > 0) {
+    throw new ValidationError("One or more selected extras are no longer available", { invalidOptions: invalid });
+  }
+  const selected = itemIds.map((id) => itemById.get(id)!);
+  const inactive = selected.filter((item) => !item.isActive);
+  if (inactive.length > 0) {
+    throw new ValidationError("One or more selected extras are no longer available", {
+      invalidOptions: inactive.map((item) => item.id),
+    });
+  }
+
+  // Completeness: every group of the product is checked, so required
+  // groups cannot be bypassed by omission.
+  const selectedByGroup = new Map<string, number>();
+  for (const item of selected) {
+    selectedByGroup.set(item.optionGroupId, (selectedByGroup.get(item.optionGroupId) ?? 0) + 1);
+  }
+  for (const group of groups) {
+    const count = selectedByGroup.get(group.id) ?? 0;
+    if (count < group.minSelections || count > group.maxSelections) {
+      throw new ValidationError(
+        `Option group "${group.name}" requires between ${group.minSelections} and ${group.maxSelections} selections`,
+        { optionGroupId: group.id },
+      );
+    }
+  }
+
+  const snapshots = selected.map((item) => ({
+    optionGroupItemId: item.id,
+    name: item.name,
+    price: item.priceAdd,
+  }));
+  const optionsPrice = selected.reduce((sum, item) => sum + Number(item.priceAdd), 0);
+  return { snapshots, optionsPrice };
+}
+
 // GET /cart - Get current cart
 export const getCart = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
-  const cacheKey = `cart:user:${userId}`;
+  const cacheKey = cartCacheKey(userId);
 
   try {
     const cachedCart = await ShopCartRedis.get(cacheKey);
@@ -97,6 +219,9 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
   }
 
   const { productId, quantity = 1, selectedOptions = [], specialRequest } = parsed.data;
+  // Presence (not emptiness) selects the new authority; default [] would
+  // force a group load on every legacy add.
+  const optionGroupItemIds = parsed.data.optionGroupItemIds;
 
   const product = await prisma.product.findUnique({
     where: { id: productId },
@@ -134,6 +259,21 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
     throw new ValidationError("One or more selected extras are no longer available", { invalidOptions });
   }
 
+  // Phase 2B.4b: new-authority selections via explicit optionGroupItemIds.
+  // One line carries exactly one representation — mixing legacy and new
+  // ids is rejected (the CHECK constraint could not store it anyway).
+  // Legacy ids are never reinterpreted as group-item ids and vice versa.
+  // Key presence (not emptiness) selects the authority, so an explicit []
+  // still validates required groups instead of slipping through.
+  const wantsNewOptions = optionGroupItemIds !== undefined;
+  let newSelection: ResolvedNewSelection | null = null;
+  if (selectedOptions.length > 0 && (optionGroupItemIds ?? []).length > 0) {
+    throw new ValidationError("Use either selectedOptions or optionGroupItemIds, not both");
+  }
+  if (wantsNewOptions) {
+    newSelection = await resolveNewOptionSelection(productId, optionGroupItemIds ?? []);
+  }
+
   let cart = await prisma.cart.findFirst({
     where: { customerId: req.user!.id },
     include: { items: { include: { options: true } } },
@@ -146,9 +286,11 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
     });
   }
 
-  const optionsPrice = product.options
-    .filter((o) => selectedOptions.includes(o.id))
-    .reduce((sum, o) => sum + o.price, 0);
+  const optionsPrice = newSelection
+    ? newSelection.optionsPrice
+    : product.options
+        .filter((o) => selectedOptions.includes(o.id))
+        .reduce((sum, o) => sum + o.price, 0);
   // Stored quotes are promotion-aware: an active automatic discount lowers
   // the quoted unit price at add time (canonical resolver — the same price
   // Home and product detail show). Checkout revalidates against the live
@@ -173,10 +315,28 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
   // not get merged into one. Matching by productId alone (the previous
   // behavior) silently overwrote the first line's options/price whenever
   // the same product was added again with a different option selection.
-  const newOptionIds = [...selectedOptions].sort();
+  // Identity is representation-aware: legacy and new-authority lines never
+  // match each other, and id order never affects identity (sorted compare).
+  const requestedIds =
+    newSelection != null
+      ? newSelection.snapshots.map((s) => s.optionGroupItemId)
+      : [...selectedOptions];
+  const requestedSelection = {
+    kind: (requestedIds.length === 0 ? "empty" : newSelection != null ? "new" : "legacy") as
+      | "empty"
+      | "new"
+      | "legacy",
+    ids: [...requestedIds].sort(),
+  };
   const existingItem = cart.items.find((item) => {
-    const existingOptionIds = item.options.map((o) => o.productOptionId).sort();
-    return item.productId === productId && JSON.stringify(existingOptionIds) === JSON.stringify(newOptionIds);
+    const line = lineSelection(item.options);
+    if (requestedSelection.ids.length === 0 && line.ids.length === 0)
+      return item.productId === productId;
+    return (
+      item.productId === productId &&
+      line.kind === requestedSelection.kind &&
+      JSON.stringify(line.ids) === JSON.stringify(requestedSelection.ids)
+    );
   });
 
   if (existingItem) {
@@ -217,11 +377,21 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
         unitPrice,
         subtotal: round(unitPrice * quantity),
         specialRequest,
+        // New-authority rows carry optionGroupItemId with productOptionId
+        // NULL (exactly-one CHECK); legacy rows keep the legacy shape.
+        // No dual-write, no shadow ProductOptions.
         options: {
-          create: selectedOptions.map((id: string) => {
-            const opt = product.options.find((o) => o.id === id)!;
-            return { productOptionId: id, name: opt.name, price: opt.price };
-          }),
+          create:
+            newSelection != null
+              ? newSelection.snapshots.map((s) => ({
+                  optionGroupItemId: s.optionGroupItemId,
+                  name: s.name,
+                  price: s.price,
+                }))
+              : selectedOptions.map((id: string) => {
+                  const opt = product.options.find((o) => o.id === id)!;
+                  return { productOptionId: id, name: opt.name, price: opt.price };
+                }),
         },
       },
     });
@@ -231,10 +401,11 @@ export const addToCart = async (req: AuthRequest, res: Response) => {
   await prisma.cart.update({ where: { id: cart.id }, data: calculateCartTotals(updatedItems) });
 
   const enhancedCart = await getEnhancedCart(cart.id);
+  const cacheKey = cartCacheKey(req.user!.id);
   try {
-    await ShopCartRedis.set(`cart:user:${req.user!.id}`, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
+    await ShopCartRedis.set(cacheKey, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
   } catch (err) {
-    logger.warn({ err, cacheKey: `cart:user:${req.user!.id}` }, "ShopCartRedis.set failed (best-effort)");
+    logger.warn({ err, cacheKey }, "ShopCartRedis.set failed (best-effort)");
   }
 
   return sendCreated(res, enhancedCart, "Item added to cart successfully");
@@ -248,7 +419,7 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
   if (!parsed.success) {
     throw new ValidationError("Invalid update payload", parsed.error.flatten().fieldErrors);
   }
-  const { quantity, selectedOptions, specialRequest } = parsed.data;
+  const { quantity, selectedOptions, optionGroupItemIds, specialRequest } = parsed.data;
 
   const item = await prisma.cartItem.findFirst({
     where: { id: itemId, cart: { customerId: req.user!.id } },
@@ -270,15 +441,36 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
     }
   }
 
+  // Phase 2B.4b: one representation per request — mixing is rejected, and
+  // new-authority selections are validated against live OptionGroups.
+  // Existing lines keep their representation unless explicitly replaced.
+  const wantsLegacy = selectedOptions !== undefined;
+  const wantsNew = optionGroupItemIds !== undefined;
+  if (wantsLegacy && wantsNew && selectedOptions.length > 0 && (optionGroupItemIds ?? []).length > 0) {
+    throw new ValidationError("Use either selectedOptions or optionGroupItemIds, not both");
+  }
+  let newSelection: ResolvedNewSelection | null = null;
+  if (wantsNew) {
+    newSelection = await resolveNewOptionSelection(item.productId, optionGroupItemIds ?? []);
+  }
+
   const updateData: Record<string, unknown> = {};
   if (quantity !== undefined) updateData.quantity = quantity;
   if (specialRequest !== undefined) updateData.specialRequest = specialRequest;
 
-  if (quantity !== undefined || selectedOptions) {
+  if (quantity !== undefined || selectedOptions || optionGroupItemIds) {
+    // Quantity-only updates on new-authority lines reprice from their own
+    // snapshots (legacy lookup would see null FKs and drop surcharges).
+    const line = lineSelection(item.options);
     const finalOptions = selectedOptions ?? item.options.map((opt) => opt.productOptionId);
-    const optionsPrice = item.product.options
-      .filter((opt) => finalOptions.includes(opt.id))
-      .reduce((sum, opt) => sum + opt.price, 0);
+    const optionsPrice =
+      newSelection != null
+        ? newSelection.optionsPrice
+        : line.kind === "new" && !wantsLegacy
+          ? item.options.reduce((sum, opt) => sum + Number(opt.price), 0)
+          : item.product.options
+              .filter((opt) => finalOptions.includes(opt.id))
+              .reduce((sum, opt) => sum + opt.price, 0);
 
     // Same promotion-aware quoting as addToCart (see above).
     const updatePromos = await loadActiveProductPromos();
@@ -309,7 +501,22 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
 
   await prisma.cartItem.update({ where: { id: itemId }, data: updateData });
 
-  if (selectedOptions) {
+  // An explicit key (even []) replaces the line's options; absence leaves
+  // them untouched. New-authority rows store optionGroupItemId with
+  // productOptionId NULL — never both, never neither-when-nonempty.
+  if (wantsNew && newSelection != null) {
+    await prisma.cartItemOption.deleteMany({ where: { cartItemId: itemId } });
+    if (newSelection.snapshots.length > 0) {
+      await prisma.cartItemOption.createMany({
+        data: newSelection.snapshots.map((s) => ({
+          cartItemId: itemId,
+          optionGroupItemId: s.optionGroupItemId,
+          name: s.name,
+          price: s.price,
+        })),
+      });
+    }
+  } else if (selectedOptions) {
     await prisma.cartItemOption.deleteMany({ where: { cartItemId: itemId } });
     const optionData = selectedOptions
       .map((optionId: string) => {
@@ -326,10 +533,11 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
   await prisma.cart.update({ where: { id: item.cart.id }, data: calculateCartTotals(updatedItems) });
 
   const enhancedCart = await getEnhancedCart(item.cart.id);
+  const cacheKey = cartCacheKey(req.user!.id);
   try {
-    await ShopCartRedis.set(`cart:user:${req.user!.id}`, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
+    await ShopCartRedis.set(cacheKey, JSON.stringify(enhancedCart), { EX: CART_TTL_SECONDS });
   } catch (err) {
-    logger.warn({ err, cacheKey: `cart:user:${req.user!.id}` }, "ShopCartRedis.set failed (best-effort)");
+    logger.warn({ err, cacheKey }, "ShopCartRedis.set failed (best-effort)");
   }
 
   return sendSuccess(res, enhancedCart, "Cart item updated successfully");
@@ -339,7 +547,7 @@ export const updateCartItem = async (req: AuthRequest, res: Response) => {
 export const removeCartItem = async (req: AuthRequest, res: Response) => {
   const itemId = ensureString(req.params.itemId);
   const userId = req.user!.id;
-  const cacheKey = `cart:user:${userId}`;
+  const cacheKey = cartCacheKey(userId);
 
   const item = await prisma.cartItem.findFirst({
     where: { id: itemId, cart: { customerId: userId } },
@@ -378,7 +586,7 @@ export const removeCartItem = async (req: AuthRequest, res: Response) => {
 // DELETE /cart - Clear entire cart
 export const clearCart = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
-  const cacheKey = `cart:user:${userId}`;
+  const cacheKey = cartCacheKey(userId);
 
   const cart = await prisma.cart.findFirst({ where: { customerId: userId } });
   if (!cart) {
@@ -410,6 +618,37 @@ export const getCartSummary = async (req: AuthRequest, res: Response) => {
     return sendSuccess(res, { ...summary, summaryId: null }, "Cart is empty or has no purchasable items");
   }
 
+  // Phase 3A: cartSummaryService reports integer kobo internally. The snapshot
+  // stored for checkout re-validation stays in kobo (compared against the
+  // live kobo summary at checkout), but the client-facing response reports
+  // naira so legacy Flutter/web clients keep seeing naira amounts.
+  const summaryForClient = {
+    ...summary,
+    subtotal: koboToNaira(summary.subtotal),
+    discount: koboToNaira(summary.discount),
+    autoDiscount: koboToNaira(summary.autoDiscount),
+    codeDiscount: koboToNaira(summary.codeDiscount),
+    deliveryFee: koboToNaira(summary.deliveryFee),
+    finalTotal: koboToNaira(summary.finalTotal),
+    vendorBreakdown: summary.vendorBreakdown.map((vb) => ({
+      ...vb,
+      subtotal: koboToNaira(vb.subtotal),
+      discount: koboToNaira(vb.discount),
+      autoDiscount: koboToNaira(vb.autoDiscount),
+      codeDiscount: koboToNaira(vb.codeDiscount),
+      deliveryFee: koboToNaira(vb.deliveryFee),
+      final: koboToNaira(vb.final),
+      items: vb.items.map((it) => ({
+        ...it,
+        unitPrice: koboToNaira(it.unitPrice),
+        subtotal: koboToNaira(it.subtotal),
+        originalUnitPrice: koboToNaira(it.originalUnitPrice),
+        effectiveUnitPrice: koboToNaira(it.effectiveUnitPrice),
+        unitDiscount: koboToNaira(it.unitDiscount),
+      })),
+    })),
+  };
+
   // Persist a snapshot of exactly what was shown — checkout re-validates
   // against this by id, so the price the customer confirms is always the
   // price they were quoted, not whatever the live cart happens to total
@@ -419,13 +658,13 @@ export const getCartSummary = async (req: AuthRequest, res: Response) => {
     data: { id: summaryId, userId, snapshot: summary as any },
   });
 
-  return sendSuccess(res, { ...summary, summaryId }, "Cart summary generated");
+  return sendSuccess(res, { ...summaryForClient, summaryId }, "Cart summary generated");
 };
 
 // POST /cart/checkout - Convert cart to order(s), one order per vendor
 export const checkoutCart = async (req: AuthRequest, res: Response) => {
   const userId = req.user!.id;
-  const cacheKey = `cart:user:${userId}`;
+  const cacheKey = cartCacheKey(userId);
 
   // Idempotency: a stable client-supplied key means retries (double-tap,
   // network timeout + resend) return the original result instead of
@@ -452,12 +691,17 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     }
   }
 
-  const { summaryId, addressId } = req.body ?? {};
+  const { summaryId, addressId, scheduledAt } = req.body ?? {};
   if (!summaryId) throw new ValidationError("summaryId is required");
   if (!addressId) throw new ValidationError("addressId is required");
 
   const address = await prisma.address.findFirst({ where: { id: addressId, userId } });
   if (!address) throw new NotFoundError("Address");
+
+  // Phase 3D: optional scheduled/preorder fulfillment time. Validated
+  // server-side; client-supplied dates are never trusted.
+  const resolvedScheduledAt = parseScheduledAt(scheduledAt);
+  const nowLagos = DateTime.now().setZone(LAGOS_TZ);
 
   const snapshot = await prisma.cartSummarySnapshot.findUnique({ where: { id: summaryId } });
   if (!snapshot) throw new NotFoundError("Cart summary");
@@ -506,6 +750,9 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
       trackInventory: true,
       stock: true,
       vendorId: true,
+      isScheduled: true,
+      orderCutoffTime: true,
+      dailyCap: true,
       options: {
         where: { isActive: true },
         select: { id: true, name: true, price: true },
@@ -529,18 +776,99 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     qtyByProduct.set(item.productId, (qtyByProduct.get(item.productId) ?? 0) + item.quantity);
   }
 
+  // Phase 2B.5b: authoritative option snapshots per cart line, rebuilt from
+  // the database during revalidation (never copied from the cart's stored
+  // snapshots, never from client input). Legacy lines resolve
+  // ProductOption; new lines resolve OptionGroupItem. Keyed by cart item id
+  // and consumed by order creation below.
+  type AuthoritativeOption = {
+    optionId?: string;
+    optionGroupItemId?: string;
+    name: string;
+    price: number;
+  };
+  const authoritativeOptions = new Map<string, AuthoritativeOption[]>();
+
+  // Phase 2B.5b: batch-load the option groups of every product that is
+  // evaluated under the new authority, so checkout issues ONE query for the
+  // whole cart instead of one per line. Lines carrying legacy rows are
+  // excluded; optionless lines are included because an empty selection must
+  // still satisfy the product's current required groups.
+  const newAuthorityProductIds = [
+    ...new Set(
+      cart.items
+        .filter(
+          (i) =>
+            i.options.some((o) => o.optionGroupItemId != null) ||
+            !i.options.some((o) => o.productOptionId != null),
+        )
+        .map((i) => i.productId),
+    ),
+  ];
+  const groupsByProduct = new Map<string, CheckoutOptionGroup[]>();
+  if (newAuthorityProductIds.length > 0) {
+    const allGroups = (await prisma.optionGroup.findMany({
+      where: { productId: { in: newAuthorityProductIds } },
+      include: { items: true },
+    })) as unknown as CheckoutOptionGroup[];
+    for (const group of allGroups) {
+      const list = groupsByProduct.get(group.productId) ?? [];
+      list.push(group);
+      groupsByProduct.set(group.productId, list);
+    }
+  }
+
   for (const item of cart.items) {
     const fresh = freshById.get(item.productId);
     if (!fresh || fresh.archived) continue; // handled by the archived cleanup below
 
-    const selectedIds = item.options.map((o) => o.productOptionId);
-    const activeById = new Map(fresh.options.map((o) => [o.id, o]));
-    const staleOption = selectedIds.find((id) => !activeById.has(id));
-    if (staleOption) {
-      throw new ValidationError(
-        `An extra selected for "${fresh.name}" is no longer available. Please refresh your cart.`,
+    // Representation-aware: the DB CHECK guarantees a line carries either
+    // legacy ProductOption rows or new OptionGroupItem rows, never both.
+    const groupItemIds = item.options
+      .map((o) => o.optionGroupItemId)
+      .filter((id): id is string => id != null);
+    const hasLegacyRows = item.options.some((o) => o.productOptionId != null);
+
+    let resolvedOptions: AuthoritativeOption[];
+    let optionsTotal: number;
+
+    // New authority applies when the line carries group-item rows, and also
+    // when it carries NO rows at all (an empty selection must still satisfy
+    // the product's current required groups — e.g. a line quoted before the
+    // vendor added a required group). Legacy rows always take the legacy path.
+    if (groupItemIds.length > 0 || !hasLegacyRows) {
+      // NEW authority — full live revalidation: item→group→product chain,
+      // active state, per-group min/max across ALL of the product's groups,
+      // and duplicate rejection. Fails closed on any violation.
+      const resolved = await resolveNewOptionSelection(
+        item.productId,
+        groupItemIds,
+        groupsByProduct.get(item.productId) ?? [],
       );
+      resolvedOptions = resolved.snapshots.map((s) => ({
+        optionGroupItemId: s.optionGroupItemId,
+        name: s.name,
+        price: s.price,
+      }));
+      optionsTotal = resolved.optionsPrice;
+    } else {
+      // LEGACY authority — unchanged validation.
+      const selectedIds = item.options.map((o) => o.productOptionId!);
+      const activeById = new Map(fresh.options.map((o) => [o.id, o]));
+      const staleOption = selectedIds.find((id) => !activeById.has(id));
+      if (staleOption) {
+        throw new ValidationError(
+          `An extra selected for "${fresh.name}" is no longer available. Please refresh your cart.`,
+        );
+      }
+      resolvedOptions = selectedIds.map((id) => {
+        const opt = activeById.get(id)!;
+        return { optionId: id, name: opt.name, price: opt.price };
+      });
+      optionsTotal = resolvedOptions.reduce((sum, o) => sum + o.price, 0);
     }
+
+    authoritativeOptions.set(item.id, resolvedOptions);
 
     // Effective unit = live discounted product price + add-ons (canonical
     // resolver — identical to Home, detail and summary math).
@@ -549,9 +877,7 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
       promos: checkoutPromos,
     });
     const effectiveBase = checkoutEffective ? checkoutEffective.discountedPrice : fresh.price;
-    const unitPrice = round(
-      effectiveBase + selectedIds.reduce((sum, id) => sum + activeById.get(id)!.price, 0),
-    );
+    const unitPrice = round(effectiveBase + optionsTotal);
     if (unitPrice !== round(item.unitPrice)) {
       driftedLines.push({ id: item.id, unitPrice, subtotal: round(unitPrice * item.quantity) });
       continue;
@@ -674,6 +1000,19 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     if (claim.action === "conflict") {
       throw new ConflictError("Checkout already in progress for this key. Please wait, then retry with the same key.");
     }
+    // Fail CLOSED on an unconfirmed claim: 503, retryable, no infra detail.
+    if (claim.action === "unavailable") {
+      // Fail CLOSED. Without a confirmed claim we cannot tell an in-flight
+      // duplicate from a fresh request, and proceeding would let two concurrent
+      // submissions with the same key each create an order. 503 is retryable
+      // and the message deliberately names no infrastructure detail.
+      throw new AppError(
+        "Checkout is temporarily unavailable. Please retry with the same idempotency key in a moment.",
+        503,
+        "IDEMPOTENCY_UNAVAILABLE",
+        { retryable: true },
+      );
+    }
     idemClaimed = claim.action === "proceed";
     // Revalidate pricing against the live cart — if anything changed
     // since the snapshot was taken (price edit, vendor went offline,
@@ -696,7 +1035,26 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
 
     const oldTotal = round(snapshotData.finalTotal);
     const newTotal = round(freshSummary.finalTotal);
-    if (oldTotal !== newTotal) {
+    // Batch G: reconcile components, not just the total. A compensating
+    // shift (e.g. subtotal +₦100 with delivery −₦100) keeps the total
+    // identical while changing what the customer confirmed, so compare
+    // the authoritative money components too. Non-numeric sides (legacy
+    // snapshot shapes) fall back to the total-only check rather than
+    // crashing or false-rejecting.
+    const components: Array<[unknown, unknown]> = [
+      [snapshotData.subtotal, freshSummary.subtotal],
+      [snapshotData.discount, freshSummary.discount],
+      [snapshotData.deliveryFee, freshSummary.deliveryFee],
+    ];
+    const componentsChanged = components.some(
+      ([a, b]) =>
+        typeof a === "number" &&
+        typeof b === "number" &&
+        Number.isFinite(a) &&
+        Number.isFinite(b) &&
+        round(a) !== round(b),
+    );
+    if (oldTotal !== newTotal || componentsChanged) {
       throw new ConflictError("Cart pricing changed. Please refresh your cart summary.");
     }
 
@@ -716,6 +1074,26 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     for (const vendorId of Object.keys(groupedByVendor)) {
       const freshVendorState = await loadVendorOperatingState(vendorId);
       assertVendorAvailableForOrdering(freshVendorState);
+
+      // Phase 3D: scheduling eligibility and vendor cut-off validation.
+      // A scheduled order may only contain products that support scheduling,
+      // and same-day fulfilment must respect each product's cut-off time.
+      const vendorItems = groupedByVendor[vendorId];
+      for (const item of vendorItems) {
+        const fresh = freshById.get(item.productId);
+        if (!fresh) continue;
+        if (resolvedScheduledAt && fresh.isScheduled !== true) {
+          throw new ValidationError(
+            `"${fresh.name}" does not accept scheduled orders.`,
+          );
+        }
+        const cutoffErr = validateCutOff({
+          now: nowLagos,
+          scheduledAt: resolvedScheduledAt,
+          cutoffTime: fresh.orderCutoffTime,
+        });
+        if (cutoffErr) throw cutoffErr;
+      }
     }
 
     // Atomic DB section: promo claim + stock reservation + all vendor
@@ -752,6 +1130,71 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
         promoClaimed = true;
       }
 
+      // Batch E: automatic promotions consume usage atomically, with the
+      // same claim discipline as code promos. The winning auto promo IDs
+      // come from the revalidated summary lines (server-computed, never
+      // client-supplied); code-winning checkouts skip this block because
+      // the code claim above already consumed the single discount source.
+      // Each promo is row-locked, global-cap-checked, and conditionally
+      // incremented — concurrent checkouts serialize here, so the last
+      // redemption cannot be consumed twice. Per-user caps are not
+      // rejected at claim time (see note below): the pricing resolver
+      // grants auto discounts without regard to personal history, so
+      // rejecting repeat buyers would block checkout with no recourse.
+      // Everything below rolls back with the transaction, so failed or
+      // abandoned checkouts never consume usage; committed checkouts replay
+      // via idempotency and never re-enter. Usage rows (created with the
+      // orders below) share the single PromotionUsage table, so per-user
+      // accounting stays unified across both paths — no conflicting
+      // counters.
+      const autoPromoIds: string[] = [];
+      const autoDiscountByPromo = new Map<string, number>();
+      if (!promoClaimed) {
+        const seen = new Set<string>();
+        for (const vendorGroup of freshSummary.vendorBreakdown ?? []) {
+          for (const item of (vendorGroup as { items?: { promotionId?: unknown; unitDiscount?: unknown; quantity?: unknown }[] }).items ?? []) {
+            if (typeof item.promotionId !== "string" || !item.promotionId) continue;
+            const share = Math.max(0, Number(item.unitDiscount ?? 0)) * Math.max(0, Number(item.quantity ?? 0));
+            autoDiscountByPromo.set(
+              item.promotionId,
+              Math.round(((autoDiscountByPromo.get(item.promotionId) ?? 0) + share) * 100) / 100,
+            );
+            if (!seen.has(item.promotionId)) {
+              seen.add(item.promotionId);
+              autoPromoIds.push(item.promotionId);
+            }
+          }
+        }
+      }
+      for (const promoId of autoPromoIds) {
+        await tx.$queryRaw`SELECT id FROM "Promotion" WHERE id = ${promoId} FOR UPDATE`;
+        const promo = await tx.promotion.findUnique({
+          where: { id: promoId },
+          select: { usageLimit: true, usedCount: true },
+        });
+        // Global cap only. Per-user caps are deliberately NOT rejected here:
+        // the pricing resolver grants automatic discounts without regard to
+        // personal history today, so rejecting repeat buyers (whose standing
+        // vendor discounts carry the default maxUsesPerUser) would block
+        // checkout with no recourse — there is no code to remove, unlike the
+        // code-promo path. The usage rows below still record every auto
+        // redemption in the shared table, so per-user accounting stays
+        // observable and a future per-user policy has complete data.
+        if (!promo || (promo.usageLimit != null && promo.usedCount >= promo.usageLimit)) {
+          throw new AppError("A promotion applied to your cart has just been fully redeemed. Please review your cart and try checkout again.", 409, "PROMO_EXHAUSTED", { code: "PROMO_EXHAUSTED", promoId });
+        }
+        const claimedAuto = await tx.promotion.updateMany({
+          where: {
+            id: promoId,
+            OR: [{ usageLimit: null }, { usedCount: { lt: promo.usageLimit ?? undefined } }],
+          },
+          data: { usedCount: { increment: 1 } },
+        });
+        if (claimedAuto.count === 0) {
+          throw new AppError("A promotion applied to your cart has just been fully redeemed. Please review your cart and try checkout again.", 409, "PROMO_EXHAUSTED", { code: "PROMO_EXHAUSTED", promoId });
+        }
+      }
+
       // Atomically reserve stock for every checkout line. Concurrent
       // checkouts serialize on the product row: exactly one winner per
       // final portion, losers roll back with a sold-out error.
@@ -769,49 +1212,131 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
         }),
       );
 
+      // Phase 3D: daily-cap reservation per product per Lagos business day.
+      // Serialised on the ProductDailyCounter row, so concurrent checkouts
+      // cannot both pass a cap on the strength of the same pre-increment
+      // count. Capacity is bucketed by the fulfilment day (scheduledAt when
+      // scheduled, otherwise today).
+      const orderDayStart = lagosDayStart(resolvedScheduledAt ?? new Date());
+      const cappedProducts = new Map<string, number>();
+      for (const item of liveItems) {
+        const fresh = freshById.get(item.productId)!;
+        if (fresh.dailyCap == null) continue;
+        if (!cappedProducts.has(fresh.id)) cappedProducts.set(fresh.id, fresh.dailyCap);
+      }
+
+      // Phase 3D: generate one order id per vendor upfront so the daily-cap
+      // reservation (written before the Order row) can reference it, and so
+      // the reservation and order creation stay in the same transaction.
+      const orderIdByVendor = new Map(
+        Object.keys(groupedByVendor).map((vendorId) => [vendorId, uuidv4()]),
+      );
+      const productIdToOrderId = new Map<string, string>();
+      for (const [vendorId, vendorItems] of Object.entries(groupedByVendor)) {
+        const orderId = orderIdByVendor.get(vendorId)!;
+        for (const item of vendorItems) {
+          productIdToOrderId.set(item.productId, orderId);
+        }
+      }
+      // Phase 3.2b: read every vendor's effective commission rate inside
+      // the same transaction, so the snapshotted rate is the rate actually
+      // used for that vendor's order below (never a later-mutated value).
+      const vendorRateRows = await tx.user.findMany({
+        where: { id: { in: Object.keys(groupedByVendor) } },
+        select: { id: true, commissionRate: true },
+      });
+      const rateByVendor = new Map(
+        vendorRateRows.map((v) => [v.id, v.commissionRate] as const),
+      );
+
       const orders = [];
       for (const [vendorId, vendorItems] of Object.entries(groupedByVendor)) {
         const pricing = vendorPricing.get(vendorId);
-        // Authoritative line totals revalidated above — the stored cart
-        // values are guaranteed identical, but the order record is built
-        // from the database truth, never from client-influenced state.
-        const rawSubtotal = round(
-          vendorItems.reduce(
-            (sum, i) => sum + (authoritativeLines.get(i.id)?.subtotal ?? i.subtotal),
-            0,
-          ),
+        // Phase 3A: cart line subtotals (CartItem.subtotal) and the cart
+        // summary (freshSummary) now report integer kobo, so rawSubtotal,
+        // discount and deliveryFee are already kobo. Use them directly — no
+        // * 100, which would double-convert kobo into a wrong larger value.
+        const rawSubtotal = vendorItems.reduce(
+          (sum, i) => sum + (authoritativeLines.get(i.id)?.subtotal ?? i.subtotal),
+          0,
         );
-        const discount = pricing?.discount ?? 0;
-        const basePrice = round(rawSubtotal - discount);
-        const deliveryFee = pricing?.deliveryFee ?? 0;
+        const discountKobo = pricing?.discount ?? 0;
+        const basePrice = rawSubtotal - discountKobo;
+        const deliveryFeeKobo = pricing?.deliveryFee ?? 0;
+
+        // Phase 3.2b going-forward snapshots: commission/payout/discount in
+        // kobo plus the frozen rate, computed from the exact kobo values above.
+        const moneySnapshot = buildOrderMoneySnapshot({
+          basePriceKobo: basePrice,
+          discountKobo,
+          commissionRate: resolveCommissionRate(rateByVendor.get(vendorId)),
+        });
 
         const orderItemsData = vendorItems.map((ci) => {
           const line = authoritativeLines.get(ci.id);
+          // Phase 3.2b: product name frozen at checkout from the revalidated
+          // catalog read (live items always have a fresh entry — see the
+          // liveItems filter above). Historical rows stay untouched.
+          const fresh = freshById.get(ci.productId)!;
           return {
             productId: ci.productId,
+            productName: fresh.name,
             quantity: ci.quantity,
             unitPrice: line?.unitPrice ?? ci.unitPrice,
             subtotal: line?.subtotal ?? ci.subtotal,
-            options: { create: ci.options.map((opt) => ({ optionId: opt.productOptionId, name: opt.name, price: opt.price })) },
+            // Phase 2B.5b: option snapshots come from the authoritative
+            // revalidation above (rebuilt from the DB), never from the
+            // cart's stored snapshots. Each row carries exactly one source
+            // FK — legacy optionId or new optionGroupItemId, never both,
+            // never a shadow ProductOption.
+            options: {
+              create: (authoritativeOptions.get(ci.id) ?? []).map((o) =>
+                o.optionGroupItemId
+                  ? { optionGroupItemId: o.optionGroupItemId, name: o.name, price: o.price }
+                  : { optionId: o.optionId!, name: o.name, price: o.price },
+              ),
+            },
           };
         });
 
         const order = await tx.order.create({
           data: {
+            id: orderIdByVendor.get(vendorId)!,
             customerId: userId,
             vendorId,
             addressId,
             basePrice,
-            deliveryFee,
-            totalPrice: round(basePrice + deliveryFee),
+            deliveryFee: deliveryFeeKobo,
+            totalPrice: basePrice + deliveryFeeKobo,
+            commissionRateSnapshot: moneySnapshot.commissionRateSnapshot,
+            commissionKobo: moneySnapshot.commissionKobo,
+            vendorPayoutKobo: moneySnapshot.vendorPayoutKobo,
+            discountKobo: moneySnapshot.discountKobo,
             status: OrderStatus.AWAITING_PAYMENT,
             idempotencyKey,
             protectedUntil: new Date(Date.now() + 15 * 60 * 1000),
+            // Phase 3D: null = immediate order; set = requested fulfilment time.
+            scheduledAt: resolvedScheduledAt,
             items: { create: orderItemsData },
           },
           include: { items: { include: { options: true } } },
         });
         orders.push(order);
+
+        // Phase 3D: reserve daily-cap units now that the order row exists.
+        // The foreign key on DailyCapReservation.orderId requires the Order
+        // row to be present before the reservation can be created.
+        for (const item of vendorItems) {
+          const fresh = freshById.get(item.productId);
+          if (!fresh || fresh.dailyCap == null) continue;
+          await reserveDailyCap(
+            tx,
+            item.productId,
+            orderDayStart,
+            fresh.dailyCap,
+            order.id,
+          );
+        }
       }
 
       // Create promo usage with real orderIds after orders exist
@@ -822,9 +1347,30 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
             userId,
             orderIds: orders.map((o) => o.id),
             promoCode: freshSummary.promo.code!,
+            // PromotionUsage.discount is integer kobo (Phase 3A); freshSummary
+            // reports kobo — pass through unchanged, no * 100.
             discount: freshSummary.discount,
           },
         });
+      }
+      // Auto-promo usage rows share the same table (per-user accounting
+      // stays unified). `promoCode` has no code for automatic promotions;
+      // the sentinel marks the redemption source without affecting the
+      // promotionId/userId accounting the limits enforce on.
+      if (autoPromoIds.length > 0 && orders.length > 0) {
+        for (const promoId of autoPromoIds) {
+          await tx.promotionUsage.create({
+            data: {
+              promotionId: promoId,
+              userId,
+              orderIds: orders.map((o) => o.id),
+              promoCode: "AUTO",
+              // autoDiscountByPromo accumulates integer-kobo unitDiscounts;
+              // pass through unchanged, no * 100.
+              discount: autoDiscountByPromo.get(promoId) ?? 0,
+            },
+          });
+        }
       }
 
       if (liveItems.length > 0) {
@@ -847,47 +1393,89 @@ export const checkoutCart = async (req: AuthRequest, res: Response) => {
     // stale now. Best-effort invalidation (a miss only costs one DB read).
     await Promise.all(
       [...new Set(liveItems.map((i) => i.productId))].map((productId) =>
-        clearProductCache(productId).catch((err) =>
-          logger.warn({ err, productId }, "Failed to invalidate product cache after checkout"),
-        ),
+        clearProductCache(productId)
+          .then((result) => {
+            if (result && !result.ok) {
+              logger.warn(
+                { productId, failures: result.failures },
+                "Product cache invalidation incomplete after checkout",
+              );
+            }
+          })
+          .catch((err) => {
+            logger.warn(
+              { err, productId },
+              "Product cache invalidation threw unexpectedly after checkout",
+            );
+          }),
       ),
     );
 
-    // External side-effects AFTER transaction — not held open
+    // Phase 1 — the vendor is NOT notified here.
+    //
+    // The orders above were created in AWAITING_PAYMENT inside the transaction
+    // (see `status: OrderStatus.AWAITING_PAYMENT`), so at this point nothing has
+    // been paid. The previous code emitted an Activity row, a Notification row,
+    // a `notification` + `orderUpdate` socket pair and a push — all titled
+    // "New Order Received" — to the vendor for an order that could still expire,
+    // fail or be abandoned. That is exactly the pre-payment "actionable order"
+    // alert this phase removes.
+    //
+    // The vendor's actionable-order alert now originates from exactly one place:
+    // `finalizePaymentSuccess`, which emits `NEW_PAID_ORDER` only after its
+    // conditional claim has moved the order to PAYMENT_CONFIRMED
+    // (src/services/paymentFinalizer.service.ts). Suppressing it here also
+    // preserves that path's idempotency — the vendor now receives precisely one
+    // paid-order notification per order, and none at all for a checkout that is
+    // never paid.
+    //
+    // Only the internal audit trail is kept. It is deliberately NOT routed
+    // through `recordActivityBundle`, because that helper persists an `Activity`
+    // row before it emits anything; passing `notifyRealtime: false` would still
+    // have left the "New Order Received" record behind. Audit logs are internal
+    // and admin-only (GET /admin/audit-logs), so the order's existence remains
+    // on record without reaching the vendor.
+    //
+    // Nothing customer-facing is removed: this bundle targeted `order.vendorId`
+    // only, and the customer's own confirmation is the HTTP 201 body returned
+    // below (`sendCreated(..., "Checkout successful")`).
     for (const order of createdOrders) {
-      await recordActivityBundle({
-        actorId: userId,
-        orderId: order.id,
-        actions: [
-          {
-            type: ActivityType.GENERAL,
-            title: "New Order Received",
-            message: `You have a new order from ${customerName}`,
-            targetId: order.vendorId,
-            socketEvent: "ORDER",
-            metadata: {
-              type: "ORDER_DETAIL",
-              route: `/orders/${order.id}`,
-              target: { screen: "order_detail", id: order.id },
-              orderId: order.id,
-              customerId: userId,
-              vendorId: order.vendorId,
-              frontendEvent: "NEW_ORDER",
-            },
-          },
-        ],
-        audit: { action: "ORDER_CREATED", metadata: { orderId: order.id, customerId: userId, vendorId: order.vendorId } },
-        notifyRealtime: true,
-        notifyPush: true,
-      }).catch((err) => logger.warn({ err, orderId: order.id }, "Failed to record order activity (non-critical)"));
+      await createAuditLog({
+        userId: userId,
+        action: "ORDER_CREATED",
+        req,
+        metadata: {
+          orderId: order.id,
+          customerId: userId,
+          vendorId: order.vendorId,
+          orderStatus: OrderStatus.AWAITING_PAYMENT,
+          totalPrice: order.totalPrice,
+          // Recorded, never used, to identify who the customer was at checkout
+          // time without repeating their name in a vendor-visible surface.
+          customerName,
+        },
+      }).catch((err) =>
+        logger.warn({ err, orderId: order.id }, "Failed to write checkout audit log (non-critical)"),
+      );
     }
 
     // Promo was already claimed inside the transaction — no post-commit redeem needed
 
-    // Record the completed checkout for same-key replays (24h). If this
-    // write fails, the DB idempotencyKey lookup still dedups retries.
-    await completeCheckoutKey(userId, idempotencyKey, payloadHash, { orders: createdOrders });
-    idemCompleted = true;
+    // Record the completed checkout for same-key replays (24h). The stored
+    // response is JSON-sanitized: Order kobo snapshots are bigints, which
+    // raw JSON.stringify (used by the Redis idempotency store) rejects.
+    //
+    // The order above is ALREADY COMMITTED here, so a failed completion write
+    // must never be reported as a rolled-back checkout. When the write fails,
+    // completeCheckoutKey returns false, idemCompleted stays false, and the
+    // finally block releases the claim. Releasing is safe because the DB
+    // idempotencyKey lookup at the top of this handler is the authoritative
+    // dedup: the committed order carries that key, so a retry short-circuits
+    // at the replay check and returns the original order instead of running
+    // checkout again. Leaving the claim in-flight instead would strand retries
+    // behind a stale 409 for up to five minutes for no protective benefit.
+    const completeResult = await completeCheckoutKey(userId, idempotencyKey, payloadHash, toJsonSafe({ orders: createdOrders }));
+    idemCompleted = completeResult === true;
 
     const updatedCart = offlineItems.length > 0 ? await getEnhancedCart(cart.id) : { id: null, items: [], basePrice: 0, totalPrice: 0 };
     try {
@@ -921,10 +1509,14 @@ async function getEnhancedCart(cartId: string) {
           product: {
             include: {
               options: true,
+              optionGroups: {
+                orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+                include: { items: { orderBy: [{ sortOrder: "asc" }, { id: "asc" }] } },
+              },
               vendor: { select: { id: true, name: true, isLive: true, vendorStatus: true, deliveryPreferences: true } },
             },
           },
-          options: { include: { productOption: true } },
+          options: { include: { productOption: true, optionGroupItem: true } },
         },
       },
     },
@@ -944,7 +1536,12 @@ async function getEnhancedCart(cartId: string) {
   }
 
   const enrichedItems = cart.items.map((item) => {
+    // Dual representation: legacy rows resolve productOption, new rows
+    // resolve optionGroupItem; each row carries exactly one (DB CHECK).
     const selectedOptionIds = item.options.map((opt) => opt.productOptionId);
+    const selectedGroupItemIds = item.options
+      .map((opt) => opt.optionGroupItemId)
+      .filter((id): id is string => id != null);
     const product = item.product;
 
     // Marketplace-orderable right now = vendor live + accepting orders AND
@@ -958,7 +1555,10 @@ async function getEnhancedCart(cartId: string) {
       });
 
     const lineOptionsTotal = round(
-      item.options.reduce((sum, opt) => sum + Number(opt.productOption?.price ?? opt.price ?? 0), 0),
+      item.options.reduce(
+        (sum, opt) => sum + Number(opt.optionGroupItem?.priceAdd ?? opt.productOption?.price ?? opt.price ?? 0),
+        0,
+      ),
     );
     const linePromotion = resolveEffectivePromotionForProduct({
       product: {
@@ -999,20 +1599,49 @@ async function getEnhancedCart(cartId: string) {
         images: product.images || [],
         video: product.video || [],
         vendor: { id: product.vendor.id, name: product.vendor.name },
-        options: product.options.map((opt) => ({
-          id: opt.id,
-          name: opt.name,
-          price: opt.price,
-          selected: selectedOptionIds.includes(opt.id),
+        // F-2.17: the selectable legacy menu is active-only, matching
+        // product detail and add-to-cart validation. selectedOptions below
+        // remains unfiltered so stale selections stay identifiable/removable.
+        options: product.options
+          .filter((opt) => opt.isActive !== false)
+          .map((opt) => ({
+            id: opt.id,
+            name: opt.name,
+            price: opt.price,
+            selected: selectedOptionIds.includes(opt.id),
+          })),
+        // Phase 2B.4b: structured menu alongside legacy options
+        // (compatibility period — both served, no dual-write).
+        optionGroups: (product.optionGroups ?? []).map((group: any) => ({
+          id: group.id,
+          name: group.name,
+          required: group.required,
+          minSelections: group.minSelections,
+          maxSelections: group.maxSelections,
+          sortOrder: group.sortOrder,
+          items: (group.items ?? []).map((entry: any) => ({
+            id: entry.id,
+            name: entry.name,
+            priceAdd: entry.priceAdd,
+            isActive: entry.isActive,
+            sortOrder: entry.sortOrder,
+            selected: selectedGroupItemIds.includes(entry.id),
+          })),
         })),
       },
-      selectedOptions: item.options.map((opt) => ({
-        id: opt.id,
-        cartItemId: opt.cartItemId,
-        productOptionId: opt.productOptionId,
-        name: opt.productOption.name,
-        price: opt.productOption.price,
-      })),
+      selectedOptions: item.options.map((opt) => {
+        const source = opt.optionGroupItemId
+          ? { name: opt.optionGroupItem?.name ?? opt.name, price: opt.optionGroupItem?.priceAdd ?? opt.price }
+          : { name: opt.productOption?.name ?? opt.name, price: opt.productOption?.price ?? opt.price };
+        return {
+          id: opt.id,
+          cartItemId: opt.cartItemId,
+          productOptionId: opt.productOptionId,
+          optionGroupItemId: opt.optionGroupItemId,
+          name: source.name,
+          price: source.price,
+        };
+      }),
     };
   });
 

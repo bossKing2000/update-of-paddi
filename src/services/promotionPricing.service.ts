@@ -112,14 +112,19 @@ export function computeDiscountedPrice(args: {
   originalPrice: number;
 }): number {
   const { type, value, maxDiscount, originalPrice } = args;
+  // Phase 3A: originalPrice is integer kobo (Product.price is kobo).
+  // `value` is polymorphic: a percentage (0–100) for PERCENTAGE, or a fixed
+  // naira amount for FIXED/DELIVERY. Convert fixed naira amounts to kobo at
+  // this boundary so all math stays in the integer-kobo domain.
+  const valueKobo = type === DiscountType.PERCENTAGE ? value : Math.round(value * 100);
   if (!(originalPrice > 0)) return round(originalPrice);
   if (type === DiscountType.PERCENTAGE) {
-    const raw = (originalPrice * value) / 100;
+    const raw = (originalPrice * valueKobo) / 100;
     const capped = maxDiscount != null ? Math.min(raw, maxDiscount) : raw;
     return round(Math.max(originalPrice - capped, 0));
   }
   if (type === DiscountType.FIXED) {
-    return round(Math.max(originalPrice - value, 0));
+    return round(Math.max(originalPrice - valueKobo, 0));
   }
   // DELIVERY and any future non-price type never discount a product price.
   return round(originalPrice);

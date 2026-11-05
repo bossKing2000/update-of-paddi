@@ -5,6 +5,7 @@ import { emitSocketEvents } from "./socketEvents";
 import { sendNotification } from "./notify";
 import { createAuditLog } from "../auditLog.service";
 import { getClientInfo } from "../ip";
+import { logger } from "../../lib/logger";
 
 /**
  * Represents a single activity (event) that should be recorded + notified.
@@ -125,6 +126,6 @@ export async function recordActivityBundle({
     await Promise.all(promises);
     console.log("[ACTIVITY] ✅ Recorded multi-action bundle successfully");
   } catch (err) {
-    console.error("[ACTIVITY] ❌ Failed to record activity bundle:", err);
+    logger.error({ err, actionCount: actions.length }, "Failed to record activity bundle");
   }
 }

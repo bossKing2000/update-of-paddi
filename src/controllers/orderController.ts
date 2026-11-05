@@ -12,8 +12,7 @@ import {
   buildOrderMoneySnapshot,
   resolveCommissionRate,
 } from "../services/orderSnapshot.service";
-import { sendSuccess, sendCreated } from "../utils/apiResponse";
-import {
+import { sendSuccess, sendCreated, koboToNaira } from "../utils/apiResponse";import {
   NotFoundError,
   ForbiddenError,
   ValidationError,
@@ -26,12 +25,14 @@ import {
 } from "../validations/orderSchema";
 import { calculateDeliveryFee } from "../services/deliveryFee.service";
 import { restoreStockForOrders } from "../services/inventory.service";
-import { creditReferralRewardIfEligible } from "./referralController";
+import { runOrderCompletionSideEffects } from "../services/orderCompletionSideEffects";
 import {
-  creditPotPointsForCompletedOrder,
-  logPotPointsFailure,
-} from "../services/potPoints.service";
+  isTerminalOrderStatus,
+  reconcileActiveDeliveryAssignments,
+} from "../services/deliveryAssignmentReconciliation";
+import { creditDeliveryEarning } from "../services/deliveryEarning";
 import { logger } from "../lib/logger";
+import { fileRefundOwed } from "../services/refundObligation.service";
 import {
   assertQuantityAvailable,
   reserveStockForItems,
@@ -39,6 +40,16 @@ import {
 import {
   assertVendorAvailableForOrdering,
 } from "../services/vendorAvailability.service";
+import { releaseOrderDailyCaps } from "../services/scheduling.service";
+import {
+  assertVendorNotSuspended,
+  isVendorStatusEstablishable,
+  VENDOR_STATUS_UNRESOLVED_MESSAGE,
+} from "../services/vendorStatus.service";
+import {
+  isVendorVisibleOrder,
+  vendorVisibleOrderWhere,
+} from "../services/vendorOrderVisibility";
 
 const round = (v: number) => Number(v.toFixed(2));
 
@@ -77,8 +88,26 @@ export const getMyOrders = async (req: AuthRequest, res: Response) => {
   const status = req.query.status as string | undefined;
   const paymentStatus = req.query.paymentStatus as string | undefined;
 
+  // Phase 1 — vendor order visibility.
+  //
+  // Checkout creates orders in AWAITING_PAYMENT before the customer has paid,
+  // so the VENDOR branch of this OR is filtered by the shared visibility rule:
+  // a store sees an order only once payment is authoritatively settled.
+  //
+  // The CUSTOMER branch is deliberately left unfiltered. Requirement 4 of this
+  // phase is that a customer must keep seeing their own pending order, and a
+  // global `status`/`paymentStatus` restriction here would hide the very rows
+  // the customer needs in order to pay them. The rule is therefore applied per
+  // ownership branch, not to the whole result set — see
+  // src/services/vendorOrderVisibility.ts.
+  //
+  // Ownership is unchanged and still scopes both branches to the caller, so
+  // this cannot widen what any account can reach.
   const where: Prisma.OrderWhereInput = {
-    OR: [{ customerId: userId }, { vendorId: userId }],
+    OR: [
+      { customerId: userId },
+      vendorVisibleOrderWhere({ vendorId: userId }),
+    ],
     ...(status && { status: status as OrderStatus }),
     ...(paymentStatus && { paymentStatus: paymentStatus as any }),
   };
@@ -140,7 +169,14 @@ export const getMyOrders = async (req: AuthRequest, res: Response) => {
 
   const totalPages = Math.ceil(total / limit);
 
-  return sendSuccess(res, { orders }, "Orders retrieved successfully", 200, {
+  // Phase 3A: order.totalPrice is integer kobo; report naira to clients so
+  // legacy Flutter/web clients keep seeing naira amounts.
+  const ordersForClient = orders.map((o) => ({
+    ...o,
+    totalPrice: koboToNaira(o.totalPrice),
+  }));
+
+  return sendSuccess(res, { orders: ordersForClient }, "Orders retrieved successfully", 200, {
     total,
     page,
     limit,
@@ -247,12 +283,19 @@ export const getOrderBatch = async (req: AuthRequest, res: Response) => {
     paymentStatus = "FAILED";
   }
 
+  // Phase 3A: totals are integer kobo; report naira to clients.
+  const totalNaira = koboToNaira(total);
+  const ordersForClient = orders.map((o) => ({
+    ...o,
+    totalPrice: koboToNaira(o.totalPrice),
+  }));
+
   const batch = {
     idempotencyKey,
     orderCount,
-    total,
+    total: totalNaira,
     paymentStatus,
-    orders,
+    orders: ordersForClient,
   };
 
   return sendSuccess(res, { batch }, "Order batch retrieved successfully");
@@ -328,12 +371,84 @@ export const getSingleOrder = async (req: AuthRequest, res: Response) => {
   });
 
   if (!order) throw new NotFoundError("Order");
-  if (order.customerId !== userId && order.vendorId !== userId) {
+  // Phase 1 — vendor order visibility (detail counterpart of the list filter
+  // in `getMyOrders`). Hiding an order in a list is worthless if the same row
+  // is still fetchable by id, so the detail path carries the identical rule.
+  //
+  // The customer branch is untouched: a customer keeps full access to their own
+  // pending order, which is what they need in order to pay it.
+  //
+  // Both refusals deliberately share one message, so a rejected caller cannot
+  // tell "not yours" from "exists but not paid yet" — the same no-enumeration
+  // property the vendor-suspension check uses further down this file.
+  const isOrderCustomer = order.customerId === userId;
+  const isOrderVendor = order.vendorId === userId;
+  if (
+    !isOrderCustomer &&
+    (!isOrderVendor || !isVendorVisibleOrder(order))
+  ) {
     throw new ForbiddenError("You don't have access to this order");
   }
 
-  return sendSuccess(res, { order }, "Order retrieved successfully");
+  // Phase 3A: order.totalPrice is integer kobo; report naira to clients.
+  const orderForClient = { ...order, totalPrice: koboToNaira(order.totalPrice) };
+
+  return sendSuccess(res, { order: orderForClient }, "Order retrieved successfully");
 };
+
+/**
+ * Which relationship to an order each role must hold to act on it through
+ * `updateOrderStatus`.
+ *
+ * Batch 1D.43 introduced this check. Batch 1D.44 makes it FAIL CLOSED: the
+ * first version treated "no relationship defined for this role" as "allowed",
+ * so any role beyond VENDOR/CUSTOMER would have passed the gate the moment it
+ * appeared in a transition rule. An unmapped role is now refused.
+ *
+ * Roles present in the `transitions` table today are exactly VENDOR and
+ * CUSTOMER, so no other entry is needed. ADMIN and DELIVERY are deliberately
+ * NOT mapped and must not be added without evidence:
+ *   - ADMIN never appears in this table; it acts through
+ *     `adminUpdateOrderStatus` under `authorizeAdmin`, a separate handler.
+ *   - DELIVERY never appears in this table either; drivers act through
+ *     `DeliveryAssignmentService.updateStatus` under
+ *     `authorizeDeliveryPerson`, which mirrors to Order.status separately.
+ * Guessing a relationship for either would invent a capability that does not
+ * exist today.
+ */
+const ORDER_ROLE_RELATIONSHIP: Partial<
+  Record<Role, (actor: OrderActorRelationship) => boolean>
+> = {
+  [Role.VENDOR]: ({ isVendor }) => isVendor,
+  [Role.CUSTOMER]: ({ isCustomer }) => isCustomer,
+};
+
+export interface OrderActorRelationship {
+  /** The actor is this order's vendor. */
+  isVendor: boolean;
+  /** The actor is this order's customer. */
+  isCustomer: boolean;
+}
+
+/**
+ * True when the actor holds, for this specific order, the relationship that
+ * at least one of `roles` stands for.
+ *
+ * A role with no entry in ORDER_ROLE_RELATIONSHIP is refused: we do not know
+ * what relationship it represents on an order, and "unknown" must not read as
+ * "permitted". Callers additionally check the actor's active role against the
+ * same list, so both the account-level capability and the order-level
+ * relationship must hold.
+ */
+export function actorHoldsOrderRelationship(
+  roles: readonly Role[],
+  actor: OrderActorRelationship,
+): boolean {
+  return roles.some((required) => {
+    const relationship = ORDER_ROLE_RELATIONSHIP[required];
+    return relationship ? relationship(actor) : false;
+  });
+}
 
 // PATCH /orders/vendor/order/:orderId/update-status
 export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
@@ -349,12 +464,43 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
     );
   const { status } = parsed.data;
 
-  const order = await prisma.order.findUnique({ where: { id: orderId } });
+  // `include` (not `select`) so every scalar field the rest of this handler
+  // reads is still returned; only the vendor's lifecycle status is added.
+  //
+  // Batch 1D.41/1D.42: the vendor's `vendorStatus` is read here so a SUSPENDED
+  // vendor cannot drive fulfilment on orders they already hold. Taken from
+  // the order's own relation rather than a second query — the actor below is
+  // this very user, whose row `authenticate` has already loaded, so no
+  // additional round trip is needed.
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { vendor: { select: { vendorStatus: true } } },
+  });
   if (!order) throw new NotFoundError("Order");
 
   const isVendor = userId === order.vendorId;
   const isCustomer = userId === order.customerId;
   if (!isVendor && !isCustomer) throw new ForbiddenError("Unauthorized user");
+
+  // Suspension applies to vendor-INITIATED actions only. Customers keep their
+  // own transitions (including cancelling), and admin / delivery / system
+  // writers never reach this handler, so recovery paths, payment finalisation
+  // and the delivery mirror are untouched.
+  //
+  // Scoped to `isVendor` as well as the role: a vendor who is the CUSTOMER of
+  // somebody else's order is acting as a customer, and `order.vendor` would
+  // describe a different account. Judging their cancellation by a third
+  // party's suspension would be wrong in both directions.
+  if (userRole === Role.VENDOR && isVendor) {
+    const vendorStatus = order.vendor?.vendorStatus;
+    // Batch 1D.42 — FAIL CLOSED. A missing relation or unreadable field is
+    // NOT evidence that the vendor is unsuspended. Only an explicitly read
+    // status may pass; anything else is refused rather than assumed safe.
+    if (!isVendorStatusEstablishable(vendorStatus)) {
+      throw new ForbiddenError(VENDOR_STATUS_UNRESOLVED_MESSAGE);
+    }
+    assertVendorNotSuspended(vendorStatus);
+  }
 
   const currentStatus = order.status;
 
@@ -430,6 +576,35 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
   if (!rule.roles.includes(userRole))
     throw new ForbiddenError("You cannot perform this action");
 
+  // Batch 1D.43 — RESOURCE authorization.
+  //
+  // `rule.roles` is checked against `userRole`, which comes from the signed
+  // token and therefore describes the ACCOUNT, not this order. On its own it
+  // is insufficient: a user whose active role is VENDOR, but who is the
+  // CUSTOMER of somebody else's order, satisfies
+  // `roles: [Role.VENDOR]` for COOKING / READY_FOR_PICKUP /
+  // OUT_FOR_DELIVERY / FAILED_DELIVERY while having no relationship at all to
+  // that order's store — they could advance a competitor's order. The same
+  // gap exists in mirror image: holding VENDOR is no obstacle to the
+  // CUSTOMER-only COMPLETED transition, which exists specifically to stop the
+  // store from confirming its own delivery.
+  //
+  // So a role listed in the rule is not sufficient on its own: the actor must
+  // also HOLD that role's relationship to THIS order, as established above by
+  // isVendor / isCustomer. Both gates are required — the claim still decides
+  // what the account may do in general (so a vendor browsing in CUSTOMER mode
+  // keeps its existing behaviour), and the relationship decides whether that
+  // permission applies to this order at all.
+  //
+  // The same message is reused so a rejected caller learns nothing about
+  // whether they are the vendor of this order.
+  //
+  // No redesign of the transition table was needed: it already states which
+  // roles each step belongs to; it just was not being consulted for the
+  // relationship those roles stand for.
+  if (!actorHoldsOrderRelationship(rule.roles, { isVendor, isCustomer }))
+    throw new ForbiddenError("You cannot perform this action");
+
   // Payment gate — checked against the dedicated paymentStatus field, not
   // the workflow `status` field. (A previous version of this check
   // compared against `status === PAYMENT_CONFIRMED`, which breaks once the
@@ -501,6 +676,47 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
     }
     cancellationApplied = true;
 
+    // F4-2: a COMPLETED order must pay its rider.
+    //
+    // Before F4-2 the only writer of DeliveryEarning was the driver path
+    // (`updateStatus(DELIVERED)`), so an order the CUSTOMER confirmed completing
+    // — the ordinary end of a successful delivery — produced no earning and no
+    // wallet credit: the rider delivered and was never paid.
+    //
+    // It runs here, inside this transaction, immediately after the Order CAS —
+    // not in a callback, not fire-and-forget, not in a separate transaction — so
+    // a failure to pay rolls the completion, the F4-1 reconciliation below and
+    // the payout back together. `creditDeliveryEarning` is the same helper the
+    // driver path uses, so there is exactly one earning implementation and the
+    // amount is identical on both routes.
+    //
+    // This transaction already owns the Order row (the CAS above locked it),
+    // which is what makes the helper's exactly-once read safe.
+    if (status === OrderStatus.COMPLETED) {
+      await creditDeliveryEarning(tx, orderId);
+    }
+
+    // F4-1 / INV-1: a terminal order must not retain an active
+    // DeliveryAssignment. This runs inside the SAME transaction as the order
+    // CAS above, so the order can never commit terminal while an
+    // ASSIGNED/ACCEPTED/PICKED_UP/EN_ROUTE row survives for it — previously a
+    // customer confirming an out-for-delivery order left the rider's EN_ROUTE
+    // assignment active forever (stranding a capacity slot and leaving the
+    // assignment actionable against a completed order).
+    //
+    // The target status is mechanically derivable: CANCELLED is the only
+    // terminal delivery status reachable from all four active statuses in the
+    // existing state machine. No earning and no wallet change happen here —
+    // whether a rider is owed for a customer-completed order is F4-2's
+    // decision, deliberately not taken in F4-1.
+    //
+    // Lock order: this transaction already owns the Order row (the CAS above
+    // took it), so it reaches the assignment second — the same
+    // Order -> Assignment order as `updateStatus` and F3's `claimOrderRow`.
+    if (isTerminalOrderStatus(status)) {
+      await reconcileActiveDeliveryAssignments(tx, order.id);
+    }
+
     if (status === OrderStatus.CANCELLED && order.paymentStatus === "SUCCESS") {
       const payment = await tx.payment.findFirst({
         where: {
@@ -510,76 +726,113 @@ export const updateOrderStatus = async (req: AuthRequest, res: Response) => {
       });
 
       if (payment) {
+        // Finding C-1: scope the dedupe to THIS order. One Paystack payment can
+        // cover several vendors' orders, so an unresolved request filed for a
+        // sibling order must not suppress the obligation this cancelled order
+        // is owed. `paymentRef` alone is not a uniqueness key here. The create
+        // below already attributed the request with `orderId: order.id`, so the
+        // lookup must match that attribution. This mirrors
+        // fileRefundOwedForCancelledOrder in paymentFinalizer.service.ts.
+        // A NULL-orderId row therefore never matches and never suppresses a
+        // real, order-scoped obligation.
         const existing = await tx.refundRequest.findFirst({
           where: {
             paymentRef: payment.reference,
+            orderId: order.id,
             status: { in: ["PENDING", "APPROVED", "PROCESSING"] },
           },
         });
         if (!existing) {
-          await tx.refundRequest.create({
-            data: {
-              userId: order.customerId,
-              paymentRef: payment.reference,
-              reason: "Order cancelled after payment",
-              status: "PENDING",
-              // Phase 3.2b: this path knows the exact cancelled order, so
-              // attribution is exact even for multi-order batch payments.
-              orderId: order.id,
-              // N-01: the request must be bounded by THIS order's paid
-              // value, never by the payment total. One Paystack payment can
-              // cover several vendors' orders (payment.orderId is only the
-              // primary order), so leaving this null made the admin's
-              // `requestedAmountKobo ?? remaining` fallback resolve to the
-              // whole payment — refunding sibling vendors' orders too.
-              // `order.totalPrice` is the amount this order contributed to
-              // the payment (checkout charges sum(totalPrice * 100)).
-              requestedAmountKobo: Math.round(order.totalPrice * 100),
-            },
+          // C-2: the insert is itself conflict-tolerant. The helper uses
+          // `INSERT ... ON CONFLICT ("paymentRef","orderId") WHERE ... DO
+          // NOTHING` against the partial unique index, so a concurrent
+          // writer that filed the same obligation first cannot leave a
+          // duplicate open obligation behind. The transaction client is
+          // passed through, so this stays inside the caller's transaction.
+          // Phase 3.2b: this path knows the exact cancelled order, so
+          // attribution is exact even for multi-order batch payments.
+          //
+          // N-01: the request must be bounded by THIS order's paid
+          // value, never by the payment total. One Paystack payment can
+          // cover several vendors' orders (payment.orderId is only the
+          // primary order), so leaving this null made the admin's
+          // `requestedAmountKobo ?? remaining` fallback resolve to the
+          // whole payment — refunding sibling vendors' orders too.
+          // `order.totalPrice` is integer kobo (Phase 3A) — the amount this
+          // order contributed to the payment. Pass it directly: no * 100,
+          // which would double-convert kobo into a wrong larger value.
+          await fileRefundOwed(tx, {
+            userId: order.customerId,
+            paymentRef: payment.reference,
+            reason: "Order cancelled after payment",
+            orderId: order.id,
+            requestedAmountKobo: order.totalPrice,
           });
         }
       }
     }
 
-    return updated;
-  });
+    // Stock restoration for an unpaid cancellation now happens INSIDE this
+      // transaction, together with the status change above.
+      //
+      // Previously it ran afterwards on the root client behind a `.catch` log.
+      // A failure there left the order already CANCELLED with nothing recording
+      // that a restoration was owed: `restoreStockForOrders` is a blind
+      // `stock += qty` with no marker, and every other restoration path filters
+      // on AWAITING_PAYMENT, which this order had just left. The stock was lost
+      // permanently and nothing could recover it.
+      //
+      // Committing both together means a restore failure rolls the cancellation
+      // back, leaving the order AWAITING_PAYMENT — where the expiry/cleanup
+      // sweeps can still see it. No schema change and no new reconciliation job.
+      //
+      // N-04A still holds: gated on `cancellationApplied` (this run won the
+      // CAS), not on the pre-read `currentStatus`, so the release is exactly
+      // once. Paid orders never restore — portions are consumed on success.
+      if (
+        cancellationApplied &&
+        status === OrderStatus.CANCELLED &&
+        currentStatus === OrderStatus.AWAITING_PAYMENT &&
+        order.paymentStatus !== "SUCCESS"
+      ) {
+        await restoreStockForOrders(tx, [orderId]);
 
-  // Cancelling an unpaid order releases its checkout-time stock
-  // reservation back on sale. Paid orders never restore — portions are
-  // consumed once payment succeeds.
-  //
-  // N-04A: gated on `cancellationApplied` (this run won the CAS), not on the
-  // pre-read `currentStatus`. If another transition won the race we threw
-  // above, so reaching here always means this request is the owner of the
-  // reservation — exactly once, with no double release.
-  if (
-    cancellationApplied &&
-    status === OrderStatus.CANCELLED &&
-    currentStatus === OrderStatus.AWAITING_PAYMENT &&
-    order.paymentStatus !== "SUCCESS"
-  ) {
-    await restoreStockForOrders(prisma, [orderId]).catch((err) =>
-      logger.warn({ err, orderId }, "Failed to restore stock for cancelled order"),
-    );
-  }
+        // Phase 3D: release the daily-cap units this cancelled unpaid order
+        // consumed so another customer can use that day's capacity.
+        try {
+          const orderForCaps = await tx.order.findUnique({
+            where: { id: orderId },
+            select: {
+              id: true,
+              scheduledAt: true,
+              items: { select: { productId: true } },
+            },
+          });
+          if (orderForCaps) {
+            await releaseOrderDailyCaps(tx, orderForCaps);
+          }
+        } catch (capErr) {
+          // A cap-release failure must not roll back an already-committed
+          // cancellation. Logged for a reconciliation sweep to correct.
+          logger.warn(
+            { err: capErr, orderId },
+            "Failed to release daily cap on cancellation",
+          );
+        }
+      }
+
+      return updated;
+  });
 
   await clearProductCache(undefined, order.vendorId);
 
-  // Referrals: check (and credit, if eligible) once an order actually
-  // completes — the referred customer's *first* completed order is what
-  // triggers a reward for whoever referred them.
+  // Referrals + Pot Points: awarded once an order actually completes.
+  // N-05C (F1): the invocation now lives in one shared helper so the driver
+  // completion path (`DeliveryAssignmentService.updateStatus(DELIVERED)`) earns
+  // the same effects instead of silently skipping them. Semantics unchanged
+  // here — same arguments, still fire-and-forget, same warn-level logging.
   if (status === OrderStatus.COMPLETED) {
-    creditReferralRewardIfEligible(order.customerId, orderId).catch((err) =>
-      logger.warn(
-        { err, orderId, customerId: order.customerId },
-        "Failed to check/credit referral reward",
-      ),
-    );
-    // Pot Points: +50 per completed order, idempotent per orderId.
-    // Fire-and-forget like referrals — completion must never fail here.
-    creditPotPointsForCompletedOrder(orderId, order.customerId).catch((err) =>
-      logPotPointsFailure(err, { orderId, customerId: order.customerId }),
-    );
+    runOrderCompletionSideEffects(orderId, order.customerId);
   }
 
   const recipientId = isVendor ? order.customerId : order.vendorId;
@@ -628,7 +881,11 @@ export const getVendorOrderStats = async (req: AuthRequest, res: Response) => {
     awaitingApprovalOrders,
     totalRevenueObj,
   ] = await Promise.all([
-    prisma.order.count({ where: { vendorId } }),
+    // Phase 1 — `totalOrders` was the only figure here counted across every
+    // status, so it included unpaid checkouts the store cannot act on. The
+    // remaining counts are already restricted to post-payment statuses and are
+    // therefore left untouched.
+    prisma.order.count({ where: vendorVisibleOrderWhere({ vendorId }) }),
     prisma.order.count({ where: { vendorId, status: OrderStatus.COMPLETED } }),
     prisma.order.count({ where: { vendorId, status: OrderStatus.PENDING } }),
     prisma.order.count({
@@ -789,7 +1046,10 @@ export const getVendorReport = async (req: AuthRequest, res: Response) => {
       _sum: { totalPrice: true },
       where: { vendorId, status: OrderStatus.COMPLETED },
     }),
-    prisma.order.count({ where: { vendorId } }),
+    // Phase 1 — same reason as `getVendorOrderStats`: this was the one
+    // unfiltered count in the report. Every other figure in this Promise.all
+    // is already restricted to COMPLETED.
+    prisma.order.count({ where: vendorVisibleOrderWhere({ vendorId }) }),
     prisma.order.count({ where: { vendorId, status: OrderStatus.COMPLETED } }),
     prisma.orderItem.aggregate({
       _sum: { quantity: true },
@@ -985,6 +1245,35 @@ export const createSpecialOffer = async (req: AuthRequest, res: Response) => {
     );
   const { price, message } = parsed.data;
 
+  // Batch 1D.42 — vendor lifecycle gate.
+  //
+  // Evidence that suspension is intended to cover this surface:
+  //   - vendorStatus.service.ts: "SUSPENDED: admin-set, cannot sell".
+  //     Placing an offer is a commercial act, not catalog preparation.
+  //   - vendorStatus.middleware.ts (Phase 1C) blocks SUSPENDED from "vendor
+  //     WRITE surfaces"; an offer is a write (it also mutates the request
+  //     and notifies the customer).
+  //   - acceptSpecialOffer states that special orders "must not bypass
+  //     availability", i.e. the codebase already treats special-order
+  //     commerce as subject to the vendor lifecycle.
+  //
+  // Acceptance-time availability already refuses a SUSPENDED vendor
+  // (assertVendorAvailableForOrdering), so such an offer can never become an
+  // order. That does not make the write harmless: it still flips the
+  // customer's request to OFFER_MADE and notifies them of a bid that can
+  // never be accepted. Enforcing here keeps one policy on one surface.
+  //
+  // Placed before the request lookup and any write, so a rejection performs
+  // no query against a caller-supplied id, no row write and no notification.
+  const vendor = await prisma.user.findUnique({
+    where: { id: vendorId },
+    select: { vendorStatus: true },
+  });
+  if (!vendor || !isVendorStatusEstablishable(vendor.vendorStatus)) {
+    throw new ForbiddenError(VENDOR_STATUS_UNRESOLVED_MESSAGE);
+  }
+  assertVendorNotSuspended(vendor.vendorStatus);
+
   const request = await prisma.specialOrderRequest.findUnique({
     where: { id: requestId },
   });
@@ -1128,10 +1417,11 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
       where: { id: offer.vendorId },
       select: { commissionRate: true },
     });
+    // offer.price and deliveryFeeResult.fee are both integer kobo (Phase 3A).
     const specialBase = offer.price;
     const specialSnapshot = buildOrderMoneySnapshot({
-      basePriceNaira: specialBase,
-      discountNaira: 0,
+      basePriceKobo: specialBase,
+      discountKobo: 0,
       commissionRate: resolveCommissionRate(specialVendor?.commissionRate),
     });
     const created = await tx.order.create({
@@ -1139,9 +1429,9 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
         customerId: userId,
         vendorId: offer.vendorId,
         addressId,
-        basePrice: offer.price,
+        basePrice: specialBase,
         deliveryFee: deliveryFeeResult.fee,
-        totalPrice: round(offer.price + deliveryFeeResult.fee),
+        totalPrice: specialBase + deliveryFeeResult.fee,
         commissionRateSnapshot: specialSnapshot.commissionRateSnapshot,
         commissionKobo: specialSnapshot.commissionKobo,
         vendorPayoutKobo: specialSnapshot.vendorPayoutKobo,
@@ -1156,7 +1446,15 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
               productId: offer.request.productId,
               productName: requestedProduct.name,
               quantity: offer.request.quantity,
-              unitPrice: offer.price,
+              // Batch F: offer.price is the vendor's TOTAL bid for the
+              // requested quantity (stock is reserved for the full
+              // quantity and the order total charges the bid total), so
+              // the per-unit price is the pro-rata share. Previously
+              // unitPrice carried the whole bid, making unitPrice ×
+              // quantity disagree with the line whenever quantity > 1.
+              // subtotal (the authoritative line total) is unchanged, so
+              // no money movement, snapshot, or total changes here.
+              unitPrice: round(offer.price / Math.max(offer.request.quantity, 1)),
               subtotal: offer.price,
             },
           ],
@@ -1164,9 +1462,34 @@ export const acceptSpecialOffer = async (req: AuthRequest, res: Response) => {
       },
       include: { items: true },
     });
-    await clearProductCache(requestedProduct.id, offer.vendorId).catch(() => {});
     return [rejected, acceptedRequest, accepted, created] as const;
   });
+
+  // Post-commit: the transaction above has committed (a rejection would have
+  // propagated instead of reaching here), so sweeping the cached product rows
+  // now cannot invalidate entries for a rolled-back order. Best-effort — a
+  // failure only costs display staleness until TTL expiry.
+  await clearProductCache(requestedProduct.id, offer.vendorId)
+    .then((result) => {
+      // The helper reports incomplete sweeps via its return, not
+      // exceptions. `result &&` tolerates test doubles that stub the
+      // helper as returning undefined.
+      if (result && !result.ok) {
+        logger.warn(
+          { productId: requestedProduct.id, vendorId: offer.vendorId, orderId: order.id, failures: result.failures },
+          "Product cache invalidation incomplete after special-order acceptance",
+        );
+      }
+    })
+    .catch((err) => {
+      // Defensive only: the helper contract is never-throw, so reaching
+      // here means the contract itself broke. Logged instead of swallowed
+      // so an unexpected failure is visible rather than silent.
+      logger.warn(
+        { err, productId: requestedProduct.id, vendorId: offer.vendorId, orderId: order.id },
+        "Product cache invalidation threw unexpectedly after special-order acceptance",
+      );
+    });
 
   // Previously the vendor was never notified their offer was accepted —
   // they'd only find out by happening to check their orders list.

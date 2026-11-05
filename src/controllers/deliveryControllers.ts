@@ -7,16 +7,30 @@ import { sendSuccess } from "../utils/apiResponse";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../errors/AppError";
 import prisma from "../lib/prisma";
 import { DeliveryStatus, Role } from "@prisma/client";
+import {
+  assertRiderApproved,
+  assertRiderOperational,
+  assertRiderProfileExists,
+  loadRiderEligibility,
+} from "../services/riderEligibility.service";
 
 export class DeliveryAssignmentController {
   static async acceptBroadcast(req: AuthRequest, res: Response) {
     const broadcastId = ensureString(req.params.broadcastId);
     const driverId = req.user!.id;
+    // Task 3: eligibility is asserted here, at the authoritative boundary, so
+    // the acceptance path cannot be reached by holding the DELIVERY role alone
+    // even if the route middleware were removed or a service is called directly.
+    assertRiderOperational(await loadRiderEligibility(driverId));
     const assignment = await DeliveryAssignmentService.acceptBroadcast(broadcastId, driverId);
     return sendSuccess(res, { assignment }, "Broadcast accepted successfully");
   }
 
   static async getBroadcastOffers(req: AuthRequest, res: Response) {
+    // Checked BEFORE the lookup, because the offer payload carries the
+    // customer's name, phone number and full delivery address. An ineligible
+    // rider must never be able to retrieve it.
+    assertRiderOperational(await loadRiderEligibility(req.user!.id));
     const offers = await DeliveryAssignmentService.getBroadcastOffersForDriver(req.user!.id);
     return sendSuccess(res, { offers }, "Delivery offers retrieved");
   }
@@ -55,12 +69,16 @@ export class DeliveryAssignmentController {
 
   static async acceptAssignment(req: AuthRequest, res: Response) {
     const assignmentId = ensureString(req.params.assignmentId);
+    assertRiderOperational(await loadRiderEligibility(req.user!.id));
     const assignment = await DeliveryAssignmentService.acceptAssignment(assignmentId, req.user!.id);
     return sendSuccess(res, { assignment }, "Assignment accepted");
   }
 
   static async declineAssignment(req: AuthRequest, res: Response) {
     const assignmentId = ensureString(req.params.assignmentId);
+    // Declining REDUCES work, so it is gated on approval only — requiring the
+    // rider to be on shift to say "no" would be a regression.
+    assertRiderApproved(await loadRiderEligibility(req.user!.id));
     const assignment = await DeliveryAssignmentService.handleDecline(assignmentId, req.user!.id);
     return sendSuccess(res, { assignment }, "Assignment declined");
   }
@@ -72,6 +90,7 @@ export class DeliveryAssignmentController {
 
   static async updateDeliveryStatus(req: AuthRequest, res: Response) {
     const assignmentId = ensureString(req.params.assignmentId);
+    assertRiderOperational(await loadRiderEligibility(req.user!.id));
     const { status } = req.body as { status?: string };
     if (!status || !(status in DeliveryStatus)) throw new ValidationError("A valid status is required");
     if (status === "DELIVERED") {
@@ -157,6 +176,7 @@ export class DeliveryAssignmentController {
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Valid latitude and longitude are required", parsed.error.flatten().fieldErrors);
 
+    assertRiderOperational(await loadRiderEligibility(req.user!.id));
     const driver = await DeliveryAssignmentService.updateDriverLocation(req.user!.id, parsed.data.latitude, parsed.data.longitude);
     return sendSuccess(res, { latitude: driver.latitude, longitude: driver.longitude }, "Location updated");
   }
@@ -165,6 +185,18 @@ export class DeliveryAssignmentController {
     const schema = z.object({ isOnline: z.boolean() });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("isOnline (boolean) is required");
+
+    // Going ONLINE needs an approved rider; going OFFLINE never does. An
+    // administrator who suspends a rider also forces isOnline:false, but a
+    // rider must additionally always be able to stop working on their own,
+    // otherwise a suspension could leave them appearing on shift.
+    if (parsed.data.isOnline) {
+      assertRiderApproved(await loadRiderEligibility(req.user!.id));
+    } else {
+      // Still prove the profile exists so the write cannot be aimed at a
+      // missing row; a null profile raises NotFound here.
+      assertRiderProfileExists(await loadRiderEligibility(req.user!.id));
+    }
 
     const driver = await DeliveryAssignmentService.setOnlineStatus(req.user!.id, parsed.data.isOnline);
     return sendSuccess(res, { isOnline: driver.isOnline }, parsed.data.isOnline ? "You're now online" : "You're now offline");

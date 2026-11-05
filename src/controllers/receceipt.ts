@@ -5,6 +5,7 @@ import { AuthRequest } from "../middlewares/auth.middleware";
 import prisma from "../lib/prisma";
 import { sendSuccess } from "../utils/apiResponse";
 import { NotFoundError, ForbiddenError } from "../errors/AppError";
+import { getReceiptFileName, getReceiptFilePath } from "../utils/receiptsPath";
 
 export const getReceipt = async (req: AuthRequest, res: Response) => {
   const paymentId = String(req.params.paymentId);
@@ -20,8 +21,11 @@ export const getReceipt = async (req: AuthRequest, res: Response) => {
   // If client requests stream (Accept: application/pdf or ?download=1), stream file with auth
   const wantsStream = req.query.stream === "1" || req.headers.accept?.includes("application/pdf");
   if (wantsStream && receipt.pdfUrl) {
-    const fileName = `receipt_${receipt.payment.reference}.pdf`;
-    const filePath = path.join(process.cwd(), "receipts", fileName);
+    // Resolved through the same helper the writer uses, so the reader can
+    // never look in a different directory than the one the PDF was written to.
+    // The default location is unchanged (`process.cwd()/receipts`).
+    const fileName = getReceiptFileName(receipt.payment.reference);
+    const filePath = getReceiptFilePath(receipt.payment.reference);
     if (fs.existsSync(filePath)) {
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);

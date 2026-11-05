@@ -14,6 +14,7 @@ import {
 import { findNearbyVendors } from "../controllers/vendorControllerMapping";
 import { getActivePromotionsForCustomer } from "./promoService";
 import { attachPromotions, loadActiveProductPromos } from "./promotionPricing.service";
+import { projectPublicVendorList } from "./publicVendor.service";
 import { logger } from "../lib/logger";
 import { ValidationError } from "../errors/AppError";
 
@@ -134,6 +135,39 @@ async function safeSection<T>(
   }
 }
 
+/**
+ * Re-projects the vendor of every product in a cached feed payload (B-1).
+ *
+ * A feed entry written before the public vendor projection existed still
+ * carries the raw vendor object for the remaining TTL (90 seconds). The
+ * projection is re-applied on read so a cache hit can never re-introduce a
+ * removed field.
+ */
+function projectFeedVendors(payload: Record<string, unknown>): Record<string, unknown> {
+  const projectList = (items: unknown) =>
+    projectPublicVendorList(
+      (Array.isArray(items) ? items : []) as Array<{ vendor?: unknown }>,
+    );
+
+  const section = (value: unknown) =>
+    value && typeof value === "object"
+      ? {
+          ...(value as Record<string, unknown>),
+          items: projectList((value as Record<string, unknown>).items),
+        }
+      : value;
+
+  return {
+    ...payload,
+    liveProducts: section(payload.liveProducts),
+    newProducts: section(payload.newProducts),
+    jollofProducts: section(payload.jollofProducts),
+    pepeSoupProducts: section(payload.pepeSoupProducts),
+    catalog: section(payload.catalog),
+    popularProducts: projectList(payload.popularProducts),
+  };
+}
+
 export async function getHomeFeed(viewer: HomeFeedViewer | null, query: NormalizedHomeFeedQuery) {
   const cacheKey = buildHomeFeedCacheKey({ viewer, query });
 
@@ -141,7 +175,10 @@ export async function getHomeFeed(viewer: HomeFeedViewer | null, query: Normaliz
   try {
     const cached = await redisProducts.get(cacheKey);
     if (cached) {
-      return { payload: JSON.parse(cached), cache: "HIT" as const };
+      return {
+        payload: projectFeedVendors(JSON.parse(cached)),
+        cache: "HIT" as const,
+      };
     }
   } catch (err) {
     logger.warn(

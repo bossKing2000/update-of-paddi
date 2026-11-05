@@ -266,7 +266,10 @@ model Product {
   // live objects as expected state instead of drift. tsvector_col is
   // server-maintained by a trigger and is not application-written.
   tsvector_col Unsupported("tsvector")?
-  price       Float
+  // Phase 3A: product price stored as integer kobo (minor currency unit).
+  // All monetary math on this field is exact integer kobo; naira is only a
+  // display conversion at the API boundary.
+  price       Int
   archived    Boolean @default(false) // just like a delete function
 
   // What the food actually is (required, vendor-selected from DishType).
@@ -315,6 +318,7 @@ model Product {
   tags                ProductTag[]
   optionGroups        OptionGroup[]
   dailyCounters       ProductDailyCounter[]
+  dailyCapReservations DailyCapReservation[] @relation("DailyCapReservations")
   averageRating       Float?                @default(0)
   reviewCount         Int                   @default(0)
   createdAt           DateTime              @default(now())
@@ -348,7 +352,8 @@ model ProductOption {
   id              String            @id @default(uuid())
   productId       String
   name            String
-  price           Float
+  // Phase 3A: option price stored as integer kobo.
+  price           Int
   // Vendors can disable (not delete) an add-on; disabled add-ons are
   // rejected at cart/checkout time but preserved on historical orders
   // via the OrderItemOption snapshot.
@@ -378,15 +383,44 @@ model OptionGroup {
   items   OptionGroupItem[]
 
   @@index([productId, sortOrder])
+  // Phase 2B.2: at most one group per product may carry a given name. This is
+  // the database-level backstop for the concurrent-run race in the legacy
+  // add-on consolidation (two runs could both observe "no Extras group" and
+  // each insert one).
+  //
+  // This declaration is EXACT-match, and on its own it does NOT prevent two
+  // groups whose names differ only by case or surrounding whitespace — the
+  // application compares names with `normalizeOptionName` (trim + lowercase),
+  // so it treats "Extras" and "extras" as the same name while PostgreSQL
+  // treats them as different values.
+  //
+  // The matching guarantee is provided by a second, hand-written index created
+  // in prisma/migrations/20261020000000_option_group_normalized_name_unique:
+  //
+  //     CREATE UNIQUE INDEX "OptionGroup_productId_name_lower_key"
+  //       ON "OptionGroup" ("productId", lower(btrim("name")));
+  //
+  // Prisma 6 cannot express an expression index in the schema language, so
+  // that index is invisible to `prisma db pull` and to `migrate dev`; it must be
+  // preserved deliberately (it is registered in
+  // tests/unit/migrationChainIntegrity.test.ts). This exact-match declaration
+  // is kept so the schema still describes the Prisma-visible half of the
+  // guarantee and `migrate dev` sees no drift.
+  //
+  // Note the database rule `lower(btrim(name))` and the application rule
+  // `name.trim().toLowerCase()` agree for ordinary ASCII names but are not
+  // identical: btrim() removes spaces only (not tabs or other Unicode
+  // whitespace) and lower() follows the database locale.
+  @@unique([productId, name])
 }
 
 model OptionGroupItem {
   id            String   @id @default(uuid())
   optionGroupId String
   name          String
-  // Same Float/naira representation as ProductOption.price. May be
-  // negative (discount add-on). No kobo conversion in this phase.
-  priceAdd      Float    @default(0)
+  // Phase 3A: add-on price stored as integer kobo. May be negative
+  // (discount add-on). Integer kobo is exact for minor currency units.
+  priceAdd      Int      @default(0)
   isActive      Boolean  @default(true)
   sortOrder     Int      @default(0)
   createdAt     DateTime @default(now())
@@ -397,6 +431,22 @@ model OptionGroupItem {
   cartItemOptions CartItemOption[]
   orderItemOptions OrderItemOption[]
 
+  // Hand-written normalized unique index created in
+  // prisma/migrations/20261021000000_option_group_item_normalized_name_unique:
+  //
+  //     CREATE UNIQUE INDEX "OptionGroupItem_optionGroupId_name_lower_key"
+  //       ON "OptionGroupItem" ("optionGroupId", lower(btrim("name")));
+  //
+  // Prisma 6 cannot express an expression index in the schema language, so this
+  // index is invisible to `prisma db pull` and `migrate dev`. It is
+  // load-bearing: uniqueness is per optionGroupId (NOT global across groups),
+  // and the ordinary `@@index([optionGroupId, isActive, sortOrder])` below does
+  // NOT provide the same protection. Do not remove the database index.
+  //
+  // The database rule `lower(btrim(name))` and the application rule
+  // `name.trim().toLowerCase()` agree for ordinary ASCII names but are not
+  // identical: btrim() removes spaces only (not tabs or other Unicode
+  // whitespace) and lower() follows the database locale.
   @@index([optionGroupId, isActive, sortOrder])
 }
 
@@ -415,6 +465,33 @@ model ProductDailyCounter {
   @@index([date])
 }
 
+// Phase 3D: durable record of one order's reserved daily-cap unit for one
+// product on one Africa/Lagos business day. Makes daily-cap release
+// idempotent per reservation: a cancelled or expired order releases exactly
+// the capacity it reserved, and a repeated or concurrent release cannot
+// decrement capacity belonging to another order. Created together with the
+// ProductDailyCounter increment inside the checkout transaction; released
+// (released=true) together with the counter decrement inside the
+// cancellation/expiry transaction.
+model DailyCapReservation {
+  id        String   @id @default(uuid())
+  orderId   String
+  productId String
+  // Start of the Africa/Lagos business day the capacity was reserved for
+  // (the order's scheduledAt fulfilment day, or "now" for immediate orders).
+  day       DateTime
+  quantity  Int      @default(1)
+  released  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  order   Order   @relation("DailyCapReservations", fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation("DailyCapReservations", fields: [productId], references: [id], onDelete: Cascade)
+
+  // One reservation per order + product + business day.
+  @@unique([orderId, productId, day])
+  @@index([productId, day])
+  @@index([orderId])
+}
 // Phase 2A product tagging. Canonical tags only (stable string ids);
 // vendors attach/detach them, they never free-type tag names.
 enum TagType {
@@ -494,14 +571,21 @@ model Order {
   customerId       String
   vendorId         String
   addressId        String?
-  basePrice        Float
-  extraCharge      Float       @default(0)
+  // Phase 3A: order financial snapshot fields stored as integer kobo
+  // (minor currency unit). These are frozen at checkout/payment time and
+  // never recomputed from a live rate, so historical values stay immutable.
+  basePrice        Int
+  // Phase 3A: integer kobo.
+  extraCharge      Int       @default(0)
   // Delivery fee for this specific order, computed once per vendor at
   // checkout (see cartSummary.service.ts / deliveryFee.service.ts).
   // Previously there was no delivery fee concept anywhere — deliveries
   // were effectively always free and there was no out-of-range check.
-  deliveryFee      Float       @default(0)
-  totalPrice       Float
+  // Phase 3A: integer kobo.
+  deliveryFee      Int       @default(0)
+  // Phase 3A: order total in integer kobo, authoritative for payment
+  // amount, Paystack initialization, and reconciliation.
+  totalPrice       Int
   // Phase 3.2a: per-order financial snapshots in kobo (integer minor units).
   // Nullable with no default and no backfill — historical rows predate the
   // writers (Phase 3.2b) and their exact values are unrecoverable, so NULL
@@ -556,6 +640,11 @@ model Order {
   assignments DeliveryAssignment[]
   earnings    DeliveryEarning[]
 
+  dailyCapReservations DailyCapReservation[] @relation("DailyCapReservations")
+
+  legacyPayoutOutcomes LegacyPayoutOutcome[] @relation("LegacyPayoutOutcomeOrder")
+  vendorPayoutOrders VendorPayoutOrder[] @relation("VendorPayoutOrderOrder")
+
   paymentInitiatedAt DateTime? // you already had this; kept for compatibility
   paymentStartedAt   DateTime? // optional clearer alias if you want to set it explicitly
 
@@ -564,9 +653,18 @@ model Order {
   paymentStatus PaymentStatus? @default(PENDING)
 
   cancelledAt         DateTime?
-  cancellationReason  String? // "PAYMENT_EXPIRED" | "USER_CANCELLED" | "VENDOR_REJECTED"
+  cancellationReason  String? // "PAYMENT_EXPIRED" | "USER_CANCELLED" | "VENDOR_REJECTED" | "VENDOR_TIMEOUT"
   protectedUntil      DateTime? // ← new field
   paymentGraceMinutes Int?                @default(15)
+
+  // Phase 3D: the requested fulfillment time for scheduled/preorder orders.
+  // Null = an immediate order (fulfill as soon as possible). When set, this
+  // is the customer's requested date/time and is authoritative for the
+  // vendor-confirmation deadline and daily-cap bucketing — it is distinct
+  // from createdAt (when the order was placed) and from paidAt / completedAt.
+  // Stored and compared in UTC; the business day is Africa/Lagos.
+  scheduledAt DateTime?
+
   Activity            Activity[]
   DeliveryBroadcast   DeliveryBroadcast[]
   // @@index([paymentExpiresAt])
@@ -576,6 +674,7 @@ model Order {
   @@index([status])
   @@index([idempotencyKey])
   @@index([payoutId])
+  @@index([scheduledAt])
 }
 
 model OrderItem {
@@ -588,8 +687,10 @@ model OrderItem {
   // revalidated product name in the checkout transaction.
   productName String?
   quantity  Int
-  unitPrice Float
-  subtotal  Float
+  // Phase 3A: snapshotted unit price in integer kobo at checkout.
+  unitPrice Int
+  // Phase 3A: line subtotal in integer kobo (unitPrice × quantity).
+  subtotal  Int
   createdAt DateTime          @default(now())
   updatedAt DateTime? // specialRequest String? // NEW FIELD
   order     Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
@@ -609,7 +710,8 @@ model OrderItemOption {
   // just application validation.
   optionId      String?
   name          String
-  price         Float
+  // Phase 3A: snapshotted option price in integer kobo at checkout.
+  price         Int
   orderItemId   String
   orderItem     OrderItem     @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
   // Restrict (NOT Cascade): legacy option rows are frozen but still
@@ -790,6 +892,8 @@ model Payment {
 
   Receipt Receipt[]
 
+  financialOperationClaims FinancialOperationClaim[] @relation("FinancialOperationClaimPayment")
+
   @@index([userId])
   @@index([orderId])
   @@index([status])
@@ -923,8 +1027,15 @@ model Promotion {
   description String?
 
   type        DiscountType
+  // Polymorphic value: a percentage (0–100) when type is PERCENTAGE
+  // (non-monetary, intentionally retained as Float), or a fixed naira amount
+  // when type is FIXED or DELIVERY (monetary, converted to kobo at the
+  // calculation boundary via Math.round(value * 100)). Because one column
+  // carries two units, callers MUST check `type` before treating this as
+  // either kobo or a percentage — never assume a single unit.
   value       Float // percentage (0-100) or fixed naira amount, depending on type
-  maxDiscount Float? // caps a PERCENTAGE discount's naira value
+  // Phase 3A: cap on a PERCENTAGE discount, stored as integer kobo.
+  maxDiscount Int? // caps a PERCENTAGE discount's naira value
 
   // Promotion scope: SINGLE_PRODUCT, SELECTED_PRODUCTS, VENDOR_WIDE
   // - SINGLE_PRODUCT: applies to exactly one product (productId required)
@@ -941,7 +1052,8 @@ model Promotion {
   usedCount      Int  @default(0)
   maxUsesPerUser Int  @default(1)
 
-  minOrderAmount Float @default(0) // minimum subtotal (of the scoped vendor, or whole cart if platform-wide) to qualify
+  // Phase 3A: minimum subtotal to qualify, stored as integer kobo.
+  minOrderAmount Int @default(0) // minimum subtotal (of the scoped vendor, or whole cart if platform-wide) to qualify
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -961,7 +1073,8 @@ model PromotionUsage {
   userId      String
   orderIds    String[] // every order this redemption's discount was applied across (a multi-vendor checkout batch)
   promoCode   String
-  discount    Float
+  // Phase 3A: discount applied in this redemption, stored as integer kobo.
+  discount    Int
 
   createdAt DateTime @default(now())
 
@@ -1007,7 +1120,8 @@ model ReferralReward {
   referredId String
 
   orderId String? // the referred user's qualifying (first completed) order
-  amount  Float   @default(0)
+  // Phase 3A: referral reward amount stored as integer kobo.
+  amount  Int @default(0)
 
   status ReferralRewardStatus @default(PENDING)
 
@@ -1026,9 +1140,14 @@ model VendorPayout {
   vendorId String
   vendor   User   @relation("VendorPayouts", fields: [vendorId], references: [id])
 
-  grossRevenue Float // total order revenue included in this payout
-  commission   Float // platform's cut
-  amount       Float // net amount actually paid to the vendor
+  // Phase 3A: payout settlement amounts stored as integer kobo. BigInt is
+  // used (rather than Int) because payouts aggregate revenue across many
+  // orders and can exceed PostgreSQL INTEGER range (~₦21M in kobo), which
+  // would overflow on a large settlement run. Consistent with the Order
+  // kobo snapshot convention (commissionKobo/vendorPayoutKobo/discountKobo).
+  grossRevenue BigInt // total order revenue included in this payout
+  commission   BigInt // platform's cut
+  amount       BigInt // net amount actually paid to the vendor
   orderCount   Int
 
   periodStart DateTime
@@ -1043,6 +1162,12 @@ model VendorPayout {
   processedByAdmin   User?   @relation("PayoutProcessedBy", fields: [processedByAdminId], references: [id])
 
   orders Order[]
+
+  financialOperationClaims FinancialOperationClaim[] @relation("FinancialOperationClaimVendorPayout")
+  legacyPayoutOutcomes LegacyPayoutOutcome[] @relation("LegacyPayoutOutcomeVendorPayout")
+  vendorPayoutOrders VendorPayoutOrder[] @relation("VendorPayoutOrderVendorPayout")
+  financialWebhookReceipts FinancialWebhookReceipt[] @relation("FinancialWebhookReceiptVendorPayout")
+  reversalEvents ReversalEvent[] @relation("ReversalEventVendorPayout")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1081,7 +1206,18 @@ model RefundRequest {
   orderId String?
   order   Order?  @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
 
+  financialOperationClaims FinancialOperationClaim[] @relation("FinancialOperationClaimRefundRequest")
+
   @@index([paystackRefundId])
+}
+
+// Stage 5: System configuration table for operational flags like
+// FINANCIAL_SUBMISSION_FROZEN. Key/value store for runtime configuration.
+model SystemConfig {
+  key        String   @id
+  value      String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 enum PayoutStatus {
@@ -1089,6 +1225,8 @@ enum PayoutStatus {
   PROCESSING
   PAID
   FAILED
+  REVERSAL_PENDING
+  REVERSED
 }
 
 enum RefundStatus {
@@ -1106,11 +1244,239 @@ enum RefundStatus {
   FAILED
 }
 
+// ===== Stage 5: Financial-Operation Claim Enums =====
+
+enum FinancialOperationType {
+  PAYOUT
+  REFUND
+  PAYOUT_REVERSAL
+}
+
+enum FinancialOperationStatus {
+  CLAIMED
+  SUBMITTED
+  PROCESSING
+  COMPLETED
+  FAILED
+  REVERSED
+}
+
+enum TerminalOutcome {
+  COMPLETED
+  FAILED
+  REVERSED
+}
+
+enum VendorPayoutOrderStatus {
+  CLAIMED
+  SETTLED
+  REVERSAL_PENDING
+  RELEASED
+  REVERSED
+}
+
+enum ReversalEventStatus {
+  PENDING
+  PENDING_REVERSAL
+  PROCESSING
+  AWAITING_BALANCE_CONFIRMATION
+  RESOLVED
+  FAILED
+  MANUAL_REVIEW_REQUIRED
+}
+
+enum LegacyPayoutOutcomeClassification {
+  TRANSFER_SUBMITTED_UNKNOWN
+  TRANSFER_OUTCOME_UNKNOWN
+  TRANSFER_SUCCESS_CONFIRMED
+  REVERSAL_CONFIRMED
+  MANUAL_INVESTIGATION_REQUIRED
+}
+
+// ===== Stage 5: Financial-Operation Claim Models =====
+
+model FinancialOperationClaim {
+  id                    String   @id @default(uuid())
+  paymentId             String
+  payment               Payment  @relation("FinancialOperationClaimPayment", fields: [paymentId], references: [id], onDelete: Restrict)
+
+  operationType         FinancialOperationType
+  status                FinancialOperationStatus
+  terminalOutcome       TerminalOutcome?
+
+  operationIdempotencyKey String @unique
+
+  externalReference     String?
+  paystackRefundId      String?
+
+  amountKobo            Int
+  currency              String   @default("NGN")
+
+  operationVersion      Int      @default(0)
+
+  vendorPayoutId        String?
+  vendorPayout           VendorPayout?   @relation("FinancialOperationClaimVendorPayout", fields: [vendorPayoutId], references: [id], onDelete: Restrict)
+  refundRequestId       String?
+  refundRequest          RefundRequest?   @relation("FinancialOperationClaimRefundRequest", fields: [refundRequestId], references: [id], onDelete: Restrict)
+
+  originalClaimId         String?   @unique
+  originalClaim           FinancialOperationClaim? @relation("FinancialOperationClaimOriginal", fields: [originalClaimId], references: [id], onDelete: Restrict)
+  reversingClaim          FinancialOperationClaim? @relation("FinancialOperationClaimOriginal")
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  archivedAt            DateTime?
+
+  financialOperationClaimLeases FinancialOperationClaimLease[] @relation("FinancialOperationClaimLeaseClaim")
+
+  @@index([paymentId])
+  @@index([externalReference])
+  @@index([vendorPayoutId])
+  @@index([refundRequestId])
+  @@index([originalClaimId])
+}
+
+model FinancialOperationClaimLease {
+  id        String   @id @default(uuid())
+  claimId   String   @unique
+  claim      FinancialOperationClaim @relation("FinancialOperationClaimLeaseClaim", fields: [claimId], references: [id], onDelete: Restrict)
+  workerId  String
+  expiresAt DateTime
+  version   Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([claimId, expiresAt])
+  @@index([expiresAt])
+}
+
+model VendorPayoutOrder {
+  id                    String   @id @default(uuid())
+  vendorPayoutId        String
+  vendorPayout          VendorPayout @relation("VendorPayoutOrderVendorPayout", fields: [vendorPayoutId], references: [id], onDelete: Restrict)
+  orderId               String
+  order                 Order    @relation("VendorPayoutOrderOrder", fields: [orderId], references: [id], onDelete: Restrict)
+  associationStatus     VendorPayoutOrderStatus @default(CLAIMED)
+  basePriceKobo         Int
+  commissionKobo        BigInt?
+  vendorPayoutKobo      BigInt?
+  discountKobo          BigInt?
+  deliveryFeeKobo       Int
+  claimedAt             DateTime @default(now())
+  settledAt             DateTime?
+  releasedAt            DateTime?
+  reversesId            String?   @unique
+  reverses              VendorPayoutOrder?   @relation("VendorPayoutOrderReversal", fields: [reversesId], references: [id], onDelete: Restrict)
+  reversedBy            VendorPayoutOrder? @relation("VendorPayoutOrderReversal")
+  legacySnapshotVerified      Boolean   @default(false)
+  legacySnapshotVerifiedBy    String?
+  legacySnapshotVerifiedAt    DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([vendorPayoutId, orderId])
+  @@index([vendorPayoutId])
+  @@index([orderId])
+  @@index([associationStatus])
+}
+
+model ReversalEvent {
+  id                String   @id @default(uuid())
+  vendorPayoutId   String?
+  vendorPayout      VendorPayout?   @relation("ReversalEventVendorPayout", fields: [vendorPayoutId], references: [id], onDelete: Restrict)
+  paystackReference String
+  eventType         String
+  providerEvent     String?
+  source            String?
+  payload           Json
+  rawPayload        String?
+  status            ReversalEventStatus
+  resolvedAt        DateTime?
+  lease               ReversalEventLease? @relation("ReversalEventLeaseEvent")
+
+  @@index([vendorPayoutId, status])
+  @@index([status])
+}
+
+model ReversalEventLease {
+  id        String   @id @default(uuid())
+  eventId   String   @unique
+  event      ReversalEvent @relation("ReversalEventLeaseEvent", fields: [eventId], references: [id], onDelete: Restrict)
+  workerId  String
+  expiresAt DateTime
+  version   Int      @default(0)
+  attemptCount   Int      @default(0)
+  lastAttemptAt   DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([eventId, expiresAt])
+  @@index([expiresAt])
+}
+
+model FinancialWebhookReceipt {
+  id               String   @id @default(uuid())
+  providerEvent    String
+  payload          Json
+  rawPayload       String?
+  receivedAt       DateTime @default(now())
+  signatureValid   Boolean  @default(false)
+  processed        Boolean  @default(false)
+  processingLeaseId String?
+  processingLeaseExpiresAt DateTime?
+  vendorPayoutId   String?
+  vendorPayout      VendorPayout? @relation("FinancialWebhookReceiptVendorPayout", fields: [vendorPayoutId], references: [id], onDelete: Restrict)
+  conflicts         FinancialWebhookReceiptConflict[] @relation("FinancialWebhookReceiptConflictReceipt")
+  conflictingReceipts FinancialWebhookReceiptConflict[] @relation("FinancialWebhookReceiptConflictConflictingReceipt")
+
+  @@index([providerEvent, receivedAt])
+  @@index([vendorPayoutId])
+  @@index([processed])
+  @@index([processingLeaseId])
+}
+
+model FinancialWebhookReceiptConflict {
+  id                 String   @id @default(uuid())
+  receiptId          String
+  receipt             FinancialWebhookReceipt @relation("FinancialWebhookReceiptConflictReceipt", fields: [receiptId], references: [id], onDelete: Restrict)
+  conflictingReceiptId String
+  conflictingReceipt  FinancialWebhookReceipt @relation("FinancialWebhookReceiptConflictConflictingReceipt", fields: [conflictingReceiptId], references: [id], onDelete: Restrict)
+  conflictType        String
+  description         String
+  createdAt           DateTime @default(now())
+  resolvedAt          DateTime?
+  resolution          String?
+  resolvedBy          String?
+
+  @@index([receiptId])
+  @@index([conflictingReceiptId])
+  @@index([conflictType])
+}
+
+model LegacyPayoutOutcome {
+  id                 String   @id @default(uuid())
+  orderId            String   @unique
+  order               Order    @relation("LegacyPayoutOutcomeOrder", fields: [orderId], references: [id], onDelete: Restrict)
+  vendorPayoutId     String
+  vendorPayout        VendorPayout @relation("LegacyPayoutOutcomeVendorPayout", fields: [vendorPayoutId], references: [id], onDelete: Restrict)
+  classification     LegacyPayoutOutcomeClassification
+  evidenceSummary    String
+  providerEvidence   Json?
+  localPayoutStatus  String
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([vendorPayoutId])
+  @@index([classification])
+}
+
 model Cart {
   id         String   @id @default(uuid())
   customerId String
-  basePrice  Float    @default(0)
-  totalPrice Float    @default(0)
+  // Phase 3A: cart base price in integer kobo.
+  basePrice  Int      @default(0)
+  // Phase 3A: cart total price in integer kobo.
+  totalPrice Int      @default(0)
   // Held true for the duration of an in-flight checkout so a second
   // concurrent checkout request (double-tap, retry) can't race the first
   // one and create duplicate orders from the same cart.
@@ -1131,11 +1497,17 @@ model CartItem {
   cartId    String
   productId String
   quantity  Int
-  unitPrice Float
-  subtotal  Float
+  // Phase 3A: unit price in integer kobo.
+  unitPrice Int
+  // Phase 3A: line subtotal in integer kobo (unitPrice × quantity).
+  subtotal  Int
 
   cart           Cart             @relation(fields: [cartId], references: [id], onDelete: Cascade)
-  product        Product          @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // Restrict (NOT Cascade): deleting a catalog product must never silently
+  // delete a customer's cart line. Removal from sale is via archived=true;
+  // the vendor and admin delete paths refuse products that are still in a
+  // cart (409) before this database backstop is reached.
+  product        Product          @relation(fields: [productId], references: [id], onDelete: Restrict)
   specialRequest String? // ✅ keep the note for this product
   options        CartItemOption[]
 }
@@ -1151,12 +1523,18 @@ model CartItemOption {
   optionGroupItemId String?
 
   name            String
-  price           Float
+  // Phase 3A: option price in integer kobo.
+  price           Int
 
   // Relations
   cartItem      CartItem      @relation(fields: [cartItemId], references: [id], onDelete: Cascade)
   productOption ProductOption? @relation(fields: [productOptionId], references: [id], onDelete: Cascade)
-  optionGroupItem OptionGroupItem? @relation(fields: [optionGroupItemId], references: [id], onDelete: Cascade)
+  // Restrict (NOT Cascade): deleting an option-group item must never silently
+  // delete a customer's saved selection. Vendors deactivate the item via
+  // isActive; the delete paths refuse items still selected in a cart (409)
+  // before this database backstop is reached. The legacy productOption
+  // relation above is intentionally unchanged in this task.
+  optionGroupItem OptionGroupItem? @relation(fields: [optionGroupItemId], references: [id], onDelete: Restrict)
 
   @@index([cartItemId])
   @@index([productOptionId])
@@ -1207,7 +1585,10 @@ model DeliveryPerson {
   lastSeenAt      DateTime?
   assignedOrders  DeliveryAssignment[]
   earnings        DeliveryEarning[]
-  walletBalance   Float                @default(0)
+  // Phase 3A: rider wallet balance stored as integer kobo. The wallet is a
+  // denormalized read cache; the DeliveryEarning ledger is the source of
+  // truth for rider compensation.
+  walletBalance   Int                  @default(0)
   payoutAccount   RiderPayoutAccount?
   withdrawals     RiderWithdrawal[]
   vehicle         RiderVehicle?
@@ -1251,11 +1632,13 @@ model DeliveryEarning {
   id               String   @id @default(uuid())
   deliveryPersonId String
   orderId          String
-  baseFee          Float
-  distanceFee      Float
-  tip              Float    @default(0)
-  deductions       Float    @default(0)
-  totalEarned      Float
+  // Phase 3A: delivery earning components stored as integer kobo.
+  // totalEarned = baseFee + distanceFee + tip - deductions, all integer kobo.
+  baseFee          Int      @default(0)
+  distanceFee      Int      @default(0)
+  tip              Int      @default(0)
+  deductions       Int      @default(0)
+  totalEarned      Int
   createdAt        DateTime @default(now())
 
   deliveryPerson DeliveryPerson @relation(fields: [deliveryPersonId], references: [id])
@@ -1328,8 +1711,10 @@ model RiderWithdrawal {
   id                 String                @id @default(uuid())
   deliveryPersonId   String
   payoutAccountId    String
-  amount             Float
-  balanceSnapshot    Float
+  // Phase 3A: withdrawal amount stored as integer kobo.
+  amount             Int
+  // Phase 3A: rider wallet balance at withdrawal time, integer kobo.
+  balanceSnapshot    Int
   status             RiderWithdrawalStatus @default(PENDING)
   idempotencyKey     String
   reference          String?               @unique
@@ -1564,7 +1949,8 @@ model SpecialOrderOffer {
   id        String                  @id @default(uuid())
   requestId String
   vendorId  String
-  price     Float
+  // Phase 3A: vendor's bid price stored as integer kobo.
+  price     Int
   message   String?
   status    SpecialOrderOfferStatus @default(PENDING)
   createdAt DateTime                @default(now())

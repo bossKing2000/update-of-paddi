@@ -5,6 +5,11 @@ jest.mock("../../src/lib/prisma", () => {
       findMany: jest.fn(),
       findUnique: jest.fn(),
       update: jest.fn(),
+      // Phase 3.2.19 (FIN-08): the finalizers now CLAIM the terminal
+      // transition with a conditional update before any ledger write. A
+      // `{count: 1}` default models "this execution won the claim", which is
+      // what every pre-existing scenario here is.
+      updateMany: jest.fn(),
       aggregate: jest.fn(),
     },
     payment: {
@@ -15,6 +20,11 @@ jest.mock("../../src/lib/prisma", () => {
     order: {
       findMany: jest.fn(),
       updateMany: jest.fn(),
+    },
+    // F4-1: completeRefund now reconciles active delivery assignments inside
+    // the same transaction, so it touches DeliveryAssignment.
+    deliveryAssignment: {
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
   };
   // $transaction in this project's real usage hands the callback a
@@ -37,6 +47,10 @@ const ord = (prisma as any).order;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Default: the conditional claim wins (count 1), so the refund-status write
+  // this suite used to receive via `update` still happens, just as a guarded
+  // update. Loss scenarios are exercised in refundFinalizerConcurrency.test.ts.
+  rr.updateMany.mockResolvedValue({ count: 1 });
 });
 
 describe("matchRefundRequest (FIX 5/6 — webhook matching)", () => {
@@ -91,6 +105,9 @@ describe("completeRefund (FIX 4 — only REFUNDED once COMPLETED sum reaches the
     pay.findUnique.mockResolvedValueOnce({ id: "pay1", reference: "TXN1", amount: 10000, status: "SUCCESS", idempotencyKey: "K1", orderId: "o1" });
     rr.aggregate.mockResolvedValueOnce({ _sum: { requestedAmountKobo: 10000 } }); // 4k + 6k both COMPLETED now
     ord.findMany.mockResolvedValueOnce([{ id: "o1" }]);
+    // F4-1: the second findMany re-reads which affected orders actually became
+    // terminal, so reconciliation is never applied to a skipped order.
+    ord.findMany.mockResolvedValueOnce([{ id: "o1", status: "CANCELLED" }]);
 
     const result = await completeRefund("rrB", { source: "webhook" });
 
@@ -98,6 +115,10 @@ describe("completeRefund (FIX 4 — only REFUNDED once COMPLETED sum reaches the
     expect(pay.update).toHaveBeenCalledWith({ where: { id: "pay1" }, data: { status: "REFUNDED" } });
     expect(ord.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: "CANCELLED", paymentStatus: "REFUNDED" }) }),
+    );
+    // F4-1: the assignment reconciliation ran for that order, in the same tx.
+    expect((prisma as any).deliveryAssignment.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ orderId: "o1" }) }),
     );
   });
 
@@ -133,7 +154,14 @@ describe("failRefund (releases only its own reservation)", () => {
       where: { reference: "TXN1" },
       data: { refundedAmount: { decrement: 6000 } },
     });
-    expect(rr.update).toHaveBeenCalledWith({ where: { id: "rrB" }, data: { status: "FAILED" } });
+    // Phase 3.2.19 (FIN-08): the status change is now a guarded CLAIM that
+    // must happen BEFORE the release, so a losing execution never reaches the
+    // payment decrement above.
+    expect(rr.updateMany).toHaveBeenCalledWith({
+      where: { id: "rrB", status: "PROCESSING" },
+      data: { status: "FAILED" },
+    });
+    expect(rr.update).not.toHaveBeenCalled();
   });
 
   it("failing one refund does not touch a sibling refund's reservation (4k completes, 6k fails → refundedAmount ends at 4k)", async () => {

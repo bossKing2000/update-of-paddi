@@ -55,7 +55,8 @@ const promo = (overrides: Partial<LoadedProductPromo> = {}): LoadedProductPromo 
 
 const product = (overrides = {}) => ({
   id: "prod-1",
-  price: 5000,
+  // Phase 3A: product.price is integer kobo (₦5,000 = 500000 kobo).
+  price: 500000,
   vendorId: "vendor-1",
   archived: false,
   ...overrides,
@@ -63,30 +64,36 @@ const product = (overrides = {}) => ({
 
 describe("computeDiscountedPrice", () => {
   it("PERCENTAGE: ₦5,000 at 10% OFF is ₦4,500", () => {
+    // originalPrice 500000 kobo (₦5,000), value 10% → 450000 kobo (₦4,500).
     expect(
-      computeDiscountedPrice({ type: DiscountType.PERCENTAGE, value: 10, maxDiscount: null, originalPrice: 5000 }),
-    ).toBe(4500);
+      computeDiscountedPrice({ type: DiscountType.PERCENTAGE, value: 10, maxDiscount: null, originalPrice: 500000 }),
+    ).toBe(450000);
   });
 
   it("PERCENTAGE: caps the naira discount at maxDiscount", () => {
+    // originalPrice 100000 kobo (₦1,000), value 50% → 50000 kobo, capped at
+    // maxDiscount 20000 kobo (₦200) → 80000 kobo (₦800).
     expect(
-      computeDiscountedPrice({ type: DiscountType.PERCENTAGE, value: 50, maxDiscount: 200, originalPrice: 1000 }),
-    ).toBe(800);
+      computeDiscountedPrice({ type: DiscountType.PERCENTAGE, value: 50, maxDiscount: 20000, originalPrice: 100000 }),
+    ).toBe(80000);
   });
 
   it("FIXED: ₦5,000 with ₦500 OFF is ₦4,500 and never goes negative", () => {
+    // originalPrice 500000 kobo (₦5,000), value 500 naira → 50000 kobo off → 450000 kobo (₦4,500).
     expect(
-      computeDiscountedPrice({ type: DiscountType.FIXED, value: 500, maxDiscount: null, originalPrice: 5000 }),
-    ).toBe(4500);
+      computeDiscountedPrice({ type: DiscountType.FIXED, value: 500, maxDiscount: null, originalPrice: 500000 }),
+    ).toBe(450000);
+    // originalPrice 500000 kobo, value 9000 naira → 900000 kobo off → clamped to 0.
     expect(
-      computeDiscountedPrice({ type: DiscountType.FIXED, value: 9000, maxDiscount: null, originalPrice: 5000 }),
+      computeDiscountedPrice({ type: DiscountType.FIXED, value: 9000, maxDiscount: null, originalPrice: 500000 }),
     ).toBe(0);
   });
 
   it("DELIVERY never discounts a product price", () => {
+    // originalPrice 500000 kobo unchanged for DELIVERY promos.
     expect(
-      computeDiscountedPrice({ type: DiscountType.DELIVERY, value: 500, maxDiscount: null, originalPrice: 5000 }),
-    ).toBe(5000);
+      computeDiscountedPrice({ type: DiscountType.DELIVERY, value: 500, maxDiscount: null, originalPrice: 500000 }),
+    ).toBe(500000);
   });
 });
 
@@ -105,8 +112,8 @@ describe("resolveEffectivePromotionForProduct", () => {
   it("SINGLE_PRODUCT applies to exactly the linked product", () => {
     const p = promo({ scope: PromotionScope.SINGLE_PRODUCT, productIds: ["prod-1"] });
     const hit = resolveEffectivePromotionForProduct({ product: product(), promos: [p] });
-    expect(hit?.discountedPrice).toBe(4500);
-    expect(hit?.discountAmount).toBe(500);
+    expect(hit?.discountedPrice).toBe(450000);
+    expect(hit?.discountAmount).toBe(50000);
     expect(hit?.requiresCode).toBe(false);
     const miss = resolveEffectivePromotionForProduct({ product: product({ id: "prod-2" }), promos: [p] });
     expect(miss).toBeNull();
@@ -116,7 +123,7 @@ describe("resolveEffectivePromotionForProduct", () => {
     const p = promo({ scope: PromotionScope.SELECTED_PRODUCTS, productIds: ["prod-1", "prod-3"] });
     expect(
       resolveEffectivePromotionForProduct({ product: product({ id: "prod-3" }), promos: [p] })?.discountedPrice,
-    ).toBe(4500);
+    ).toBe(450000);
     expect(resolveEffectivePromotionForProduct({ product: product({ id: "prod-9" }), promos: [p] })).toBeNull();
   });
 
@@ -124,7 +131,7 @@ describe("resolveEffectivePromotionForProduct", () => {
     const p = promo({ scope: PromotionScope.VENDOR_WIDE, productIds: [] });
     expect(
       resolveEffectivePromotionForProduct({ product: product({ id: "anything" }), promos: [p] })?.discountedPrice,
-    ).toBe(4500);
+    ).toBe(450000);
     expect(
       resolveEffectivePromotionForProduct({
         product: product({ id: "anything", vendorId: "vendor-2" }),
@@ -136,7 +143,7 @@ describe("resolveEffectivePromotionForProduct", () => {
   it("VENDOR_WIDE FIXED: ₦5,000 with ₦500 OFF EVERYTHING is ₦4,500", () => {
     const p = promo({ scope: PromotionScope.VENDOR_WIDE, type: DiscountType.FIXED, value: 500, productIds: [] });
     const hit = resolveEffectivePromotionForProduct({ product: product({ id: "any-new-product" }), promos: [p] });
-    expect(hit?.discountedPrice).toBe(4500);
+    expect(hit?.discountedPrice).toBe(450000);
     expect(hit?.discountType).toBe(DiscountType.FIXED);
   });
 
@@ -191,7 +198,7 @@ describe("resolveEffectivePromotionForProduct", () => {
     });
     const hit = resolveEffectivePromotionForProduct({ product: product(), promos: [wide, specific] });
     expect(hit?.promotionId).toBe("specific");
-    expect(hit?.discountedPrice).toBe(4500);
+    expect(hit?.discountedPrice).toBe(450000);
   });
 
   it("conflict tie-break: larger discount wins at the same specificity", () => {
@@ -199,7 +206,7 @@ describe("resolveEffectivePromotionForProduct", () => {
     const big = promo({ id: "big", scope: PromotionScope.VENDOR_WIDE, value: 25, productIds: [] });
     const hit = resolveEffectivePromotionForProduct({ product: product(), promos: [small, big] });
     expect(hit?.promotionId).toBe("big");
-    expect(hit?.discountedPrice).toBe(3750);
+    expect(hit?.discountedPrice).toBe(375000);
   });
 
   it("ignores promos whose computed discount is zero", () => {
@@ -212,7 +219,7 @@ describe("attachPromotions", () => {
   it("attaches the same effective promotion batch-wide (one source, no per-surface math)", () => {
     const p = promo({ scope: PromotionScope.VENDOR_WIDE, productIds: [] });
     const [a, b] = attachPromotions([product({ id: "a" }), product({ id: "b", vendorId: "vendor-2" })], [p]);
-    expect(a.promotion?.discountedPrice).toBe(4500);
+    expect(a.promotion?.discountedPrice).toBe(450000);
     expect(b.promotion).toBeNull();
   });
 });

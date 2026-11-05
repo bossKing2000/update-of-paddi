@@ -31,6 +31,10 @@ export const getVendorSettings = async (req: AuthRequest, res: Response) => {
 export const updateDeliveryPreferences = async (req: AuthRequest, res: Response) => {
   const deliveryPreferences = parseOrThrow(deliveryPreferencesSchema.safeParse(req.body), "delivery preferences");
   const updated = await prisma.user.update({ where: { id: req.user!.id }, data: { deliveryPreferences }, select: vendorSelect });
+  // Phase 2 M4: acceptingOrders flips orderability, so cached discovery
+  // pages (which embed orderable flags) must be swept — same mechanism as
+  // the live toggle.
+  await invalidateMarketplaceDiscoveryCaches();
   await createAuditLog({ userId: req.user!.id, action: "VENDOR_DELIVERY_PREFERENCES_UPDATED", req, metadata: { deliveryPreferences } });
   return sendSuccess(res, updated, "Delivery preferences saved");
 };

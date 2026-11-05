@@ -30,6 +30,8 @@ jest.mock("../../src/lib/prisma", () => ({
       findUnique: jest.fn(),
     },
     order: { findMany: jest.fn(), updateMany: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
+    // F4-1: the cancel path reconciles active delivery assignments in-transaction.
+    deliveryAssignment: { updateMany: jest.fn(async () => ({ count: 0 })) },
     product: { updateMany: jest.fn() },
     userPaymentMethod: { upsert: jest.fn() },
     refundRequest: { findFirst: jest.fn(), create: jest.fn() },
@@ -61,7 +63,7 @@ jest.mock("../../src/utils/activityUtils/recordActivityBundle", () => ({
 }));
 
 const db = prisma as unknown as {
-  payment: { findMany: jest.Mock; update: jest.Mock; findFirst: jest.Mock };
+  payment: { findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock; findFirst: jest.Mock };
   order: {
     findMany: jest.Mock;
     updateMany: jest.Mock;
@@ -132,6 +134,8 @@ beforeEach(() => {
     typeof arg === "function" ? arg(db) : arg,
   );
   db.payment.update.mockResolvedValue({});
+  // P3.2-02: expiry claims the payment conditionally.
+  db.payment.updateMany.mockResolvedValue({ count: 1 });
   db.order.updateMany.mockResolvedValue({ count: 1 });
   setOrders([trackedOrder("order-A", "prod-1")]);
   db.product.updateMany.mockResolvedValue({ count: 1 });
@@ -145,8 +149,8 @@ describe("N-04A — restoration on payment expiry", () => {
     queuePayments([candidate()]);
     await verifyPendingPayments(10);
 
-    expect(db.payment.update).toHaveBeenCalledWith({
-      where: { id: "pay-1" },
+    expect(db.payment.updateMany).toHaveBeenCalledWith({
+      where: { id: "pay-1", status: { in: ["PENDING", "INITIATED"] } },
       data: { status: "EXPIRED" },
     });
     const cas = db.order.updateMany.mock.calls[0][0];
@@ -257,7 +261,7 @@ describe("N-04A — restoration on payment expiry", () => {
 
     // 1st restore attempted, 2nd failed => nothing may be committed.
     expect(db.product.updateMany.mock.calls.length).toBe(2);
-    expect(db.payment.update).toHaveBeenCalledTimes(1);
+    expect(db.payment.updateMany).toHaveBeenCalledTimes(1);
   });
 });
 

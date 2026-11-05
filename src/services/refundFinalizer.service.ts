@@ -2,6 +2,11 @@ import prisma from "../lib/prisma";
 import { PaymentStatus, OrderStatus, RefundStatus } from "@prisma/client";
 import { logger } from "../lib/logger";
 import { createAuditLog } from "../utils/auditLog.service";
+import { clearProductCache } from "./clearCaches";
+import {
+  findTerminalOrderIds,
+  reconcileActiveDeliveryAssignments,
+} from "./deliveryAssignmentReconciliation";
 
 type RefundOutcomeSource = "webhook" | "reconciliation" | "admin_sync";
 
@@ -58,13 +63,36 @@ export async function completeRefund(
       return { outcome: "UNEXPECTED_STATE" as const, status: refundRequest.status };
     }
 
-    await tx.refundRequest.update({
-      where: { id: refundRequestId },
+    // Phase 3.2.19 (FIN-08): claim the terminal transition BEFORE any other
+    // write. The read above is not a lock, so a concurrent `failRefund` (or a
+    // duplicate delivery) could pass the same PROCESSING check and then apply
+    // its own terminal write plus ledger work. `updateMany` with the status in
+    // the WHERE clause is the claim: under PostgreSQL's READ COMMITTED the
+    // predicate is re-evaluated after the row lock is taken, so exactly one
+    // execution can move this row out of PROCESSING and exactly one may
+    // continue into the ledger/payment/order work below.
+    const claim = await tx.refundRequest.updateMany({
+      where: { id: refundRequestId, status: RefundStatus.PROCESSING },
       data: {
         status: RefundStatus.COMPLETED,
         paystackRefundId: opts.paystackRefundId ?? refundRequest.paystackRefundId,
       },
     });
+    if (claim.count === 0) {
+      // Lost the race. Report the outcome the pre-checks above would have
+      // reported, so callers see exactly the vocabulary they always have.
+      const current = await tx.refundRequest.findUnique({
+        where: { id: refundRequestId },
+        select: { status: true },
+      });
+      if (!current) return { outcome: "NOT_FOUND" as const };
+      if (current.status === RefundStatus.COMPLETED) return { outcome: "ALREADY_COMPLETED" as const };
+      logger.warn(
+        { refundRequestId, status: current.status },
+        "completeRefund: lost the transition race — another execution settled this refund",
+      );
+      return { outcome: "UNEXPECTED_STATE" as const, status: current.status };
+    }
 
     const payment = await tx.payment.findUnique({ where: { reference: refundRequest.paymentRef } });
     if (!payment) {
@@ -116,6 +144,25 @@ export async function completeRefund(
           cancelledAt: new Date(),
         },
       });
+
+      // F4-1 / INV-1: `OUT_FOR_DELIVERY` is deliberately refund-cancellable,
+      // so a refund can land while a rider is mid-delivery. That combination
+      // used to leave `CANCELLED`/`REFUNDED` with an active EN_ROUTE
+      // assignment — the customer had their money back and the rider still held
+      // a live delivery for a dead order, with nothing reconciling it.
+      //
+      // The reconciliation is applied inside this same transaction, and only to
+      // orders that are ACTUALLY terminal now. `updateMany` reports just a
+      // count, so the terminal ids are re-read rather than assumed: an order
+      // the bulk write skipped (already COMPLETED, for instance) must not have
+      // its delivery history rewritten.
+      const becameTerminal = await findTerminalOrderIds(
+        tx,
+        affectedOrders.map((o) => o.id),
+      );
+      for (const terminalOrderId of becameTerminal) {
+        await reconcileActiveDeliveryAssignments(tx, terminalOrderId);
+      }
     }
 
     return { outcome: "SUCCESS" as const, completedKobo, paymentAmount: payment.amount, fullyRefunded };
@@ -151,12 +198,37 @@ export async function failRefund(refundRequestId: string, opts: { source: Refund
       return { outcome: "UNEXPECTED_STATE" as const, status: refundRequest.status };
     }
 
+    // Phase 3.2.19 (FIN-08): the reservation release is a MONEY write, so it
+    // must be gated on winning the terminal transition rather than on a
+    // non-locking read. Claiming first means two concurrent definitive
+    // failures (webhook + reconciliation, or two webhook deliveries) cannot
+    // both decrement `Payment.refundedAmount`: the loser's conditional claim
+    // matches zero rows and it returns without touching the ledger.
+    const claim = await tx.refundRequest.updateMany({
+      where: { id: refundRequestId, status: RefundStatus.PROCESSING },
+      data: { status: RefundStatus.FAILED },
+    });
+    if (claim.count === 0) {
+      // Lost the race — report the outcome the pre-checks above would have
+      // reported, preserving the caller-visible vocabulary exactly.
+      const current = await tx.refundRequest.findUnique({
+        where: { id: refundRequestId },
+        select: { status: true },
+      });
+      if (!current) return { outcome: "NOT_FOUND" as const };
+      if (current.status === RefundStatus.FAILED) return { outcome: "ALREADY_FAILED" as const };
+      logger.warn(
+        { refundRequestId, status: current.status },
+        "failRefund: lost the transition race — another execution settled this refund",
+      );
+      return { outcome: "UNEXPECTED_STATE" as const, status: current.status };
+    }
+
     const releaseKobo = refundRequest.requestedAmountKobo ?? 0;
     await tx.payment.updateMany({
       where: { reference: refundRequest.paymentRef },
       data: { refundedAmount: { decrement: releaseKobo } },
     });
-    await tx.refundRequest.update({ where: { id: refundRequestId }, data: { status: RefundStatus.FAILED } });
 
     return { outcome: "SUCCESS" as const, releasedKobo: releaseKobo };
   });

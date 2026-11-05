@@ -106,9 +106,11 @@ describe("fetchMostPopularProducts (popularity ranking, Stage 1)", () => {
     const result = await fetchMostPopularProducts({ skip: 0, take: 50 });
 
     expect(result.total).toBe(7);
-    expect(mockedFindMany.mock.calls[0][0].orderBy).toEqual({
-      popularityScore: "desc",
-    });
+    // Deterministic pagination: unique id tiebreaker closes the ordering.
+    expect(mockedFindMany.mock.calls[0][0].orderBy).toEqual([
+      { popularityScore: "desc" },
+      { id: "asc" },
+    ]);
   });
 
   it("only lists non-archived products from operating vendors", async () => {

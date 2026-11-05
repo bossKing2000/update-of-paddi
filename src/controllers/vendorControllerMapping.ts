@@ -2,41 +2,83 @@ import { Request, Response } from "express";
 import { Role } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { isVendorOperating } from "../services/vendorAvailability.service";
+import { ensureString } from "../utils/paramUtils";
+import { ValidationError } from "../errors/AppError";
 
 /**
  * Whether a vendor is open right now (Bottom Pot Stage 1: no scheduling).
  *
- * A vendor is open while they are live on the marketplace AND have not
- * explicitly paused orders via `deliveryPreferences.acceptingOrders`.
- * There is no operating-hours schedule anymore — vendors sell whenever
- * they are accepting orders.
+ * A vendor is open while they are live on the marketplace, their status is
+ * ACTIVE, and they have not explicitly paused orders via
+ * `deliveryPreferences.acceptingOrders`. There is no operating-hours schedule
+ * anymore — vendors sell whenever they are accepting orders.
+ *
+ * The vendor STATUS is part of the answer. `isVendorOperating` requires
+ * `vendorStatus === "ACTIVE"`, so it has to be passed through: omitting it
+ * made every vendor report as closed (the Phase 1C rule was added to
+ * `isVendorOperating` without updating this wrapper). The status is
+ * therefore forwarded explicitly here.
  */
 export function computeVendorIsOpen(vendor: {
   isLive: boolean;
+  vendorStatus?: string | null;
   deliveryPreferences?: unknown;
 }): boolean {
-  return isVendorOperating(vendor);
+  return isVendorOperating({
+    isLive: vendor.isLive,
+    vendorStatus: vendor.vendorStatus ?? null,
+    deliveryPreferences: vendor.deliveryPreferences,
+  });
 }
 
+/** The default search radius in kilometres. */
+const DEFAULT_NEARBY_RADIUS_KM = 5;
+
+/**
+ * GET /api/auth/nearby — vendors near a point.
+ *
+ * ERROR ENVELOPE (B-7)
+ * --------------------
+ * A validation failure now uses the project's standard envelope:
+ *   { success: false, message, code: "VALIDATION_ERROR" }
+ * with HTTP 400. It used to return a bespoke
+ * `{ success: false, error: "lat & lng required" }`, which no client could
+ * read with the same code path as every other validation failure.
+ *
+ * The SUCCESS envelope is deliberately unchanged
+ * (`{ success: true, data: [...] }`): existing clients read `data` as the
+ * vendor array.
+ */
 export async function getNearbyVendors(req: Request, res: Response) {
-  try {
-    const { lat, lng, radius } = req.query;
+  const latRaw = ensureString(req.query.lat).trim();
+  const lngRaw = ensureString(req.query.lng).trim();
 
-    if (!lat || !lng) {
-      return res.status(400).json({ success: false, error: "lat & lng required" });
-    }
-
-    const vendors = await findNearbyVendors(
-      parseFloat(lat as string),
-      parseFloat(lng as string),
-      radius ? parseFloat(radius as string) : 5
-    );
-
-    return res.json({ success: true, data: vendors });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, error: "Server error" });
+  if (!latRaw || !lngRaw) {
+    throw new ValidationError("lat and lng are required");
   }
+
+  const lat = Number(latRaw);
+  const lng = Number(lngRaw);
+  if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+    throw new ValidationError("lat must be a number between -90 and 90");
+  }
+  if (!Number.isFinite(lng) || lng < -180 || lng > 180) {
+    throw new ValidationError("lng must be a number between -180 and 180");
+  }
+
+  const radiusRaw = ensureString(req.query.radius).trim();
+  let radiusKm = DEFAULT_NEARBY_RADIUS_KM;
+  if (radiusRaw) {
+    const parsed = Number(radiusRaw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new ValidationError("radius must be a positive number");
+    }
+    radiusKm = parsed;
+  }
+
+  const vendors = await findNearbyVendors(lat, lng, radiusKm);
+
+  return res.json({ success: true, data: vendors });
 }
 
 export async function findNearbyVendors(lat: number, lng: number, radiusKm: number) {
@@ -81,6 +123,7 @@ export async function findNearbyVendors(lat: number, lng: number, radiusKm: numb
         distanceKm,
         isOpen: computeVendorIsOpen({
           isLive: vendor.isLive,
+          vendorStatus: vendor.vendorStatus,
           deliveryPreferences: vendor.deliveryPreferences,
         }),
       };

@@ -124,7 +124,9 @@ export async function verifyPendingVendorPayouts(
         case "success": {
           // Authoritative success — but verify the amount (integer kobo) before
           // settling. This is settlement only: no amount is ever recomputed.
-          const expectedKobo = Math.round(payout.amount * 100);
+          // payout.amount is already integer kobo (Phase 3A); lookup.amountKobo
+          // is Paystack's integer kobo. Compare directly — no * 100.
+          const expectedKobo = Number(payout.amount);
           if (lookup.amountKobo !== expectedKobo) {
             logger.error(
               {

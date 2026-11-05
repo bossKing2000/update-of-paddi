@@ -5,26 +5,26 @@ import { ValidationError } from "../errors/AppError";
  * Phase 3.2b going-forward financial snapshots.
  *
  * Pure calculation module (no DB, no Paystack): given the already-finalized
- * Float-naira order values and the vendor commission rate actually applied,
+ * integer-kobo order values and the vendor commission rate actually applied,
  * it produces the integer-kobo snapshots stored on Order. Historical rows
  * stay NULL — this module never backfills, it only snapshots new orders.
  *
  * Rounding policy: identical to the existing payout semantics in
- * `calculatePayoutAmounts` (vendorDashboard.service.ts) —
- * `Number((base * rate).toFixed(2))` — converted to integer kobo at the
- * snapshot boundary with the project's existing `Math.round(naira * 100)`
- * convention. No new rounding policy is introduced here; Float → kobo
- * migration of the surrounding system remains Phase 3.2d work.
+ * `calculatePayoutAmounts` (vendorDashboard.service.ts) — commission is
+ * computed directly in the integer-kobo domain as `basePriceKobo * rate`,
+ * so `Math.round(basePriceKobo * rate)` rounds to the nearest kobo. No new
+ * rounding policy is introduced here; all inputs and outputs are integer
+ * kobo (Phase 3A).
  */
 
 /** Business-rule fallback, mirroring the schema default and the admin payout fallback. */
 export const DEFAULT_COMMISSION_RATE = 0.15;
 
 export interface OrderMoneySnapshotInput {
-  /** Order base in naira — already net of discount, delivery fee excluded from the commission base. */
-  basePriceNaira: number;
-  /** Discount actually applied to this vendor order in naira (0 when none). */
-  discountNaira: number;
+  /** Order base in integer kobo (Phase 3A) — net of discount, delivery fee excluded from the commission base. */
+  basePriceKobo: number;
+  /** Discount actually applied to this vendor order in integer kobo (0 when none). */
+  discountKobo: number;
   /** The exact vendor commission rate applied to this order (0–1). */
   commissionRate: number;
 }
@@ -99,17 +99,17 @@ export async function resolveRefundOrderId(
 export function buildOrderMoneySnapshot(
   input: OrderMoneySnapshotInput,
 ): OrderMoneySnapshot {
-  assertFiniteMoney(input.basePriceNaira, "basePriceNaira");
-  assertFiniteMoney(input.discountNaira, "discountNaira");
+  assertFiniteMoney(input.basePriceKobo, "basePriceKobo");
+  assertFiniteMoney(input.discountKobo, "discountKobo");
   assertFiniteMoney(input.commissionRate, "commissionRate");
 
-  // Same expression as calculatePayoutAmounts, per-order grain.
-  const commissionNaira = Number(
-    (input.basePriceNaira * input.commissionRate).toFixed(2),
-  );
-  const commissionKoboRounded = Math.round(commissionNaira * 100);
-  const grossKoboRounded = Math.round(input.basePriceNaira * 100);
-  const discountKoboRounded = Math.round(input.discountNaira * 100);
+  // Same expression as calculatePayoutAmounts, per-order grain. All inputs
+  // are integer kobo (Phase 3A), so commission is computed directly in kobo
+  // (base * rate) and gross/discount pass through unchanged — no * 100 and
+  // no toFixed() naira round-trip.
+  const commissionKoboRounded = Math.round(input.basePriceKobo * input.commissionRate);
+  const grossKoboRounded = input.basePriceKobo;
+  const discountKoboRounded = input.discountKobo;
   assertFiniteMoney(commissionKoboRounded, "commissionKobo");
   assertFiniteMoney(grossKoboRounded, "grossKobo");
   assertFiniteMoney(discountKoboRounded, "discountKobo");
@@ -265,7 +265,9 @@ export function findOrderMoneySnapshotDefect(
     return defect("INVALID_BASE_PRICE");
 
   // The builder's own identity — gross is never redefined here.
-  const expectedGrossKobo = BigInt(Math.round(order.basePrice * 100));
+  // basePrice is already integer kobo (Phase 3A), so gross kobo is basePrice
+  // itself — no * 100 and no naira round-trip.
+  const expectedGrossKobo = BigInt(order.basePrice);
   if (order.commissionKobo! + order.vendorPayoutKobo! !== expectedGrossKobo)
     return defect("INCOHERENT_GROSS");
 

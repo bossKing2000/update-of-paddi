@@ -1,4 +1,5 @@
 import { getIO } from "../../socket";
+import { logger } from "../../lib/logger";
 
 export type SocketEventType = "ORDER" | "PAYMENT" | "REFUND" | "REVIEW" | "GENERAL"| "DELIVERY_REQUEST";
 
@@ -73,6 +74,6 @@ export async function emitSocketEvents({
 
     console.log(`[SOCKET] ✅ Events emitted successfully for type: ${type}`);
   } catch (err) {
-    console.error("[SOCKET] ❌ Socket emission failed:", err);
+    logger.error({ err, eventType: type }, "Socket emission failed");
   }
 }

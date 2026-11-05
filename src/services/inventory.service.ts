@@ -1,7 +1,5 @@
 import type { Prisma } from "@prisma/client";
 import { ValidationError, ConflictError } from "../errors/AppError";
-import { clearProductCache } from "./clearCaches";
-import { logger } from "../lib/logger";
 
 type Tx = Prisma.TransactionClient;
 
@@ -86,12 +84,23 @@ export interface ReservedOrderItem {
  * atomic status transition succeeds, so concurrent paths cannot
  * double-restore the same order. Paid orders never restore — the portions
  * are consumed.
+ *
+ * Returns the deduplicated ids of the products whose stock was actually
+ * incremented, so callers can invalidate cached product rows AFTER the
+ * surrounding transaction commits. The return is the single source of
+ * truth for "what changed" — no second read is needed, and it cannot drift
+ * from the increments above.
+ *
+ * This function performs NO cache invalidation itself: it always runs
+ * inside the caller's transaction, and invalidating before commit would
+ * poison the cache on rollback (or waste a sweep when the tx retries).
+ * Every caller invalidates the returned ids post-commit, best-effort.
  */
 export async function restoreStockForOrders(
   prisma: Pick<Tx, "order" | "product">,
   orderIds: string[],
-): Promise<void> {
-  if (orderIds.length === 0) return;
+): Promise<string[]> {
+  if (orderIds.length === 0) return [];
 
   const orders = await prisma.order.findMany({
     where: { id: { in: orderIds } },
@@ -105,17 +114,15 @@ export async function restoreStockForOrders(
     }
   }
 
+  const restoredProductIds: string[] = [];
   for (const [productId, quantity] of byProduct) {
     const restored = await prisma.product.updateMany({
       where: { id: productId, trackInventory: true },
       data: { stock: { increment: quantity } },
     });
-    // Stock changed → cached detail/listing rows are stale. Best-effort;
-    // a miss only costs one extra DB read on the next request.
     if (restored.count > 0) {
-      await clearProductCache(productId).catch((err) =>
-        logger.warn({ err, productId }, "Failed to invalidate product cache after stock restore"),
-      );
+      restoredProductIds.push(productId);
     }
   }
+  return restoredProductIds;
 }

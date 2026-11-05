@@ -19,6 +19,8 @@
 jest.mock("../../src/lib/prisma", () => ({
   __esModule: true,
   default: {
+    // F4-1: the cancel path reconciles active delivery assignments in-transaction.
+    deliveryAssignment: { updateMany: jest.fn(async () => ({ count: 0 })) },
     order: {
       findUnique: jest.fn(),
       findMany: jest.fn(),
@@ -105,9 +107,12 @@ const vendorAOrder = () => ({
   status: "PAYMENT_CONFIRMED",
   paymentStatus: "SUCCESS",
   idempotencyKey: K,
-  basePrice: 5000,
-  deliveryFee: 500,
-  totalPrice: 5500,
+  // Phase 3A: monetary fields are integer kobo.
+  basePrice: 500000,
+  deliveryFee: 50000,
+  totalPrice: 550000,
+  // Batch 1D.42: lifecycle status read via this relation; fails closed.
+  vendor: { vendorStatus: "ACTIVE" },
 });
 /** Vendor B: N4,500 charged. Untouched sibling in the same payment. */
 const vendorBOrder = () => ({
@@ -117,9 +122,12 @@ const vendorBOrder = () => ({
   status: "COOKING",
   paymentStatus: "SUCCESS",
   idempotencyKey: K,
-  basePrice: 4000,
-  deliveryFee: 500,
-  totalPrice: 4500,
+  // Phase 3A: monetary fields are integer kobo.
+  basePrice: 400000,
+  deliveryFee: 50000,
+  totalPrice: 450000,
+  // Batch 1D.42: lifecycle status read via this relation; fails closed.
+  vendor: { vendorStatus: "ACTIVE" },
 });
 
 const batchPayment = () => ({
@@ -138,8 +146,31 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.order.update.mockImplementation(async (a: any) => ({ ...vendorAOrder(), ...a.data }));
   db.refundRequest.create.mockImplementation(async (a: any) => ({ id: "r-1", ...a.data }));
+
+  // C-2: the paid-cancel path now files the obligation with
+  // `INSERT ... ON CONFLICT DO NOTHING RETURNING ...` (raw SQL) rather than a
+  // typed `create`. Route it back through the existing `create` double so every
+  // assertion below — including the failure-injection one — is unchanged.
+  db.$queryRaw.mockImplementation(
+    async (strings: TemplateStringsArray, ...values: any[]) => {
+      const sql = Array.from(strings as unknown as string[]).join(" ");
+      if (!sql.includes('INSERT INTO "RefundRequest"')) return [];
+      const [id, userId, paymentRef, reason, status, , , orderId, requestedAmountKobo] =
+        values as any[];
+      const row = await db.refundRequest.create({
+        data: { id, userId, paymentRef, reason, status, orderId, requestedAmountKobo },
+      });
+      return row ? [row] : [];
+    },
+  );
   db.refundRequest.update.mockImplementation(async (a: any) => ({ id: a.where.id, ...a.data }));
   db.payment.updateMany.mockResolvedValue({ count: 1 });
+  // Phase 3.2.19 (FIN-08): the refund finalizers CLAIM the terminal
+  // transition with a conditional update before any ledger write. A
+  // `{count: 1}` default models the claim succeeding, which is what every
+  // scenario in this suite is about; the losing path is covered in
+  // refundFinalizerConcurrency.test.ts.
+  db.refundRequest.updateMany.mockResolvedValue({ count: 1 });
 });
 
 describe("N-01 — paid-cancel refund is scoped to the cancelled order", () => {
@@ -270,15 +301,24 @@ describe("N-01 — paid-cancel refund is scoped to the cancelled order", () => {
       }),
     );
     // … and the persisted PROCESSING record carries the same figure.
-    expect(db.refundRequest.update).toHaveBeenCalledWith(
+    // C-3: the claim is a compare-and-set on (id, status=APPROVED), so it is
+    // issued through updateMany rather than an unconditional update.
+    expect(db.refundRequest.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ requestedAmountKobo: 550000 }),
+        where: expect.objectContaining({ id: "r-1", status: "APPROVED" }),
+        data: expect.objectContaining({
+          status: "PROCESSING",
+          requestedAmountKobo: 550000,
+        }),
       }),
     );
     // The whole N10,000 payment is NOT reserved.
     expect(db.payment.updateMany.mock.calls[0][0].data.refundedAmount.increment).toBe(550000);
     expect(db.payment.updateMany.mock.calls[0][0].data.refundedAmount.increment).not.toBe(1000000);
     expect(mockedRefundViaPaystack).toHaveBeenCalledTimes(1);
+    // Case A — the Paystack submission carries the RESERVED order-scoped
+    // amount, never the full payment total and never an omitted amount.
+    expect(mockedRefundViaPaystack).toHaveBeenCalledWith("PSK-BATCH-1", 550000);
   });
 
   it("4b. an amountless request still falls back to the remaining balance (customer path preserved)", async () => {
@@ -303,6 +343,196 @@ describe("N-01 — paid-cancel refund is scoped to the cancelled order", () => {
 
     // Unchanged legacy semantics: null => refund everything remaining.
     expect(db.payment.updateMany.mock.calls[0][0].data.refundedAmount.increment).toBe(1000000);
+    // Case B — reserved, persisted, and submitted amounts agree on the
+    // full-remaining fallback.
+    expect(db.refundRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "r-2", status: "APPROVED" }),
+        data: expect.objectContaining({
+          status: "PROCESSING",
+          requestedAmountKobo: 1000000,
+        }),
+      }),
+    );
+    expect(mockedRefundViaPaystack).toHaveBeenCalledTimes(1);
+    expect(mockedRefundViaPaystack).toHaveBeenCalledWith("PSK-BATCH-1", 1000000);
+  });
+
+  it("4c. an explicit admin amount wins and is identical in ledger, record, and Paystack call (Case C)", async () => {
+    db.refundRequest.findUnique.mockResolvedValue({
+      id: "r-3",
+      paymentRef: "PSK-BATCH-1",
+      status: "APPROVED",
+      // Stored order-scoped amount must NOT win over the explicit input.
+      requestedAmountKobo: 550000,
+    });
+    db.payment.findUnique.mockResolvedValue(batchPayment());
+    db.payment.findUniqueOrThrow = jest.fn(async () => batchPayment());
+    db.$transaction.mockImplementationOnce(async (cb: any) => cb(db));
+
+    await updateRefundStatus(
+      {
+        user: { id: "admin-1", sessionId: "s" },
+        params: { id: "r-3" },
+        // Explicit admin input in naira (N2,000.00 => 200,000 kobo).
+        body: { status: "COMPLETED", amount: 2000 },
+      } as never,
+      res(),
+    );
+
+    // Existing precedence: explicit > stored > remaining.
+    expect(db.payment.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { refundedAmount: { increment: 200000 } },
+      }),
+    );
+    expect(db.refundRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "r-3", status: "APPROVED" }),
+        data: expect.objectContaining({
+          status: "PROCESSING",
+          requestedAmountKobo: 200000,
+        }),
+      }),
+    );
+    expect(mockedRefundViaPaystack).toHaveBeenCalledTimes(1);
+    expect(mockedRefundViaPaystack).toHaveBeenCalledWith("PSK-BATCH-1", 200000);
+  });
+
+  it("4d. Paystack is never called when reservation fails (fully-refunded payment)", async () => {
+    db.refundRequest.findUnique.mockResolvedValue({
+      id: "r-4",
+      paymentRef: "PSK-BATCH-1",
+      status: "APPROVED",
+      requestedAmountKobo: 550000,
+    });
+    db.payment.findUnique.mockResolvedValue({ ...batchPayment(), refundedAmount: 1000000 });
+    db.payment.findUniqueOrThrow = jest.fn(async () => ({ ...batchPayment(), refundedAmount: 1000000 }));
+    db.$transaction.mockImplementationOnce(async (cb: any) => cb(db));
+
+    await expect(
+      updateRefundStatus(
+        {
+          user: { id: "admin-1", sessionId: "s" },
+          params: { id: "r-4" },
+          body: { status: "COMPLETED" },
+        } as never,
+        res(),
+      ),
+    ).rejects.toThrow(/fully refunded/);
+
+    expect(mockedRefundViaPaystack).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 3.0.2 — non-positive refund amounts are rejected before any
+  // reservation or Paystack call. An explicit zero must NOT be reinterpreted
+  // as "omitted" (which would fall through to the stored/full-remaining
+  // amount), and a stored zero/negative must NOT reach the ledger (where
+  // zero would be falsy-omitted into a full Paystack refund and a negative
+  // would decrement the reservation).
+  // ---------------------------------------------------------------------------
+
+  it("4e. an explicit admin amount of zero is rejected, reserves nothing, calls nothing", async () => {
+    db.refundRequest.findUnique.mockResolvedValue({
+      id: "r-5",
+      paymentRef: "PSK-BATCH-1",
+      status: "APPROVED",
+      requestedAmountKobo: 550000,
+    });
+    db.payment.findUnique.mockResolvedValue(batchPayment());
+
+    await expect(
+      updateRefundStatus(
+        {
+          user: { id: "admin-1", sessionId: "s" },
+          params: { id: "r-5" },
+          body: { status: "COMPLETED", amount: 0 },
+        } as never,
+        res(),
+      ),
+    ).rejects.toThrow(/Invalid refund amount/);
+
+    expect(db.payment.updateMany).not.toHaveBeenCalled();
+    expect(mockedRefundViaPaystack).not.toHaveBeenCalled();
+  });
+
+  it("4f. an explicit negative admin amount is rejected, reserves nothing, calls nothing", async () => {
+    db.refundRequest.findUnique.mockResolvedValue({
+      id: "r-6",
+      paymentRef: "PSK-BATCH-1",
+      status: "APPROVED",
+      requestedAmountKobo: 550000,
+    });
+    db.payment.findUnique.mockResolvedValue(batchPayment());
+
+    await expect(
+      updateRefundStatus(
+        {
+          user: { id: "admin-1", sessionId: "s" },
+          params: { id: "r-6" },
+          body: { status: "COMPLETED", amount: -100 },
+        } as never,
+        res(),
+      ),
+    ).rejects.toThrow(/Invalid refund amount/);
+
+    expect(db.payment.updateMany).not.toHaveBeenCalled();
+    expect(mockedRefundViaPaystack).not.toHaveBeenCalled();
+  });
+
+  it("4g. a stored requestedAmountKobo of zero is rejected, reserves nothing, calls nothing", async () => {
+    db.refundRequest.findUnique.mockResolvedValue({
+      id: "r-7",
+      paymentRef: "PSK-BATCH-1",
+      status: "APPROVED",
+      requestedAmountKobo: 0,
+    });
+    db.payment.findUnique.mockResolvedValue(batchPayment());
+    db.payment.findUniqueOrThrow = jest.fn(async () => batchPayment());
+    db.$transaction.mockImplementationOnce(async (cb: any) => cb(db));
+
+    await expect(
+      updateRefundStatus(
+        {
+          user: { id: "admin-1", sessionId: "s" },
+          params: { id: "r-7" },
+          body: { status: "COMPLETED" },
+        } as never,
+        res(),
+      ),
+    ).rejects.toThrow(/Invalid refund amount/);
+
+    // The throw happens inside the transaction before the CAS increment,
+    // so nothing is reserved and Paystack is never reached.
+    expect(db.payment.updateMany).not.toHaveBeenCalled();
+    expect(mockedRefundViaPaystack).not.toHaveBeenCalled();
+  });
+
+  it("4h. a stored negative requestedAmountKobo is rejected, reserves nothing, calls nothing", async () => {
+    db.refundRequest.findUnique.mockResolvedValue({
+      id: "r-8",
+      paymentRef: "PSK-BATCH-1",
+      status: "APPROVED",
+      requestedAmountKobo: -50000,
+    });
+    db.payment.findUnique.mockResolvedValue(batchPayment());
+    db.payment.findUniqueOrThrow = jest.fn(async () => batchPayment());
+    db.$transaction.mockImplementationOnce(async (cb: any) => cb(db));
+
+    await expect(
+      updateRefundStatus(
+        {
+          user: { id: "admin-1", sessionId: "s" },
+          params: { id: "r-8" },
+          body: { status: "COMPLETED" },
+        } as never,
+        res(),
+      ),
+    ).rejects.toThrow(/Invalid refund amount/);
+
+    expect(db.payment.updateMany).not.toHaveBeenCalled();
+    expect(mockedRefundViaPaystack).not.toHaveBeenCalled();
   });
 });
 

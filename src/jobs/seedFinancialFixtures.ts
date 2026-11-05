@@ -48,7 +48,7 @@ const SEED_TEST_PASSWORD = process.env.SEED_TEST_PASSWORD ?? "PaddiDemo123!";
 
 const RATE_A = 0.15;
 const RATE_B = 0.2;
-const DELIVERY_FEE = 500;
+const DELIVERY_FEE = 50000; // integer kobo (₦500)
 
 const IDS = {
   vendorA: "seed-fin-vendor-a",
@@ -336,12 +336,12 @@ export async function seedFinancialFixtures(): Promise<void> {
   async function ensureFinOrder(orderId: string, input: {
     customerId: string;
     vendorId: string;
-    basePrice: number;
-    discountNaira: number;
+    basePriceKobo: number;
+    discountKobo: number;
     commissionRate: number;
     productId: string;
     productName: string;
-    unitPrice: number;
+    unitPriceKobo: number;
     quantity: number;
     idempotencyKey: string;
     status?: "COMPLETED" | "AWAITING_PAYMENT";
@@ -360,24 +360,24 @@ export async function seedFinancialFixtures(): Promise<void> {
     }
     // Builder-coupled: fixture kobo values always equal production math.
     const snap = buildOrderMoneySnapshot({
-      basePriceNaira: input.basePrice,
-      discountNaira: input.discountNaira,
+      basePriceKobo: input.basePriceKobo,
+      discountKobo: input.discountKobo,
       commissionRate: input.commissionRate,
     });
     const createdAt = input.createdAt ?? now;
     const paid = input.status !== "AWAITING_PAYMENT";
     // Line math mirrors checkout: subtotal = unitPrice × quantity; the
     // order-level discount lives only in basePrice (= raw − discount).
-    const lineSubtotal = input.unitPrice * input.quantity;
+    const lineSubtotal = input.unitPriceKobo * input.quantity;
     return prisma.order.create({
       data: {
         id: orderId,
         customerId: input.customerId,
         vendorId: input.vendorId,
-        basePrice: input.basePrice,
+        basePrice: input.basePriceKobo,
         extraCharge: 0,
         deliveryFee: DELIVERY_FEE,
-        totalPrice: input.basePrice + DELIVERY_FEE,
+        totalPrice: input.basePriceKobo + DELIVERY_FEE,
         commissionRateSnapshot: snap.commissionRateSnapshot,
         commissionKobo: snap.commissionKobo,
         vendorPayoutKobo: snap.vendorPayoutKobo,
@@ -398,7 +398,7 @@ export async function seedFinancialFixtures(): Promise<void> {
               productId: input.productId,
               productName: input.productName,
               quantity: input.quantity,
-              unitPrice: input.unitPrice,
+              unitPrice: input.unitPriceKobo,
               subtotal: lineSubtotal,
               createdAt,
               updatedAt: createdAt,
@@ -413,12 +413,12 @@ export async function seedFinancialFixtures(): Promise<void> {
   await ensureFinOrder(IDS.o1, {
     customerId: cust1.id,
     vendorId: vendorA.id,
-    basePrice: 5000,
-    discountNaira: 0,
+    basePriceKobo: 500000,
+    discountKobo: 0,
     commissionRate: rateA,
     productId: prod5000A.id,
     productName: prod5000A.name,
-    unitPrice: 5000,
+    unitPriceKobo: 500000,
     quantity: 1,
     idempotencyKey: KEYS.f1,
   });
@@ -426,12 +426,12 @@ export async function seedFinancialFixtures(): Promise<void> {
   await ensureFinOrder(IDS.o2, {
     customerId: cust1.id,
     vendorId: vendorB.id,
-    basePrice: 5000,
-    discountNaira: 0,
+    basePriceKobo: 500000,
+    discountKobo: 0,
     commissionRate: rateB,
     productId: prod5000B.id,
     productName: prod5000B.name,
-    unitPrice: 5000,
+    unitPriceKobo: 500000,
     quantity: 1,
     idempotencyKey: KEYS.f2,
   });
@@ -440,12 +440,12 @@ export async function seedFinancialFixtures(): Promise<void> {
   await ensureFinOrder(IDS.o3, {
     customerId: cust1.id,
     vendorId: vendorA.id,
-    basePrice: 4500,
-    discountNaira: 500,
+    basePriceKobo: 450000,
+    discountKobo: 50000,
     commissionRate: rateA,
     productId: prod5000A.id,
     productName: prod5000A.name,
-    unitPrice: 5000,
+    unitPriceKobo: 500000,
     quantity: 1,
     idempotencyKey: KEYS.f3,
   });
@@ -459,7 +459,7 @@ export async function seedFinancialFixtures(): Promise<void> {
         userId: cust1.id,
         orderIds: [IDS.o3],
         promoCode: "SEED-FIN-500",
-        discount: 500,
+        discount: 50000,
       },
     });
     await prisma.promotion.update({
@@ -472,24 +472,24 @@ export async function seedFinancialFixtures(): Promise<void> {
   await ensureFinOrder(IDS.o4a, {
     customerId: cust1.id,
     vendorId: vendorA.id,
-    basePrice: 3000,
-    discountNaira: 0,
+    basePriceKobo: 300000,
+    discountKobo: 0,
     commissionRate: rateA,
     productId: prod3000A.id,
     productName: prod3000A.name,
-    unitPrice: 3000,
+    unitPriceKobo: 300000,
     quantity: 1,
     idempotencyKey: KEYS.batch1,
   });
   await ensureFinOrder(IDS.o4b, {
     customerId: cust1.id,
     vendorId: vendorB.id,
-    basePrice: 4000,
-    discountNaira: 0,
+    basePriceKobo: 400000,
+    discountKobo: 0,
     commissionRate: rateB,
     productId: prod4000B.id,
     productName: prod4000B.name,
-    unitPrice: 4000,
+    unitPriceKobo: 400000,
     quantity: 1,
     idempotencyKey: KEYS.batch1,
   });
@@ -497,12 +497,12 @@ export async function seedFinancialFixtures(): Promise<void> {
   await ensureFinOrder(IDS.o5, {
     customerId: cust2.id,
     vendorId: vendorA.id,
-    basePrice: 5000,
-    discountNaira: 0,
+    basePriceKobo: 500000,
+    discountKobo: 0,
     commissionRate: rateA,
     productId: prod5000A.id,
     productName: prod5000A.name,
-    unitPrice: 5000,
+    unitPriceKobo: 500000,
     quantity: 1,
     idempotencyKey: KEYS.f5,
   });
@@ -513,12 +513,12 @@ export async function seedFinancialFixtures(): Promise<void> {
   await ensureFinOrder(IDS.o6, {
     customerId: cust1.id,
     vendorId: vendorA.id,
-    basePrice: 5000,
-    discountNaira: 0,
+    basePriceKobo: 500000,
+    discountKobo: 0,
     commissionRate: rateA,
     productId: prod5000A.id,
     productName: prod5000A.name,
-    unitPrice: 5000,
+    unitPriceKobo: 500000,
     quantity: 1,
     idempotencyKey: KEYS.savedcard1,
     status: "AWAITING_PAYMENT",
@@ -725,7 +725,7 @@ export async function seedFinancialFixtures(): Promise<void> {
     }));
   // Derived, not hardcoded, so the fixture cannot silently disagree with the
   // production payout rule if DELIVERY_BASE_FEE or the order fee changes.
-  const F8_DELIVERY_FEE = 500;
+  const F8_DELIVERY_FEE = 50000; // integer kobo (₦500)
   const amounts = deriveDeliveryEarningAmounts(F8_DELIVERY_FEE);
 
   // Both F8 guards VALIDATE an existing row rather than skipping it. Keying the

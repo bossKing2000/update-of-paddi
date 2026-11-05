@@ -1,0 +1,539 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e5]:
+        - link "DoorDash Help Center home" [ref=e6] [cursor=pointer]:
+          - /url: /en-us
+        - 'link "{audience} support home" [ref=e9] [cursor=pointer]':
+          - /url: /en-us/dashers
+          - generic [ref=e10]: for Dashers
+      - navigation "Main navigation" [ref=e11]:
+        - button "Categories" [ref=e12] [cursor=pointer]
+        - button "I'm looking for other Support" [ref=e15] [cursor=pointer]
+      - generic [ref=e18]:
+        - search [ref=e21]:
+          - generic [ref=e22]:
+            - textbox "Search help articles" [ref=e24]:
+              - /placeholder: What are you looking for?
+            - button "Search" [ref=e25] [cursor=pointer]
+        - button "EN-US – Select language" [ref=e29] [cursor=pointer]:
+          - generic [ref=e32]: EN-US
+  - main [ref=e35]:
+    - navigation "Breadcrumb" [ref=e37]:
+      - list [ref=e38]:
+        - listitem [ref=e39]:
+          - link "DoorDash Help Center" [ref=e40] [cursor=pointer]:
+            - /url: /en-us
+          - generic [aria-hidden] [ref=e41]: /
+        - listitem [ref=e42]:
+          - link "Dasher Support" [ref=e43] [cursor=pointer]:
+            - /url: /en-us/dashers
+          - generic [aria-hidden] [ref=e44]: /
+        - listitem [ref=e45]:
+          - link "Dasher App" [ref=e46] [cursor=pointer]:
+            - /url: /en-us/dashers/category/dasher-app
+          - generic [aria-hidden] [ref=e47]: /
+        - listitem [ref=e48]:
+          - generic [ref=e49]: Dasher Identity Verification FAQ
+    - generic [ref=e50]:
+      - generic [ref=e51]:
+        - article [ref=e53]:
+          - generic [ref=e54]:
+            - heading "Dasher Identity Verification FAQ" [level=1] [ref=e55]
+            - generic [ref=e56]: 7 min read
+          - generic [ref=e61]:
+            - table [ref=e63]:
+              - rowgroup [ref=e64]:
+                - row [ref=e65]:
+                  - cell [ref=e66]:
+                    - paragraph [ref=e67]:
+                      - strong [ref=e68]: "IMPORTANT NOTE:"
+                      - text: If you are dashing in Canada, please visit this
+                      - link [ref=e69] [cursor=pointer]:
+                        - /url: https://help.doordash.com/dashers/s/article/Dasher-Identification-Verification-FAQ?language=en_CA
+                        - strong [ref=e70]: Help Centre
+                      - text: article for an explanation of your Identity Verification process. The information below is only relevant for US dashers.
+            - paragraph [ref=e71]:
+              - strong [ref=e72]: Dasher Identity Verification FAQ
+            - paragraph [ref=e73]:
+              - strong [ref=e74]: In this article
+            - list [ref=e75]:
+              - listitem [ref=e76]:
+                - paragraph [ref=e77]: Why am I being asked to go through this identity verification process?
+              - listitem [ref=e78]:
+                - paragraph [ref=e79]: When will I need to complete identity verification?
+              - listitem [ref=e80]:
+                - paragraph [ref=e81]: How does identity verification work?
+              - listitem [ref=e82]:
+                - paragraph [ref=e83]: How is my ID and selfie information used and stored?
+              - listitem [ref=e84]:
+                - paragraph [ref=e85]: What kind of ID do I need?
+              - listitem [ref=e86]:
+                - paragraph [ref=e87]: What happens if I don’t complete the verification process?
+              - listitem [ref=e88]:
+                - paragraph [ref=e89]: What happens if I fail the verification process?
+              - listitem [ref=e90]:
+                - paragraph [ref=e91]: What suggestions do you have to help me verify?
+              - listitem [ref=e92]:
+                - paragraph [ref=e93]: How do I enable camera permissions?
+              - listitem [ref=e94]:
+                - paragraph [ref=e95]: What are tips for submitting a photo of my government ID?
+            - paragraph [ref=e96]:
+              - strong [ref=e97]: "Q:"
+              - text: Why am I being asked to go through this identity verification process?
+            - paragraph [ref=e98]:
+              - strong [ref=e99]: "A:"
+              - text: As part of continuous efforts to improve the security of the DoorDash platform, we have implemented an identity verification process to help ensure that you are you.
+            - paragraph [ref=e100]:
+              - strong [ref=e101]: "Q:"
+              - text: When will I need to complete identity verification?
+            - paragraph [ref=e102]:
+              - strong [ref=e103]: "A:"
+              - text: You will be asked to verify your identity during the sign-up process. You may also be prompted to verify your identity before a dash.
+            - paragraph [ref=e104]:
+              - strong [ref=e105]: "Q:"
+              - text: How does identity verification work?
+            - paragraph [ref=e106]:
+              - strong [ref=e107]: "A:"
+              - text: To confirm your identity in a secure way, DoorDash has partnered with
+              - link "Persona" [ref=e108] [cursor=pointer]:
+                - /url: http://withpersona.com/
+              - text: on this verification process. In order to keep your personal information and account secure, DoorDash will only ask you to verify your identity through the Dasher app or our partnered third-party vendor,
+              - link "Persona" [ref=e109] [cursor=pointer]:
+                - /url: http://withpersona.com/
+              - text: ". When prompted, you may go through one of two types of identity verification:"
+            - list [ref=e110]:
+              - listitem [ref=e111]:
+                - paragraph [ref=e112]: Full identity verification
+              - listitem [ref=e113]:
+                - paragraph [ref=e114]: Partial re-verification
+            - paragraph [ref=e115]: "For full identity verification, you will go through two sequential steps:"
+            - list [ref=e116]:
+              - listitem [ref=e117]:
+                - paragraph [ref=e118]: Upload a valid government ID
+              - listitem [ref=e119]:
+                - paragraph [ref=e120]: Take a selfie to match the picture on the ID
+            - paragraph [ref=e121]: "For partial reverification, you will go through one step:"
+            - list [ref=e122]:
+              - listitem [ref=e123]:
+                - paragraph [ref=e124]: Take a selfie to match pictures you have previously submitted to confirm your identity
+            - paragraph [ref=e125]: If you fail any of these steps, you will be given the option to try again. After several failed attempts, however, you will be considered to have failed the identity verification process. You will be unable to proceed with either your sign up process or the ability to continue dashing.
+            - paragraph [ref=e126]: Please do not submit any personal information about yourself to anyone claiming to be from DoorDash or Persona, and do not respond to any communications from anyone other than DoorDash or Persona.
+            - paragraph [ref=e127]:
+              - strong [ref=e128]: "Q:"
+              - text: How is my ID and selfie information used and stored?
+            - paragraph [ref=e129]:
+              - strong [ref=e130]: "A:"
+              - text: Your information - including your biometric data - will be stored by DoorDash or its vendors such as Persona for purposes of identity verification. Your data will be permanently deleted after it is no longer necessary.
+            - paragraph [ref=e131]:
+              - text: For more information about how we keep your data secure, please visit our
+              - link "Privacy Policy" [ref=e132] [cursor=pointer]:
+                - /url: /en-us/legal/article/cx-privacy-policy
+              - text: .
+            - paragraph [ref=e133]:
+              - strong [ref=e134]: "Q:"
+              - text: What kind of ID do I need?
+            - paragraph [ref=e135]:
+              - strong [ref=e136]: "A:"
+              - text: "At this time, you are required to use a current and valid US government-issued ID:"
+            - list [ref=e137]:
+              - listitem [ref=e138]:
+                - paragraph [ref=e139]: Driver’s License
+              - listitem [ref=e140]:
+                - paragraph [ref=e141]: State ID
+              - listitem [ref=e142]:
+                - paragraph [ref=e143]: Passport
+              - listitem [ref=e144]:
+                - paragraph [ref=e145]: Passport Card
+              - listitem [ref=e146]:
+                - paragraph [ref=e147]: Permanent Resident Card
+              - listitem [ref=e148]:
+                - paragraph [ref=e149]: Employment Authorization Card
+            - paragraph [ref=e150]: "The following IDs will not be accepted:"
+            - list [ref=e151]:
+              - listitem [ref=e152]:
+                - paragraph [ref=e153]: Any expired ID
+              - listitem [ref=e154]:
+                - paragraph [ref=e155]: Non-US ID
+              - listitem [ref=e156]:
+                - paragraph [ref=e157]: US non-government-issued ID (school ID, bank card, company badge, etc.)
+              - listitem [ref=e158]:
+                - paragraph [ref=e159]: Social Security card
+              - listitem [ref=e160]:
+                - paragraph [ref=e161]: Temporary paper Driver’s License or State ID
+              - listitem [ref=e162]:
+                - paragraph [ref=e163]: Any photocopies, electronic replicas, or screenshots
+              - listitem [ref=e164]:
+                - paragraph [ref=e165]: License plate
+            - paragraph [ref=e166]:
+              - strong [ref=e167]: "Q:"
+              - text: What happens if I don’t complete the verification process?
+            - paragraph [ref=e168]:
+              - strong [ref=e169]: "A:"
+              - text: Until you finish verifying your identity, you will not be able to move forward with the sign-up process or continue dashing. If you cancel the verification process at any point in the process, your progress will not be saved. If you want to resume later, you will have to start the identity verification process from the beginning.
+            - paragraph [ref=e170]:
+              - strong [ref=e171]: "Q:"
+              - text: What happens if I fail the verification process?
+            - paragraph [ref=e172]:
+              - strong [ref=e173]: "A:"
+              - text: "If you cannot successfully verify your identity, there are some possible outcomes:"
+            - list [ref=e174]:
+              - listitem [ref=e175]:
+                - paragraph [ref=e176]: If you fail identity verification during the signup process, you will not be able to move forward with the sign-up process.
+              - listitem [ref=e177]:
+                - paragraph [ref=e178]: When signing up as a Dasher for the first time we recommend avoiding public devices such as school libraries, public libraries, or any open-access computer or device when signing up as the account will be flagged as highly risky due to this shared device association, and sign up will be blocked (To avoid this from happening we suggest only signing up on a personal device such as a phone, laptop, or tablet not in use by anyone else).
+              - listitem [ref=e179]:
+                - paragraph [ref=e180]: If you fail identity verification after activation, or at any time before a dash, you will no longer be able to dash. However, you will be able to access the Dasher app and certain parts of your accounts, including earnings.
+            - paragraph [ref=e181]:
+              - strong [ref=e182]: "Q:"
+              - text: What suggestions do you have to help me verify?
+            - paragraph [ref=e183]:
+              - strong [ref=e184]: "A:"
+              - text: "You can verify by following the suggestions mentioned below:"
+            - paragraph [ref=e185]:
+              - strong [ref=e186]: "For a Government ID:"
+            - list [ref=e187]:
+              - listitem [ref=e188]:
+                - paragraph [ref=e189]: Make sure the text on the ID is clear and readable
+              - listitem [ref=e190]:
+                - paragraph [ref=e191]: Make sure the photo of your face on the ID is visible
+              - listitem [ref=e192]:
+                - paragraph [ref=e193]: Reduce glare by moving away from direct light
+              - listitem [ref=e194]:
+                - paragraph [ref=e195]: Make sure the ID is not cutoff or obstructed by your finger
+              - listitem [ref=e196]:
+                - paragraph [ref=e197]: Make sure the image is not blurry
+              - listitem [ref=e198]:
+                - paragraph [ref=e199]: Try another ID document type if available
+            - paragraph [ref=e200]:
+              - strong [ref=e201]: "For a Self Video:"
+            - list [ref=e202]:
+              - listitem [ref=e203]:
+                - paragraph [ref=e204]: Take off your glasses
+              - listitem [ref=e205]:
+                - paragraph [ref=e206]: Reduce glare by moving away from direct light
+              - listitem [ref=e207]:
+                - paragraph [ref=e208]: Make sure your face is visible and well lit
+              - listitem [ref=e209]:
+                - paragraph [ref=e210]: Make sure you turn your face left and right
+            - paragraph [ref=e211]:
+              - strong [ref=e212]: "Q:"
+              - text: How do I enable camera permissions?
+            - paragraph [ref=e213]:
+              - strong [ref=e214]: "A:"
+              - text: If you've received the below message during the Persona verification flow, you'll need to enable the correct camera permissions for your browser and/or device.
+            - 'img "Migrated from Salesforce: https://figment.file.force.com/dashers/servlet/rtaImage?eid=ka0Kd000001ZOY4&feoid=00N2L00000AWqPe&refid=0EMKd000002eJQT" [ref=e216]'
+            - paragraph [ref=e217]: Here are some ways to enable camera permissions in different browsers and different devices.
+            - paragraph [ref=e218]: "1. If you're on Chrome, please follow the steps in the relevant link below:"
+            - list [ref=e219]:
+              - listitem [ref=e220]:
+                - paragraph [ref=e221]:
+                  - link "For Desktop" [ref=e222] [cursor=pointer]:
+                    - /url: http://support.google.com/chrome/answer/2693767?co=GENIE.Platform%3DDesktop&hl=en&oco=0
+              - listitem [ref=e223]:
+                - paragraph [ref=e224]:
+                  - link "For iPhone & iPad" [ref=e225] [cursor=pointer]:
+                    - /url: http://support.google.com/chrome/answer/2693767?co=GENIE.Platform%3DiOS&hl=en&oco=0
+              - listitem [ref=e226]:
+                - paragraph [ref=e227]:
+                  - link "For Android" [ref=e228] [cursor=pointer]:
+                    - /url: http://support.google.com/chrome/answer/2693767?co=GENIE.Platform%3DAndroid&hl=en&oco=0
+            - paragraph [ref=e229]: "2. If you're on Firefox, please follow the steps in the link below:"
+            - list [ref=e230]:
+              - listitem [ref=e231]:
+                - paragraph [ref=e232]:
+                  - link "For Mobile or Desktop" [ref=e233] [cursor=pointer]:
+                    - /url: http://support.mozilla.org/en-US/kb/how-manage-your-camera-and-microphone-permissions#w_using-firefoxaos-address-bar-to-clear-camera-or-microphone-permissions-for-a-site
+            - paragraph [ref=e234]: "3. If you're on Safari, please follow the relevant steps below:"
+            - list [ref=e235]:
+              - listitem [ref=e236]:
+                - paragraph [ref=e237]:
+                  - link "For Desktop" [ref=e238] [cursor=pointer]:
+                    - /url: http://support.apple.com/guide/safari/websites-ibrwe2159f50/13.0/mac/10.15
+              - listitem [ref=e239]:
+                - paragraph [ref=e240]: "For mobile devices below iOS 13, check your \"Camera & Microphone Access\" in your Settings:"
+                - list [ref=e241]:
+                  - listitem [ref=e242]:
+                    - paragraph [ref=e243]: Go to Settings on your device
+                  - listitem [ref=e244]:
+                    - paragraph [ref=e245]: Scroll down and open Safari
+                  - listitem [ref=e246]:
+                    - paragraph [ref=e247]: Ensure "Camera" is set to "Ask" or "Allow"
+              - listitem [ref=e248]:
+                - paragraph [ref=e249]: For mobile devices on iOS 13, tap the "AA" icon in URL bar in the top left. Then tap "Website Settings", which will enable you to set camera permissions to "Allow or Ask" instead of "Deny".
+            - paragraph [ref=e250]: "4. If you're on Microsoft Edge, please follow the steps in the link below:"
+            - list [ref=e251]:
+              - listitem [ref=e252]:
+                - paragraph [ref=e253]:
+                  - link "For Desktop" [ref=e254] [cursor=pointer]:
+                    - /url: http://support.microsoft.com/en-us/help/4468232/windows-10-camera-microphone-and-privacy
+            - paragraph [ref=e255]: "5. If you're viewing the Persona verification flow via an iOS or Android app, check your device settings:"
+            - list [ref=e256]:
+              - listitem [ref=e257]:
+                - paragraph [ref=e258]: Go to Settings on your device
+              - listitem [ref=e259]:
+                - paragraph [ref=e260]: Go to Apps
+              - listitem [ref=e261]:
+                - paragraph [ref=e262]: Find the app that you wish to enable camera permissions for
+              - listitem [ref=e263]:
+                - paragraph [ref=e264]: Find the App Settings and allow camera permissions
+            - paragraph [ref=e265]:
+              - strong [ref=e266]: "Q:"
+              - text: What are tips for submitting a photo of my government ID?
+            - paragraph [ref=e267]:
+              - strong [ref=e268]: "A:"
+              - text: "Here are some tips to help you submit a photo of your government ID:"
+            - paragraph [ref=e269]: 1. Select the correct ID type that corresponds with your ID.
+            - list [ref=e270]:
+              - listitem [ref=e271]:
+                - paragraph [ref=e272]: You must use a US government-issued ID (Drivers’ License, State ID, Passport & Passport Card)
+              - listitem [ref=e273]:
+                - paragraph [ref=e274]: The ID you submit must match the ID type selected in order to pass verification. Note that both Passport Cards and Passports can be submitted under "Passport."
+            - paragraph [ref=e275]: "2. Take a clear photo of your Government ID:"
+            - paragraph [ref=e276]:
+              - strong [ref=e277]: "General Tips:"
+            - list [ref=e278]:
+              - listitem [ref=e279]:
+                - paragraph [ref=e280]: Make sure the lighting in the room is bright enough to capture the ID.
+              - listitem [ref=e281]:
+                - paragraph [ref=e282]: If there is glare in your photo, move away from direct light to reduce glare.
+              - listitem [ref=e283]:
+                - paragraph [ref=e284]: Make sure the text on your ID is readable (and not worn).
+              - listitem [ref=e285]:
+                - paragraph [ref=e286]: Make sure you are not covering any part of the ID (e.g. with your finger).
+              - listitem [ref=e287]:
+                - paragraph [ref=e288]: Make sure the photo of your face on the ID is visible.
+              - listitem [ref=e289]:
+                - paragraph [ref=e290]: Make sure the image is not blurry.
+              - listitem [ref=e291]:
+                - paragraph [ref=e292]: If your ID continues to fail, try another ID type if available.
+              - listitem [ref=e293]:
+                - paragraph [ref=e294]: If your camera quality is poor (e.g. the image is grainy or small) or you do not have a camera on your device, you can upload a photo of your ID and make sure it meets the above requirements. You can also text message or e-mail yourself a link to continue on your phone with your phone's camera.
+            - paragraph [ref=e295]:
+              - strong [ref=e296]: "For ID Cards:"
+            - list [ref=e297]:
+              - listitem [ref=e298]:
+                - paragraph [ref=e299]: If possible, place the ID card on a flat surface (e.g. a table) with a dark background to reduce blur.
+              - listitem [ref=e300]:
+                - paragraph [ref=e301]: Move the ID card as close to the camera as possible, while making sure all four corners of the ID are captured within the photo.
+            - paragraph [ref=e302]:
+              - strong [ref=e303]: "For Passports:"
+            - list [ref=e304]:
+              - listitem [ref=e305]:
+                - paragraph [ref=e306]: Hold the passport open to the main passport page (showing your photo and personal details).
+              - listitem [ref=e307]:
+                - paragraph [ref=e308]: Make sure you are not blocking any part of the main passport page.
+              - listitem [ref=e309]:
+                - paragraph [ref=e310]: Make sure the MRZ (the symbols and letters at the bottom of your passport page) is fully visible and can be read clearly in your photo.
+              - listitem [ref=e311]:
+                - paragraph [ref=e312]: Because passport pages can be glossy, please make sure the lighting is good and move away from a direct lighting source to avoid glare or reflection.
+          - generic [ref=e313]:
+            - generic [ref=e314]: Was this article helpful?
+            - generic [ref=e315]:
+              - button "Yes" [ref=e316] [cursor=pointer]
+              - button "No" [ref=e319] [cursor=pointer]
+        - generic [ref=e322]:
+          - generic [ref=e323]:
+            - heading "Related Articles" [level=2] [ref=e324]
+            - paragraph [ref=e325]: Continue exploring helpful resources
+          - list [ref=e326]:
+            - listitem [ref=e327]:
+              - link "2026 Dasher Appreciation Week Sweepstakes - Official Rules" [ref=e328] [cursor=pointer]:
+                - /url: /en-us/dashers/article/dasher-appreciation-week-sweepstakes-offficial-rules
+            - listitem [ref=e334]:
+              - link "British Columbia App-Based Work Regulations" [ref=e335] [cursor=pointer]:
+                - /url: /en-us/dashers/article/british-columbia-app-based-work-regulations
+            - listitem [ref=e341]:
+              - link "Dash Along the Way" [ref=e342] [cursor=pointer]:
+                - /url: /en-us/dashers/article/dasher-commute-tools
+        - generic [ref=e349]:
+          - heading "If you can't find what you are looking for:" [level=2] [ref=e350]
+          - generic [ref=e351]:
+            - generic [ref=e352]:
+              - generic [ref=e353]:
+                - heading "Can't find what you are looking for?" [level=3] [ref=e354]
+                - paragraph [ref=e355]: Our chat and call support are available 24/7
+              - generic [ref=e356]:
+                - link "Chat with Us in the Dasher App" [ref=e357] [cursor=pointer]:
+                  - /url: https://help.doordash.com/en-us/dashers/article/chat-support-in-the-dasher-app
+                - link "Call Us at 855-431-0459" [ref=e360] [cursor=pointer]:
+                  - /url: tel:8554310459
+            - generic [ref=e363]:
+              - generic [ref=e364]:
+                - heading "Looking for Dasher gear?" [level=3] [ref=e365]
+                - paragraph [ref=e366]: Get Dasher essentials like Red Cards, hot bags, pizza bags, and stickers
+              - link "Visit the Dasher Store online" [ref=e368] [cursor=pointer]:
+                - /url: https://doordashstore.com/category.aspx?ID=13245
+      - complementary
+    - generic [ref=e373]:
+      - link "I'm a Customer Customer Support" [ref=e374] [cursor=pointer]:
+        - /url: /en-us/consumers
+        - generic [ref=e375]:
+          - heading "I'm a Customer" [level=2] [ref=e376]
+          - generic [ref=e377]: Customer Support
+      - link "I'm a Merchant Merchant Support" [ref=e381] [cursor=pointer]:
+        - /url: /en-us/merchants
+        - generic [ref=e382]:
+          - heading "I'm a Merchant" [level=2] [ref=e383]
+          - generic [ref=e384]: Merchant Support
+      - link "I'm a Corporate Customer Business Support" [ref=e388] [cursor=pointer]:
+        - /url: /en-us/business
+        - generic [ref=e389]:
+          - heading "I'm a Corporate Customer" [level=2] [ref=e390]
+          - generic [ref=e391]: Business Support
+      - link "I'm an Advertiser Ads Support" [ref=e395] [cursor=pointer]:
+        - /url: /en-us/advertising
+        - generic [ref=e396]:
+          - heading "I'm an Advertiser" [level=2] [ref=e397]
+          - generic [ref=e398]: Ads Support
+  - contentinfo [ref=e402]:
+    - link "DoorDash Help Center" [ref=e405] [cursor=pointer]:
+      - /url: /en-us
+    - generic [ref=e418]:
+      - generic [ref=e419]:
+        - generic [ref=e421]:
+          - list [ref=e422]:
+            - listitem [ref=e423]:
+              - link "DoorDash for iOS" [ref=e424] [cursor=pointer]:
+                - /url: https://apps.apple.com/us/app/doordash-food-delivery/id719972451
+            - listitem [ref=e428]:
+              - link "DoorDash for Android" [ref=e429] [cursor=pointer]:
+                - /url: https://play.google.com/store/apps/details?id=com.dd.doordash&hl=en
+          - list [ref=e433]:
+            - listitem [ref=e434]:
+              - link "twitter" [ref=e435] [cursor=pointer]:
+                - /url: https://x.com/doordash
+            - listitem [ref=e438]:
+              - link "facebook" [ref=e439] [cursor=pointer]:
+                - /url: https://facebook.com/doordash
+            - listitem [ref=e442]:
+              - link "instagram" [ref=e443] [cursor=pointer]:
+                - /url: https://www.instagram.com/doordash
+            - listitem [ref=e446]:
+              - link "linkedin" [ref=e447] [cursor=pointer]:
+                - /url: https://www.linkedin.com/company/doordash
+          - button "English (US) – Select language" [ref=e452] [cursor=pointer]:
+            - generic [ref=e455]: English (US)
+        - generic [ref=e458]:
+          - generic [ref=e459]:
+            - heading "Get to Know Us" [level=3] [ref=e460]:
+              - button "Get to Know Us"
+            - list [ref=e461]:
+              - listitem [ref=e462]:
+                - link "About Us" [ref=e463] [cursor=pointer]:
+                  - /url: https://about.doordash.com
+              - listitem [ref=e464]:
+                - link "Accessibility" [ref=e465] [cursor=pointer]:
+                  - /url: https://about.doordash.com/en-us/accessibility
+              - listitem [ref=e466]:
+                - link "Company Blog" [ref=e467] [cursor=pointer]:
+                  - /url: https://blog.doordash.com/
+              - listitem [ref=e468]:
+                - link "Dasher Blog" [ref=e469] [cursor=pointer]:
+                  - /url: https://dasher.doordash.com/en-us/blog
+              - listitem [ref=e470]:
+                - link "Merchant Blog" [ref=e471] [cursor=pointer]:
+                  - /url: https://merchants.doordash.com/en-us/blog
+          - generic [ref=e472]:
+            - heading "Let Us Help You" [level=3] [ref=e473]:
+              - button "Let Us Help You"
+            - list [ref=e474]:
+              - listitem [ref=e475]:
+                - link "Account Details" [ref=e476] [cursor=pointer]:
+                  - /url: https://www.doordash.com/consumer/edit_profile/
+              - listitem [ref=e477]:
+                - link "Order History" [ref=e478] [cursor=pointer]:
+                  - /url: https://www.doordash.com/orders/
+              - listitem [ref=e479]:
+                - link "Customer Support" [ref=e480] [cursor=pointer]:
+                  - /url: /en-us/consumers
+              - listitem [ref=e481]:
+                - link "Dasher Support" [ref=e482] [cursor=pointer]:
+                  - /url: /en-us/dashers
+              - listitem [ref=e483]:
+                - link "Merchant Support" [ref=e484] [cursor=pointer]:
+                  - /url: /en-us/merchants
+              - listitem [ref=e485]:
+                - link "Business Support" [ref=e486] [cursor=pointer]:
+                  - /url: /en-us/business
+              - listitem [ref=e487]:
+                - link "Ads Support" [ref=e488] [cursor=pointer]:
+                  - /url: /en-us/advertising
+              - listitem [ref=e489]:
+                - link "Have an emergency?" [ref=e490] [cursor=pointer]:
+                  - /url: /en-us/dashers/article/i-have-an-emergency
+          - generic [ref=e491]:
+            - heading "Doing Business" [level=3] [ref=e492]:
+              - button "Doing Business"
+            - list [ref=e493]:
+              - listitem [ref=e494]:
+                - link "Become a Dasher" [ref=e495] [cursor=pointer]:
+                  - /url: https://dasher.doordash.com
+              - listitem [ref=e496]:
+                - link "DoorDash Merchant" [ref=e497] [cursor=pointer]:
+                  - /url: https://merchants.doordash.com
+              - listitem [ref=e498]:
+                - link "Get Dashers for Deliveries" [ref=e499] [cursor=pointer]:
+                  - /url: https://merchants.doordash.com/en-us/products/drive-on-demand
+              - listitem [ref=e500]:
+                - link "Get DoorDash for Business" [ref=e501] [cursor=pointer]:
+                  - /url: https://business.doordash.com/
+              - listitem [ref=e502]:
+                - link "Advertise on DoorDash" [ref=e503] [cursor=pointer]:
+                  - /url: https://advertising.doordash.com/
+      - list [ref=e505]:
+        - listitem [ref=e506]:
+          - link "Consumers" [ref=e507] [cursor=pointer]:
+            - /url: https://www.doordash.com
+        - listitem [ref=e508]:
+          - link "Dashers" [ref=e509] [cursor=pointer]:
+            - /url: https://dasher.doordash.com/en-us
+        - listitem [ref=e510]:
+          - link "Merchants" [ref=e511] [cursor=pointer]:
+            - /url: https://merchants.doordash.com/en-us
+        - listitem [ref=e512]:
+          - link "Advertisers" [ref=e513] [cursor=pointer]:
+            - /url: https://advertising.doordash.com/en-us
+        - listitem [ref=e514]:
+          - link "Businesses" [ref=e515] [cursor=pointer]:
+            - /url: https://business.doordash.com/en-us
+        - listitem [ref=e516]:
+          - link "Investor Relations" [ref=e517] [cursor=pointer]:
+            - /url: https://ir.doordash.com/
+        - listitem [ref=e518]:
+          - link "Careers" [ref=e519] [cursor=pointer]:
+            - /url: https://careersatdoordash.com/
+        - listitem [ref=e520]:
+          - link "Newsroom" [ref=e521] [cursor=pointer]:
+            - /url: https://about.doordash.com/en-us/news
+        - listitem [ref=e522]:
+          - link "Block Party" [ref=e523] [cursor=pointer]:
+            - /url: https://blog.doordash.com/en-us
+      - generic [ref=e524]:
+        - list [ref=e526]:
+          - listitem [ref=e527]:
+            - link "Terms of Service" [ref=e528] [cursor=pointer]:
+              - /url: /en-us/legal/article/cx-terms-and-conditions
+          - listitem [ref=e529]:
+            - link "Consumer Privacy" [ref=e530] [cursor=pointer]:
+              - /url: /en-us/legal/article/cx-privacy-policy
+          - listitem [ref=e531]:
+            - link "Dasher Privacy" [ref=e532] [cursor=pointer]:
+              - /url: /en-us/legal/article/dx-privacy-policy
+          - listitem [ref=e533]:
+            - link "Dasher Agreement" [ref=e534] [cursor=pointer]:
+              - /url: /en-us/legal/article/dx-ica
+          - listitem [ref=e535]:
+            - link "Platform Access Policy" [ref=e536] [cursor=pointer]:
+              - /url: /en-us/legal/article/dx-deactivation-policy
+          - listitem [ref=e537]:
+            - link "Delivery Locations" [ref=e538] [cursor=pointer]:
+              - /url: https://www.doordash.com/food-delivery/
+          - listitem [ref=e539]:
+            - link "Do Not Sell or Share My Personal Information" [ref=e540] [cursor=pointer]:
+              - /url: https://www.doordash.com/en-US/consent
+        - generic [ref=e541]:
+          - text: © 2026
+          - link "DoorDash" [ref=e542] [cursor=pointer]:
+            - /url: https://about.doordash.com/en-us
+  - alert [ref=e543]

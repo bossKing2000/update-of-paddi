@@ -2,8 +2,13 @@
 import { Router } from "express";
 import { authenticate, authorizeVendor } from "../middlewares/auth.middleware";
 import { dashboardController } from "../controllers/vendorDashboard.controller";
+import {
+  createDishTypeSuggestion,
+  getMyDishTypeSuggestions,
+} from "../controllers/admin.controller";
 import { getPayoutSummary, setBankDetails, getBankDetails, getBankList } from "../controllers/payoutController";
 import { getVendorOnboarding } from "../controllers/vendorOnboardingController";
+import { requireVendorNotSuspended } from "../middlewares/vendorStatus.middleware";
 
 const router = Router();
 router.use(authenticate);
@@ -37,6 +42,13 @@ router.get("/payouts", getPayoutSummary);
 router.get("/payouts/banks", getBankList);
 router.get("/payouts/bank-details", getBankDetails);
 router.put("/payouts/bank-details", setBankDetails);
+
+// Phase 2A.2 vendor dish-type suggestions.
+// Submission is a vendor WRITE surface, so it is additionally guarded by
+// requireVendorNotSuspended (suspended vendors cannot submit). Listing own
+// suggestions is a read and stays on authenticate + authorizeVendor only.
+router.post("/suggestions", requireVendorNotSuspended, createDishTypeSuggestion);
+router.get("/suggestions", getMyDishTypeSuggestions);
 
 // ====== DEPRECATED ENDPOINTS (keep for backward compatibility) ======
 router.get("/summary", dashboardController.getSummary);

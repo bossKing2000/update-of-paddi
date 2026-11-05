@@ -25,7 +25,7 @@ export const sendResetEmail = async (req: Request, to: string, code: string) => 
         <h2>Password Reset Code</h2>
         <p>Your code to reset your Food Paddi password is:</p>
         <h1 style="color: #4CAF50;">${code}</h1>
-        <p>This code will expire in 30 seconds.</p>
+        <p>This code will expire in 10 minutes.</p>
       </div>
     `,
   };

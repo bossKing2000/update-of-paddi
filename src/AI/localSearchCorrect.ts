@@ -2,7 +2,6 @@
 import fs from 'fs';
 import path from 'path';
 import nspell from 'nspell';
-import enUS from 'dictionary-en-us';
 
 let spell: ReturnType<typeof nspell> | undefined;
 
@@ -42,13 +41,31 @@ function closestFoodWord(word: string, maxDist = 2): string | null {
 }
 
 // 1️⃣ Load English dictionary
-enUS((err: Error | null, dict: any) => {
-  if (err) {
-    console.error('Failed to load English dictionary:', err);
-    return;
-  }
+//
+// Batch 1D.46. This was previously `enUS(cb)`, whose callback fires from
+// inside `fs.readFile` — so the load escaped module evaluation and could
+// finish after the importing code had finished. Under Jest that surfaced as
+// `Cannot log after tests are done` from the two console.log calls below,
+// which Jest counts as a suite failure and made `npm test` exit 1 even though
+// every assertion passed. In production it also left a window where
+// `correctQuery()` ran with `spell === undefined` and silently returned the
+// query uncorrected.
+//
+// The dictionary is a fixed, bundled asset (554 KB, ~1 ms to read) already
+// present at import time, so it is read synchronously here. Same files, same
+// `{ aff, dic }` shape, same `nspell(dict)` call, same console output —
+// there is simply no longer an un-awaited async task that can outlive the
+// module that started it.
+function loadDictionarySync(): { aff: Buffer; dic: Buffer } {
+  const dir = path.dirname(require.resolve('dictionary-en-us'));
+  return {
+    aff: fs.readFileSync(path.join(dir, 'index.aff')),
+    dic: fs.readFileSync(path.join(dir, 'index.dic')),
+  };
+}
 
-  spell = nspell(dict);
+try {
+  spell = nspell(loadDictionarySync());
 
   // 2️⃣ Load custom food dictionary (dish names like jollof/suya/ofada).
   // Resolved against several roots so it works from src (ts-node/dev),
@@ -76,7 +93,9 @@ enUS((err: Error | null, dict: any) => {
   foodWordList.push(...foodWords);
 
   console.log('✅ Local search correction dictionary loaded');
-});
+} catch (err) {
+  console.error('Failed to load English dictionary:', err);
+}
 
 // 3️⃣ Correct a single word
 export const correctWord = (word: string): string => {

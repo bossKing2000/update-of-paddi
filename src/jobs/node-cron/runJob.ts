@@ -1,7 +1,9 @@
 import cron from "node-cron";
 import { runOrderCleanupJob } from "../workers jobs/orderCleanupJob";
 import { runExpireAwaitingPaymentJob } from "../workers jobs/expireAwaitingPaymentJob";
+import { runExpireUnconfirmedVendorOrders } from "../workers jobs/expireUnconfirmedVendorOrders";
 import { verifyPendingPayments } from "../payment/worker/verifyPendingPayments";
+import { verifyExpiredPayments } from "../payment/worker/verifyExpiredPayments";
 import { verifyPendingRefunds } from "../payment/worker/verifyPendingRefunds";
 import { verifyPendingRiderWithdrawals } from "../payment/worker/verifyPendingRiderWithdrawals";
 import { verifyPendingVendorPayouts } from "../payment/worker/verifyPendingVendorPayouts";
@@ -34,6 +36,19 @@ cron.schedule("*/5 * * * *", async () => {
 });
 
 /**
+ * ⏰ Expire Unconfirmed PAYMENT_CONFIRMED Orders (3C vendor timeout)
+ * Runs every 2 minutes to auto-cancel paid orders a vendor never confirmed
+ * within 10 minutes, file order-bounded refunds, and notify customers.
+ */
+cron.schedule("*/2 * * * *", async () => {
+  try {
+    await runExpireUnconfirmedVendorOrders();
+  } catch (err) {
+    logger.error({ err }, "[CRON] Expire unconfirmed vendor orders failed");
+  }
+});
+
+/**
  * 💳 Verify Pending Payments Job
  * Runs every 1 minute to auto-verify stuck or delayed transactions.
  */
@@ -42,6 +57,31 @@ cron.schedule("*/1 * * * *", async () => {
     await verifyPendingPayments();
   } catch (err) {
     logger.error({ err }, "[CRON] Verify pending payments failed");
+  }
+});
+
+/**
+ * 💸 Recover Captures on Already-EXPIRED Payments (FIN-07-03c)
+ * Runs every 5 minutes.
+ *
+ * `verifyPendingPayments` above settles a reference to EXPIRED the moment
+ * `expiresAt` passes, WITHOUT asking Paystack, and EXPIRED rows are excluded
+ * from its `[PENDING, INITIATED]` predicate — so a charge that Paystack
+ * captured while the `charge.success` webhook was lost in transit could never
+ * be discovered again, and the FIN-07-02 refund-obligation branch was
+ * unreachable.
+ *
+ * This sweep closes that discovery path for references that expired inside a
+ * bounded window only. It never writes Payment.status or Order, never restores
+ * stock, and routes every confirmed capture through the canonical
+ * `finalizePaymentSuccess`. See verifyExpiredPayments.ts for the bounds and
+ * the known limitations.
+ */
+cron.schedule("*/5 * * * *", async () => {
+  try {
+    await verifyExpiredPayments();
+  } catch (err) {
+    logger.error({ err }, "[CRON] Verify expired payments recovery failed");
   }
 });
 
@@ -114,3 +154,43 @@ cron.schedule("*/1 * * * *", async () => {
     logger.error({ err }, "[CRON] Expire delivery broadcasts job failed");
   }
 });
+
+/**
+ * 🔍 Stranded Delivery Dispatch Observation (READ-ONLY, opt-in)
+ *
+ * Logs how many orders currently look stranded in delivery dispatch. It
+ * performs NO writes: no assignOrder, no broadcast or assignment changes, no
+ * Order updates, no socket emissions, no notifications. It exists to measure a
+ * problem before anything acts on it.
+ *
+ * Disabled unless RECONCILE_STRANDED_DISPATCH_ENABLED is exactly "true", in
+ * which case the job is never registered and the candidate query never runs.
+ * That default matters: a scan that only reads is harmless, but it also adds
+ * query load on the hottest tables, so it stays opt-in until its cost is known.
+ *
+ * COVERAGE IS INCOMPLETE BY DESIGN. Each page restarts from the beginning —
+ * there is no persisted and no module-level cursor — so a run cut short by
+ * MAX_PAGES can miss candidates indefinitely, and its log line says so via
+ * `truncated`. Orders that fail to recover write nothing, so nothing about
+ * them changes between runs either. Fixing that needs persisted state, which is
+ * deliberately out of scope.
+ *
+ * `noOverlap` prevents overlapping executions WITHIN THIS PROCESS ONLY. It is
+ * NOT a distributed lock: with N application instances this job runs N times
+ * concurrently. The candidate query is read-only so that is wasteful rather
+ * than unsafe, but the load multiplies by N. Do not enable in a multi-instance
+ * deployment without measuring that first.
+ */
+if (DeliveryAssignmentService.RECONCILE_ENABLED) {
+  cron.schedule(
+    "*/1 * * * *",
+    async () => {
+      try {
+        await DeliveryAssignmentService.observeStrandedDispatches();
+      } catch (err) {
+        logger.error({ err }, "[CRON] Stranded dispatch observation job failed");
+      }
+    },
+    { noOverlap: true, name: "stranded-dispatch-observation" },
+  );
+}

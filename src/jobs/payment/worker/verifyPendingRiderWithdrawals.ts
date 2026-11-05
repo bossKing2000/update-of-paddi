@@ -118,7 +118,9 @@ export async function verifyPendingRiderWithdrawals(
         case "success": {
           // The transfer really exists and succeeded. Verify Paystack's
           // authoritative amount before we move any money locally.
-          const expectedKobo = Math.round(withdrawal.amount * 100);
+          // withdrawal.amount is already integer kobo (Phase 3A); compare
+          // directly — no * 100, which would double-convert.
+          const expectedKobo = Number(withdrawal.amount);
           if (lookup.amountKobo !== expectedKobo) {
             logger.error(
               {

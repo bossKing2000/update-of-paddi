@@ -17,6 +17,8 @@ export const getVendorOnboarding = async (req: AuthRequest, res: Response) => {
       roles: true,
       brandName: true,
       phoneNumber: true,
+      phoneNumberE164: true,
+      isPhoneVerified: true,
       kycStatus: true,
       bankName: true,
       bankAccountNumber: true,
@@ -32,6 +34,10 @@ export const getVendorOnboarding = async (req: AuthRequest, res: Response) => {
   const profileDone = !!vendor.brandName && !!vendor.phoneNumber;
   const kycDone = vendor.kycStatus === "VERIFIED";
   const bankDone = !!(vendor.bankName && vendor.bankAccountNumber && vendor.paystackRecipientCode);
+  // Phase 1D.4: derived verification state so the frontend can tell the
+  // user phone verification is still outstanding. Steps/canGoLive shapes
+  // are unchanged for compatibility (ACTIVE already implies verified).
+  const phoneVerified = !!vendor.phoneNumberE164 && vendor.isPhoneVerified === true;
 
   return sendSuccess(
     res,
@@ -41,6 +47,7 @@ export const getVendorOnboarding = async (req: AuthRequest, res: Response) => {
       statusChangedAt: vendor.vendorStatusChangedAt,
       isLive: vendor.isLive,
       canGoLive: vendor.vendorStatus === "ACTIVE" && kycDone,
+      phoneVerified,
       steps: [
         { key: "profile", done: profileDone },
         { key: "kyc", done: kycDone },

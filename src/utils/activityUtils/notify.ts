@@ -3,6 +3,7 @@ import { Role } from "@prisma/client";
 import { redisNotifications } from "../../lib/redis";
 import { scanKeys } from "../../lib/redisScan";
 import { getIO } from "../../socket";
+import { logger } from "../../lib/logger";
 
 
 interface NotifyOptions {
@@ -50,7 +51,7 @@ export async function sendNotification({
     console.log(`[NOTIFY] ✅ Notification created + Redis updated for user ${userId}`);
     return notif;
   } catch (err) {
-    console.error("[NOTIFY] ❌ Failed to send notification:", err);
+    logger.error({ err, notificationType: type, userId }, "Failed to send notification");
     return null;
   }
 }

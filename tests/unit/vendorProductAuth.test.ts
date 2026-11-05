@@ -1,8 +1,9 @@
 jest.mock("../../src/lib/prisma", () => ({
   __esModule: true,
   default: {
-    product: { findUnique: jest.fn(), update: jest.fn() },
+    product: { findUnique: jest.fn(), update: jest.fn(), create: jest.fn() },
     productOption: { count: jest.fn(), deleteMany: jest.fn(), update: jest.fn(), create: jest.fn() },
+    dishType: { findUnique: jest.fn() },
     $transaction: jest.fn(async (cb: any) => {
       const prismaMock = require("../../src/lib/prisma").default;
       return cb(prismaMock);
@@ -57,7 +58,7 @@ jest.mock("../../src/controllers/vendorDashboard.service", () => ({
 }));
 
 import prisma from "../../src/lib/prisma";
-import { updateProduct } from "../../src/controllers/productController";
+import { updateProduct, createProduct } from "../../src/controllers/productController";
 import { ForbiddenError, ValidationError } from "../../src/errors/AppError";
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
@@ -97,6 +98,7 @@ beforeEach(() => {
   db.product.findUnique.mockResolvedValue({ ...ownProduct });
   db.product.update.mockImplementation(async (args: any) => ({ ...ownProduct, ...args.data }));
   db.productOption.count.mockResolvedValue(1);
+  db.dishType.findUnique.mockResolvedValue({ id: "JOLLOF", categoryId: "RICE_DISHES" });
 });
 
 describe("updateProduct — vendor ownership", () => {
@@ -109,31 +111,43 @@ describe("updateProduct — vendor ownership", () => {
     expect(db.product.update).not.toHaveBeenCalled();
   });
 
-  it("refuses add-on ids that belong to a different product (hijack)", async () => {
-    db.productOption.count.mockResolvedValue(0); // none of the ids are ours
-
+  it("freezes legacy add-on mutations on update (explicit error, no writes)", async () => {
+    // Phase 2B.2: any submitted `options` is rejected instead of mutating.
     await expect(
       updateProduct(
         vendorReq({ body: { options: [{ id: "22222222-2222-4222-8222-222222222222", name: "X", price: 5 }] } }),
         res(),
       ),
-    ).rejects.toThrow(ForbiddenError);
+    ).rejects.toThrow(ValidationError);
+    expect(db.productOption.deleteMany).not.toHaveBeenCalled();
+    expect(db.productOption.update).not.toHaveBeenCalled();
+    expect(db.productOption.create).not.toHaveBeenCalled();
   });
 
-  it("rejects duplicate add-on names case-insensitively", async () => {
+  it("freezes legacy add-on mutations on create (explicit error, no writes)", async () => {
     await expect(
-      updateProduct(
+      createProduct(
         vendorReq({
+          files: { images: [{ path: "img1.jpg" }] },
           body: {
-            options: [
-              { name: "Extra Meat", price: 1000 },
-              { name: "extra meat", price: 1200 },
-            ],
+            name: "Jollof Special",
+            description: "Smoky party jollof",
+            price: 2500,
+            dishTypeId: "JOLLOF",
+            options: [{ name: "Extra Meat", price: 1000 }],
           },
         }),
         res(),
       ),
     ).rejects.toThrow(ValidationError);
+    expect(db.product.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects even an empty options array (previously meant delete-all)", async () => {
+    await expect(
+      updateProduct(vendorReq({ body: { options: [] } }), res()),
+    ).rejects.toThrow(ValidationError);
+    expect(db.productOption.deleteMany).not.toHaveBeenCalled();
   });
 
   it("rejects an unknown dish type", async () => {
@@ -142,7 +156,7 @@ describe("updateProduct — vendor ownership", () => {
     ).rejects.toThrow(ValidationError);
   });
 
-  it("accepts dish type + portion + stock + add-on enable/disable", async () => {
+  it("accepts dish type + portion + stock without touching add-ons", async () => {
     const r = res();
     await updateProduct(
       vendorReq({
@@ -151,7 +165,6 @@ describe("updateProduct — vendor ownership", () => {
           portionLabel: "Family Pack — serves 4–5",
           trackInventory: true,
           stock: 12,
-          options: [{ id: "11111111-1111-4111-8111-111111111111", name: "Extra Meat", price: 1000, isActive: false }],
         },
       }),
       r,
@@ -167,11 +180,17 @@ describe("updateProduct — vendor ownership", () => {
         }),
       }),
     );
-    expect(db.productOption.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: "11111111-1111-4111-8111-111111111111" },
-        data: expect.objectContaining({ isActive: false }),
-      }),
-    );
+  });
+
+  it("leaves an omitted ProductOption intact (no options key = no mutation)", async () => {
+    // Phase 2B.2 regression: the old sync deleted options missing from the
+    // payload; with no `options` key nothing may touch ProductOption rows.
+    const r = res();
+    await updateProduct(vendorReq({ body: { name: "Renamed" } }), r);
+
+    expect(db.product.update).toHaveBeenCalled();
+    expect(db.productOption.deleteMany).not.toHaveBeenCalled();
+    expect(db.productOption.update).not.toHaveBeenCalled();
+    expect(db.productOption.create).not.toHaveBeenCalled();
   });
 });

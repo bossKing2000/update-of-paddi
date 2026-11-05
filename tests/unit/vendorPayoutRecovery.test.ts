@@ -59,6 +59,22 @@ jest.mock("../../src/lib/redis", () => ({
   },
 }));
 
+// Phase 3.2.8: the handler drives the inflight/done replay claim. These
+// suites exercise the financial settlement paths, not the claim state
+// machine (covered in webhookReplayClaim.test.ts), so the claim is stubbed
+// to always acquire and complete — preserving each suite's original
+// duplicate/replay semantics via the real settlement CAS.
+jest.mock("../../src/services/webhookReplayClaim.service", () => ({
+  __esModule: true,
+  newClaimToken: jest.fn(() => "mock-owner-token"),
+  acquireWebhookClaim: jest.fn(async () => "ACQUIRED"),
+  completeWebhookClaim: jest.fn(async () => true),
+  releaseWebhookClaim: jest.fn(async () => true),
+  WEBHOOK_INFLIGHT_TTL_SECONDS: 300,
+  WEBHOOK_DONE_TTL_SECONDS: 259200,
+}));
+
+
 jest.mock("../../src/services/clearCaches", () => ({
   __esModule: true,
   clearProductCache: jest.fn(async () => {}),
@@ -82,7 +98,8 @@ function processingPayout(over: Record<string, unknown> = {}) {
   return {
     id: PID,
     vendorId: "v-1",
-    amount: AMOUNT,
+    // Phase 3A: VendorPayout.amount is integer kobo (BigInt).
+    amount: KOBO,
     status: "PROCESSING",
     reference: REF,
     createdAt: new Date("2026-01-01T00:00:00.000Z"),

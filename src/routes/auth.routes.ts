@@ -23,6 +23,12 @@ import {
   getAllAddresses,
   updateAddress,
   deleteAddress,
+  requestPhoneOtp,
+  verifyPhoneOtp,
+  requestEmailLoginOtp,
+  verifyEmailLoginOtp,
+  removePhone,
+  changePassword,
 } from "../controllers/auth.controller";
 import {
   registerValidator,
@@ -30,7 +36,7 @@ import {
   updateProfileValidator,
 } from "../validators/auth.validator";
 import { validateRequest } from "../middlewares/validateRequest.middleware";
-import { authRateLimiter } from "../middlewares/rateLimiter.middleware";
+import { authRateLimiter, phoneOtpRateLimiter, passwordChangeRateLimiter, secureResetRateLimiter, emailOtpRateLimiter } from "../middlewares/rateLimiter.middleware";
 import { authenticate, authorizeAdmin } from "../middlewares/auth.middleware";
 import { upload } from "../utils/multer";
 import { trackUserAction } from "../middlewares/tracking.middleware";
@@ -214,6 +220,18 @@ router.post("/resend-verification", authRateLimiter, async (req: Request, res: R
   await resendVerificationEmail(req, res);
 });
 
+//  POST /change-password
+//  Phase 1E: authenticated password change with current-password check.
+//  access Private
+router.post(
+  "/change-password",
+  passwordChangeRateLimiter,
+  authenticate,
+  async (req: Request, res: Response) => {
+    await changePassword(req, res);
+  },
+);
+
 //  POST /verify-reset-code
 //  Verifies email + reset code before allowing password reset
 //  access Public
@@ -230,14 +248,79 @@ router.post(
 //  Now also revokes every existing session, since an account compromise
 //  is often exactly why someone is resetting their password.
 //  access Public
-router.post("/secure-reset-password", async (req: Request, res: Response) => {
-  await secureResetPassword(req, res);
-});
+router.post(
+  "/secure-reset-password",
+  secureResetRateLimiter,
+  async (req: Request, res: Response) => {
+    await secureResetPassword(req, res);
+  },
+);
 
 // post /google-login
 router.post("/google-login", authRateLimiter, async (req: Request, res: Response) => {
   await googleLogin(req, res);
 });
+
+//  POST /phone/request-otp
+//  Phase 1D.3: authenticated phone verification/change OTP.
+//  access Private
+router.post(
+  "/phone/request-otp",
+  phoneOtpRateLimiter,
+  authenticate,
+  async (req: Request, res: Response) => {
+    await requestPhoneOtp(req, res);
+  },
+);
+
+//  POST /phone/verify-otp
+//  Phase 1D.3: verify the OTP and mark the phone verified.
+//  access Private
+router.post(
+  "/phone/verify-otp",
+  phoneOtpRateLimiter,
+  authenticate,
+  async (req: Request, res: Response) => {
+    await verifyPhoneOtp(req, res);
+  },
+);
+
+//  POST /email/login/request-otp
+//  Passwordless EMAIL login — public by necessity, the caller has no session
+//  yet. Replaces the retired SMS phone-login flow. Identical response for
+//  known and unknown addresses.
+//  access Public
+router.post(
+  "/email/login/request-otp",
+  emailOtpRateLimiter,
+  async (req: Request, res: Response) => {
+    await requestEmailLoginOtp(req, res);
+  },
+);
+
+//  POST /email/login/verify-otp
+//  Verify the email login code and issue a full session.
+//  access Public
+router.post(
+  "/email/login/verify-otp",
+  emailOtpRateLimiter,
+  async (req: Request, res: Response) => {
+    await verifyEmailLoginOtp(req, res);
+  },
+);
+
+//  DELETE /phone
+//  Phase 1D.38: detach the caller's own phone number. Requires the current
+//  password as step-up, and refuses to remove the last usable login method.
+//  access Private
+router.delete(
+  "/phone",
+  phoneOtpRateLimiter,
+  authenticate,
+  async (req: Request, res: Response) => {
+    await removePhone(req, res);
+  },
+);
 
 router.post("/addresses", authenticate, createAddress);
 router.get("/addresses", authenticate, getAllAddresses);

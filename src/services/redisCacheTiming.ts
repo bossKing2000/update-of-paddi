@@ -25,6 +25,19 @@ export const CACHE_KEYS = {
 
   DISH_TYPES_ALL: "dishtypes:all",
 
+  // Phase 2 M1 — public taxonomy lists. Same TTL-only precedent as
+  // DISH_TYPES_ALL: taxonomy changes are rare/admin-driven, so entries
+  // expire rather than being sweep-invalidated.
+  CATEGORIES_ALL: "categories:all",
+  TAGS_ALL: "tags:all",
+
+  // Phase 2 M1 — category-scoped product pages. Deliberately under the
+  // "products:" prefix so the existing clearProductCache pattern-sweep
+  // invalidates them on any product mutation, exactly like the other
+  // product listing caches.
+  CATEGORY_PRODUCTS: (slug: string, page: number, limit: number, filterKey: string) =>
+    `products:category:${slug}:page=${page}:limit=${limit}:${filterKey}`,
+
   WHATS_IN_THE_POT: "home:pot",
 
   // Phase 3A — composed home feed. Scope distinguishes guest vs
@@ -47,6 +60,9 @@ export const CACHE_TTLS = {
   SEARCH: 60 * 60 * 3,                
   SUGGESTIONS: 60 * 30,
   DISH_TYPES_ALL: 60 * 60,
+  CATEGORIES_ALL: 60 * 60,
+  TAGS_ALL: 60 * 60,
+  CATEGORY_PRODUCTS: 60 * 60 * 5,
 
   // The pot changes as vendors sell out — keep it fresh (60s).
   WHATS_IN_THE_POT: 60,

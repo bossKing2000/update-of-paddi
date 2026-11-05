@@ -114,6 +114,22 @@ function createRedisClient(db: number): RedisClientType {
 }
 
 /**
+ * Deployment topology constraint (Phase 1E.4).
+ *
+ * The auth flows assume STANDALONE Redis with logical database selection:
+ * refresh-token rotation (`REFRESH_ROTATE_LUA` in session.ts) is a multi-key
+ * Lua script executed atomically, and the clients above select logical DBs.
+ * Redis Cluster supports neither arbitrary cross-slot multi-key Lua nor
+ * SELECT of nonzero logical databases, so Cluster is NOT a supported
+ * deployment for this configuration. Do not switch topologies without a
+ * separately reviewed compatibility redesign and tests. Failover behavior and
+ * persistence guarantees beyond a single instance have not been established:
+ * the real-Redis integration results prove behavior against the tested
+ * standalone instance only, not every Redis topology. This is a
+ * deployment-compatibility limitation, not an authentication bypass.
+ */
+
+/**
  * Create Redis instances for different features
  */
 export const redisNotifications = createRedisClient(0);

@@ -5,7 +5,12 @@ import fs from "fs";
 import path from "path";
 
 import { VendorStatus } from "@prisma/client";
-import { ValidationError, NotFoundError, ForbiddenError } from "../../src/errors/AppError";
+import {
+  ValidationError,
+  NotFoundError,
+  ForbiddenError,
+  UnauthorizedError,
+} from "../../src/errors/AppError";
 
 jest.mock("../../src/lib/prisma", () => ({
   __esModule: true,
@@ -13,6 +18,10 @@ jest.mock("../../src/lib/prisma", () => ({
     user: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), count: jest.fn() },
     auditLog: { create: jest.fn(async () => ({})) },
     order: { findMany: jest.fn(), count: jest.fn(), groupBy: jest.fn(async () => []), updateMany: jest.fn() },
+    // F8: payout selectors now read refund state before paying anything.
+    payment: { findMany: jest.fn(async () => []) },
+    refundRequest: { findMany: jest.fn(async () => []) },
+    $queryRaw: jest.fn(async () => []),
     vendorPayout: { create: jest.fn(), findUnique: jest.fn() },
   },
 }));
@@ -112,24 +121,32 @@ describe("transition table", () => {
   });
 });
 
-describe("backfill migration", () => {
-  it("activates complete vendors, NEWS the rest, ignores non-vendors", () => {
+describe("migration baseline", () => {
+  it("represents the vendor lifecycle in the current schema and migrations", () => {
+    // The historical vendor_status migration was intentionally replaced
+    // by the clean 1B.3 baseline; assert the current intended state.
+    const schema = fs.readFileSync(
+      path.join(__dirname, "../../prisma/schema.prisma"),
+      "utf8",
+    );
+    expect(schema).toMatch(/enum VendorStatus/);
+    for (const s of ["NEW", "PENDING_REVIEW", "ACTIVE", "SUSPENDED"]) {
+      expect(schema).toContain(s);
+    }
+    expect(schema).toMatch(/vendorStatus\s+VendorStatus\?/);
+    expect(schema).toMatch(/vendorStatusReason/);
+    expect(schema).toMatch(/vendorStatusChangedAt/);
+    // Phase 1D: activation identity is the canonical verified phone.
+    expect(schema).toMatch(/phoneNumberE164/);
+    expect(schema).toMatch(/isPhoneVerified/);
+    expect(schema).toMatch(/phoneVerifiedAt/);
+
     const dir = path.join(__dirname, "../../prisma/migrations");
-    const mig = fs
+    const migs = fs
       .readdirSync(dir)
-      .filter((d) => d.includes("vendor_status"))
-      .sort()
-      .pop();
-    expect(mig).toBeTruthy();
-    const sql = fs.readFileSync(path.join(dir, mig!, "migration.sql"), "utf8");
-    expect(sql).toMatch(/CREATE TYPE "VendorStatus"/);
-    expect(sql).toMatch(/"vendorStatus"/);
-    expect(sql).toMatch(/'ACTIVE'/);
-    expect(sql).toMatch(/ELSE 'NEW'/);
-    expect(sql).toMatch(/"kycStatus" = 'VERIFIED'/);
-    expect(sql).toMatch(/"brandName" IS NOT NULL/);
-    expect(sql).toMatch(/"phoneNumber" IS NOT NULL/);
-    expect(sql).toMatch(/"vendorStatus" IS NULL/);
+      .filter((d) => !d.startsWith(".") && d !== "migration_lock.toml");
+    expect(migs.length).toBeGreaterThan(0);
+    expect(migs.some((d) => d.endsWith("_init"))).toBe(true);
   });
 });
 
@@ -139,7 +156,9 @@ describe("evaluateVendorStatus", () => {
     vendorStatus: "NEW",
     kycStatus: "VERIFIED",
     brandName: "B",
-    phoneNumber: "0801",
+    phoneNumber: "08031234560",
+    phoneNumberE164: "+2348031234560",
+    isPhoneVerified: true,
   };
 
   it("is idempotent and promotes NEW -> ACTIVE when complete", async () => {
@@ -167,6 +186,35 @@ describe("evaluateVendorStatus", () => {
     expect(db.user.updateMany).not.toHaveBeenCalled();
   });
 
+  it("requires a canonical phone number (raw phoneNumber is not enough)", async () => {
+    db.user.findUnique.mockResolvedValue({
+      ...completeNew,
+      phoneNumber: "08031234560",
+      phoneNumberE164: null,
+      isPhoneVerified: false,
+    });
+    expect(await evaluateVendorStatus("v-1")).toBe("NEW");
+    expect(db.user.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("requires the phone to be verified, not merely present", async () => {
+    db.user.findUnique.mockResolvedValue({
+      ...completeNew,
+      phoneNumberE164: "+2348031234560",
+      isPhoneVerified: false,
+    });
+    expect(await evaluateVendorStatus("v-1")).toBe("NEW");
+    expect(db.user.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("still requires brand and KYC alongside a verified phone", async () => {
+    db.user.findUnique.mockResolvedValue({ ...completeNew, brandName: null });
+    expect(await evaluateVendorStatus("v-1")).toBe("NEW");
+    db.user.findUnique.mockResolvedValue({ ...completeNew, kycStatus: "REJECTED" });
+    expect(await evaluateVendorStatus("v-1")).toBe("NEW");
+    expect(db.user.updateMany).not.toHaveBeenCalled();
+  });
+
   it("queues PENDING_REVIEW when auto-approve is off", async () => {
     process.env.VENDOR_AUTO_APPROVE = "false";
     try {
@@ -185,6 +233,64 @@ describe("evaluateVendorStatus", () => {
         where: expect.objectContaining({ id: "v-1", vendorStatus: null }),
       }),
     );
+  });
+
+  // Phase 1C hardening: the compare-and-swap fallback. The conditional write
+  // pins the status it read, so a concurrent writer that already moved the
+  // row makes the UPDATE match nothing (count === 0). The service must then
+  // report the CONCURRENT status, not the one it attempted.
+  it("returns the concurrent status when the conditional update matches nothing", async () => {
+    // Read 1 sees NEW with requirements met, so it targets ACTIVE.
+    db.user.findUnique
+      .mockResolvedValueOnce({ ...completeNew, vendorStatus: "NEW" })
+      // Read 2 observes what the concurrent writer actually committed.
+      .mockResolvedValueOnce({ vendorStatus: "SUSPENDED" });
+    // The conditional UPDATE is refused: an admin suspended the row first.
+    db.user.updateMany.mockResolvedValue({ count: 0 });
+
+    const result = await evaluateVendorStatus("v-1");
+
+    // The externally meaningful result is the REAL persisted status.
+    expect(result).toBe("SUSPENDED");
+    // It must NOT report the attempted status as if it had been saved.
+    expect(result).not.toBe("ACTIVE");
+
+    // Exactly one conditional write, and it was conditional — no unconditional
+    // retry that could overwrite the concurrent change.
+    expect(db.user.updateMany).toHaveBeenCalledTimes(1);
+    const [call] = db.user.updateMany.mock.calls;
+    expect(call[0].where).toEqual(expect.objectContaining({ id: "v-1", vendorStatus: "NEW" }));
+    expect(call[0].data).toEqual(expect.objectContaining({ vendorStatus: "ACTIVE" }));
+
+    // Read 1 (requirements + status) then read 2 (fresh status) — in order.
+    expect(db.user.findUnique).toHaveBeenCalledTimes(2);
+    expect(db.user.findUnique.mock.calls[1][0].select).toEqual(expect.objectContaining({ vendorStatus: true }));
+  });
+
+  it("falls back to the attempted status when the row disappears after a lost race", async () => {
+    db.user.findUnique
+      .mockResolvedValueOnce({ ...completeNew, vendorStatus: "NEW" })
+      .mockResolvedValueOnce(null);
+    db.user.updateMany.mockResolvedValue({ count: 0 });
+
+    // Documented contract: `fresh?.vendorStatus ?? target`. With no row to read
+    // there is nothing better to report, and the caller still learns the
+    // outcome it attempted rather than an exception.
+    expect(await evaluateVendorStatus("v-1")).toBe("ACTIVE");
+    expect(db.user.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry the write after losing the race", async () => {
+    db.user.findUnique
+      .mockResolvedValueOnce({ ...completeNew, vendorStatus: "NEW" })
+      .mockResolvedValueOnce({ vendorStatus: "PENDING_REVIEW" });
+    db.user.updateMany.mockResolvedValue({ count: 0 });
+
+    await evaluateVendorStatus("v-1");
+
+    // One attempt only. A retry loop here would defeat the whole purpose of
+    // the conditional write.
+    expect(db.user.updateMany).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -229,6 +335,98 @@ describe("suspended vendor enforcement", () => {
     );
     expect(r.status).toHaveBeenCalledWith(200);
   });
+
+  // Phase 1C hardening: the middleware must not turn "I could not read the
+  // status" into "this vendor is allowed to write". Each row below is a state
+  // the middleware can actually distinguish, and each is asserted separately so
+  // a regression in one cannot hide behind another.
+  describe("fails closed when the vendor status cannot be established", () => {
+    const req = () => ({ user: { id: "v-1", role: "VENDOR", sessionId: "s" } }) as any;
+
+    it("blocks a SUSPENDED vendor and never reaches the protected handler", async () => {
+      db.user.findUnique.mockResolvedValue({ vendorStatus: "SUSPENDED" });
+      const next = jest.fn();
+      await expect(requireVendorNotSuspended(req(), res(), next)).rejects.toThrow(ForbiddenError);
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it.each(["NEW", "PENDING_REVIEW", "ACTIVE"])(
+      "still allows a %s vendor to write (onboarding must not be blocked)",
+      async (status) => {
+        db.user.findUnique.mockResolvedValue({ vendorStatus: status });
+        const next = jest.fn();
+        await requireVendorNotSuspended(req(), res(), next);
+        expect(next).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it("still allows a genuinely null status through", async () => {
+      // `null` is the schema's modelled "holds VENDOR, status system has not
+      // run yet" state. It is a REAL status, not an unknown one, so the
+      // fail-closed rule must not swallow it — otherwise a brand-new vendor
+      // could never create their first product.
+      db.user.findUnique.mockResolvedValue({ vendorStatus: null });
+      const next = jest.fn();
+      await requireVendorNotSuspended(req(), res(), next);
+      expect(next).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses a MISSING vendor row instead of assuming a valid status", async () => {
+      // The regression: `vendor?.vendorStatus ?? null` turned a missing row
+      // into the permissive `null` above and let the write through.
+      db.user.findUnique.mockResolvedValue(null);
+      const next = jest.fn();
+      await expect(requireVendorNotSuspended(req(), res(), next)).rejects.toThrow(ForbiddenError);
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it("refuses an UNREADABLE vendorStatus field instead of assuming null", async () => {
+      // undefined means "the field was not read", which the schema documents
+      // as different from a genuine null.
+      db.user.findUnique.mockResolvedValue({});
+      const next = jest.fn();
+      await expect(requireVendorNotSuspended(req(), res(), next)).rejects.toThrow(ForbiddenError);
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it("refuses an out-of-enum status value", async () => {
+      db.user.findUnique.mockResolvedValue({ vendorStatus: "SOMETHING_ELSE" });
+      const next = jest.fn();
+      await expect(requireVendorNotSuspended(req(), res(), next)).rejects.toThrow(ForbiddenError);
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it("uses the same unresolved-status message as the order-lifecycle guard", async () => {
+      // One policy, one message: the middleware and orderController must not
+      // drift into telling the client two different things.
+      db.user.findUnique.mockResolvedValue(null);
+      const next = jest.fn();
+      await expect(requireVendorNotSuspended(req(), res(), next)).rejects.toThrow(
+        /could not confirm your vendor account status/i,
+      );
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it("propagates a database read failure rather than reporting a status", async () => {
+      // An infrastructure failure must NOT be laundered into a vendor status.
+      // It propagates to the error handler, which renders it as a 500 and
+      // never calls next().
+      const boom = new Error("database unavailable");
+      db.user.findUnique.mockRejectedValue(boom);
+      const next = jest.fn();
+      await expect(requireVendorNotSuspended(req(), res(), next)).rejects.toThrow(boom);
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it("still rejects an unauthenticated request before reading the database", async () => {
+      const next = jest.fn();
+      await expect(
+        requireVendorNotSuspended({ user: undefined } as any, res(), next),
+      ).rejects.toThrow(UnauthorizedError);
+      expect(next).not.toHaveBeenCalled();
+      expect(db.user.findUnique).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("vendor onboarding endpoint", () => {
@@ -238,6 +436,8 @@ describe("vendor onboarding endpoint", () => {
       roles: ["VENDOR"],
       brandName: "B",
       phoneNumber: null,
+      phoneNumberE164: null,
+      isPhoneVerified: false,
       kycStatus: "VERIFIED",
       bankName: null,
       bankAccountNumber: null,
@@ -253,6 +453,7 @@ describe("vendor onboarding endpoint", () => {
     const body = r.json.mock.calls[0][0];
     expect(body.data.status).toBe("NEW");
     expect(body.data.canGoLive).toBe(false);
+    expect(body.data.phoneVerified).toBe(false);
     expect(body.data.steps).toEqual([
       { key: "profile", done: false },
       { key: "kyc", done: true },
@@ -277,10 +478,13 @@ describe("payout holds", () => {
   };
 
   it("pending list flags suspended and no-bank vendors as held", async () => {
-    db.order.groupBy.mockResolvedValue([
-      { vendorId: "v-ok", _sum: { totalPrice: 10000, deliveryFee: 1000 }, _count: { id: 2 } },
-      { vendorId: "v-sus", _sum: { totalPrice: 5000, deliveryFee: 500 }, _count: { id: 1 } },
-      { vendorId: "v-nobank", _sum: { totalPrice: 3000, deliveryFee: 0 }, _count: { id: 1 } },
+    // F8: getPendingPayouts now filters at order grain before aggregating, so
+    // the mock returns per-order rows whose sums match the previous groupBy.
+    db.order.findMany.mockResolvedValue([
+      { id: "ok1", vendorId: "v-ok", totalPrice: 5000, deliveryFee: 500, idempotencyKey: "k1" },
+      { id: "ok2", vendorId: "v-ok", totalPrice: 5000, deliveryFee: 500, idempotencyKey: "k2" },
+      { id: "sus1", vendorId: "v-sus", totalPrice: 5000, deliveryFee: 500, idempotencyKey: "k3" },
+      { id: "nob1", vendorId: "v-nobank", totalPrice: 3000, deliveryFee: 0, idempotencyKey: "k4" },
     ]);
     db.user.findMany.mockResolvedValue([
       banked,

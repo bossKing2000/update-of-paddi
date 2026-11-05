@@ -14,9 +14,19 @@ import { logger } from "../lib/logger";
 // - in-flight + fresh    -> 409 (still running, poll/retry later)
 // - in-flight + stale    -> reclaim (crashed worker must not poison the key)
 //
-// A failed checkout releases its in-flight claim so retries work. If Redis
-// itself is unreachable we fail OPEN (rely on the DB idempotencyKey lookup
-// + single-use snapshot) and log — matching this codebase's Redis posture.
+// A failed checkout releases its in-flight claim so retries work.
+//
+// If Redis is unreachable we FAIL CLOSED. This is a deliberate reversal of the
+// previous fail-open posture: checkout is the operation that charges a customer
+// and decrements stock, so proceeding without a claim means two concurrent
+// submissions with the same Idempotency-Key can both create orders. The DB
+// `idempotencyKey` lookup that used to be the backstop only helps a retry
+// AFTER a first attempt already committed — in the concurrent case both
+// requests observe no rows and both proceed, so it does not close the race.
+// A 503 is retryable and reveals no infrastructure detail.
+//
+// Note this differs from the phone-OTP path, which also fails closed but where
+// a Redis outage only blocks a single user from a single action.
 
 const IDEM_TTL_SECONDS = 24 * 3600;
 const INFLIGHT_STALE_MS = 5 * 60 * 1000;
@@ -30,7 +40,7 @@ type ClaimRecord = {
 
 export type ClaimOutcome =
   | { action: "proceed" }
-  | { action: "proceed-degraded"; reason: string }
+  | { action: "unavailable" }
   | { action: "replay"; response: unknown }
   | { action: "mismatch" }
   | { action: "conflict" };
@@ -76,14 +86,19 @@ export async function claimCheckoutKey(
       if (setResult === "OK") return { action: "proceed" };
       // Lost the race (or a non-NX-aware stub) — re-read and adjudicate.
       const raced = parseRecord(await redisPayments.get(key));
-      if (!raced) return { action: "proceed-degraded", reason: "idempotency store unavailable" };
+      if (!raced) {
+        // Lost the NX race but the re-read came back empty: we cannot tell a
+        // lost race from an unreadable store, so we must not proceed.
+        logger.warn({ userId }, "Idempotency claim could not be confirmed (fail-closed)");
+        return { action: "unavailable" };
+      }
       return adjudicate(raced, payloadHash, key, now);
     }
 
     return adjudicate(existing, payloadHash, key, now);
   } catch (err) {
-    logger.warn({ err, userId }, "Idempotency claim failed (fail-open)");
-    return { action: "proceed-degraded", reason: "idempotency store unavailable" };
+    logger.error({ err, userId }, "Idempotency claim failed (fail-closed)");
+    return { action: "unavailable" };
   }
 }
 
@@ -111,17 +126,22 @@ async function adjudicate(
   return { action: "proceed" };
 }
 
-/** Mark the key complete with the response to replay on retries. */
+/** Mark the key complete with the response to replay on retries.
+ * Returns true on success, false if Redis write failed (so caller can handle release). */
 export async function completeCheckoutKey(
   userId: string,
   idempotencyKey: string,
   payloadHash: string,
   response: unknown,
-): Promise<void> {
+): Promise<boolean> {
   const record: ClaimRecord = { status: "complete", payloadHash, claimedAt: Date.now(), response };
-  await redisPayments
-    .set(keyFor(userId, idempotencyKey), JSON.stringify(record), { EX: IDEM_TTL_SECONDS })
-    .catch((err) => logger.warn({ err, userId }, "Failed to mark idempotency complete (DB fallback still applies)"));
+  try {
+    await redisPayments.set(keyFor(userId, idempotencyKey), JSON.stringify(record), { EX: IDEM_TTL_SECONDS });
+    return true;
+  } catch (err) {
+    logger.warn({ err, userId }, "Failed to mark idempotency complete (DB fallback still applies)");
+    return false;
+  }
 }
 
 /** Release an in-flight claim after a failed checkout so retries proceed. */

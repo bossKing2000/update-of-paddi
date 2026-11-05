@@ -16,6 +16,11 @@ import {
   getAllProducts, getProductById, adminUpdateProduct, adminDeleteProduct,
   getAllReviews, adminModerateReview,
   getActivity,
+  createCategory, updateCategory, deactivateCategory,
+  createDishType, updateDishType, deactivateDishType,
+  createTag, updateTag, deactivateTag,
+  listDishTypeSuggestions, getDishTypeSuggestion,
+  approveDishTypeSuggestion, rejectDishTypeSuggestion,
 } from "../controllers/admin.controller";
 
 const router = Router();
@@ -78,6 +83,29 @@ router.get("/products", getAllProducts);
 router.get("/products/:id", getProductById);
 router.patch("/products/:id", adminUpdateProduct);
 router.delete("/products/:id", adminDeleteProduct);
+
+// Taxonomy management (admin-only). All routes on this router are already
+// protected by authenticate + authorizeAdmin (mounted above).
+router.post("/categories", createCategory);
+router.patch("/categories/:id", updateCategory);
+router.patch("/categories/:id/deactivate", deactivateCategory);
+
+router.post("/dish-types", createDishType);
+router.patch("/dish-types/:id", updateDishType);
+router.patch("/dish-types/:id/deactivate", deactivateDishType);
+
+router.post("/tags", createTag);
+router.patch("/tags/:id", updateTag);
+router.patch("/tags/:id/deactivate", deactivateTag);
+
+// Phase 2A.2 vendor dish-type suggestion moderation (admin-only). All routes
+// on this router are protected by authenticate + authorizeAdmin (mounted
+// above). Moderation applies only to PENDING suggestions; approval creates the
+// canonical DishType inside a transaction.
+router.get("/suggestions", listDishTypeSuggestions);
+router.get("/suggestions/:id", getDishTypeSuggestion);
+router.patch("/suggestions/:id/approve", approveDishTypeSuggestion);
+router.patch("/suggestions/:id/reject", rejectDishTypeSuggestion);
 
 router.get("/activity", getActivity);
 

@@ -26,6 +26,7 @@ import { initSocket } from "./socket";
 
 import authRoutes from "./routes/auth.routes";
 import productRoutes from "./routes/productRoutes";
+import vendorPublicRoutes from "./routes/vendorPublic.routes";
 import reviewRoutes from "./routes/reviewRoutes";
 import orderRouter from "./routes/orderRouter";
 import notificationRouter from "./routes/notificationRouter";
@@ -203,6 +204,9 @@ if (!config.isProduction || process.env.ENABLE_API_DOCS === "true") {
 
 app.use("/api/auth", authRoutes);
 app.use("/api/product", productRoutes);
+// Public, read-only vendor profile (B-2). Distinct from the authenticated
+// vendor dashboard mounted at /api/vendor below.
+app.use("/api/vendors", vendorPublicRoutes);
 app.use("/api/review", reviewRoutes);
 app.use("/api/order", orderRouter);
 app.use("/api/notifications", notificationRouter);

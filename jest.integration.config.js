@@ -40,7 +40,29 @@ module.exports = {
   ...base,
   displayName: "integration",
   testMatch: ["<rootDir>/tests/integration/**/*.test.ts"],
-  testPathIgnorePatterns: ["/node_modules/", "/dist/"],
+  // The glob above is RECURSIVE, so it also matched tests/integration/redis/**.
+  // Those six suites are owned by jest.redis-integration.config.js and depend on
+  // the Redis pin at tests/setup/pinTestRedisUrl.apply.ts being registered ahead
+  // of them; this config deliberately does NOT register it, because pinning
+  // process.env.REDIS_URL is that config's job and means nothing for the
+  // PostgreSQL suites. Selecting them here ran them WITHOUT their fail-closed
+  // Redis gate against an unpinned client, which produced real failures plus
+  // cross-suite "The client is closed" contamination.
+  //
+  // The exclusion lives here, in the config file, because a CLI
+  // --testPathIgnorePatterns flag REPLACES this array rather than merging into
+  // it — the same reason the other entries are restated rather than inherited.
+  //
+  // NOTE: keep this comment free of a literal "setupFiles:" followed by "[".
+  // tests/unit/workerPinBootstrap.test.ts scrapes the first
+  // /setupFiles:\s*\[([^\]]*)\]/ match out of this file's raw text to assert the
+  // guard is still nameable, so a comment shaped like a config assignment would
+  // shadow the real one and fail that test.
+  testPathIgnorePatterns: [
+    "/node_modules/",
+    "/dist/",
+    "/tests/integration/redis/",
+  ],
   passWithNoTests: false,
   globalSetup: "<rootDir>/tests/setup/integrationPreflight.ts",
   setupFiles: ["<rootDir>/tests/setup/pinTestDatabaseUrl.apply.ts"],

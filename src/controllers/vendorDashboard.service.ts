@@ -1,7 +1,17 @@
 import { OrderStatus } from "@prisma/client";
+import {
+  findPayoutSnapshotDefects,
+  sumSnapshotKoboTotals,
+  isLegacyNullSnapshotOrder,
+} from "../services/orderSnapshot.service";
 import { startOfDay, endOfDay, subDays, format } from "date-fns";
 import { clearProductCache } from "../services/clearCaches";
 import { isProductCurrentlyAvailable } from "../services/vendorAvailability.service";
+import { partitionPayoutBlockedOrders } from "../services/payoutEligibility.service";
+import {
+  vendorVisibleOrderWhere,
+  vendorDashboardCacheKey,
+} from "../services/vendorOrderVisibility";
 import { redisProducts } from "../lib/redis";
 import prisma from "../lib/prisma";
 
@@ -13,7 +23,11 @@ export class VendorDashboardService {
 
   // ==================== DASHBOARD SUMMARY ====================
   async getDashboardSummary() {
-    const cacheKey = `vendor:${this.vendorId}:dashboardSummary`;
+    // The key is versioned (`:v2`) so a summary cached by the previous code — one
+  // that could have been built from the unfiltered order list — is never served
+  // again. `clearCaches.ts` invalidates the same string via the shared
+  // `vendorDashboardCacheKey` builder, so the two cannot drift.
+  const cacheKey = vendorDashboardCacheKey(this.vendorId);
 
     // STEP 0: Try fetching from cache
     const cached = await redisProducts.get(cacheKey);
@@ -240,22 +254,26 @@ async getOrdersToday(): Promise<number> {
   }
 
   async getPendingOrdersCount(): Promise<number> {
+    // Phase 1 — the status list below previously included AWAITING_PAYMENT,
+    // so a checkout the customer had not paid for was reported to the store as
+    // work needing attention. The shared visibility rule replaces that single
+    // hand-maintained entry: an order only counts as pending once payment is
+    // settled. `PAYMENT_EXPIRED` and `CANCELLED_UNPAID` were never listed here
+    // and are covered by the same rule.
     return prisma.order.count({
-      where: {
+      where: vendorVisibleOrderWhere({
         vendorId: this.vendorId,
         status: {
           in: [
-            OrderStatus.PENDING,
             OrderStatus.WAITING_VENDOR_CONFIRMATION,
             OrderStatus.WAITING_CUSTOMER_APPROVAL,
-            OrderStatus.AWAITING_PAYMENT,
             OrderStatus.PAYMENT_CONFIRMED,
             OrderStatus.COOKING,
             OrderStatus.READY_FOR_PICKUP,
             OrderStatus.OUT_FOR_DELIVERY,
           ],
         },
-      },
+      }),
     });
   }
 
@@ -508,9 +526,16 @@ async getOrdersToday(): Promise<number> {
   async getRecentActivity() {
     const thirtyDaysAgo = subDays(new Date(), 30);
 
+    // Phase 1 — this feed is a vendor-facing order list, so it carries the shared
+    // visibility rule. Previously the only filter was `createdAt`, which surfaced
+    // every unpaid checkout of the last 30 days — including the customer's name
+    // and the order total — as an activity card.
     const [recentOrders, recentVendorReviews] = await Promise.all([
       prisma.order.findMany({
-        where: { vendorId: this.vendorId, createdAt: { gte: thirtyDaysAgo } },
+        where: vendorVisibleOrderWhere({
+          vendorId: this.vendorId,
+          createdAt: { gte: thirtyDaysAgo },
+        }),
         orderBy: { createdAt: "desc" },
         take: 10,
         include: { customer: { select: { name: true } } },
@@ -591,9 +616,13 @@ async getOrdersToday(): Promise<number> {
   const skip = (page - 1) * limit;
   const take = limit * 2; // fetch extra to merge orders + reviews
 
-  const [orders, vendorReviews] = await Promise.all([
+  // Phase 1 — same rule as `getRecentActivity`. This feed returns the widest
+    // vendor-facing payload in the codebase (status, amount, customer identity
+    // and every line item), so an unfiltered order list here was the single
+    // largest exposure of an unpaid order.
+    const [orders, vendorReviews] = await Promise.all([
     prisma.order.findMany({
-      where: { vendorId: this.vendorId },
+      where: vendorVisibleOrderWhere({ vendorId: this.vendorId }),
       orderBy: { createdAt: "desc" },
       skip,
       take,
@@ -684,8 +713,11 @@ async getOrdersToday(): Promise<number> {
     .slice(0, limit);
 
   // -------------------- TOTAL COUNT (for pagination UI) --------------------
+  // Phase 1 — the pagination total must describe the same result set the feed
+  // returns, otherwise an unpaid order would still be countable through the
+  // total even though its row is filtered out.
   const [totalOrders, totalReviews] = await Promise.all([
-    prisma.order.count({ where: { vendorId: this.vendorId } }),
+    prisma.order.count({ where: vendorVisibleOrderWhere({ vendorId: this.vendorId }) }),
     prisma.vendorReview.count({ where: { vendorId: this.vendorId } }),
   ]);
 
@@ -901,17 +933,39 @@ async getOrdersToday(): Promise<number> {
     });
     if (!vendor) throw new Error("Vendor not found");
 
-    // Eligible = completed, successfully paid, and not already included
-    // in a previous payout. paymentStatus is checked directly (rather
-    // than joining through Payment) since Order.paymentStatus is kept in
-    // sync by the payment finalizer and already reflects refunds once
-    // refund processing sets it to REFUNDED.
-    const eligibleOrders = await prisma.order.findMany({
+    // Eligible = completed, successfully paid, not already included in a
+    // previous payout, AND not money the customer has already had refunded.
+    //
+    // F8: the last clause is new. `paymentStatus` alone does not protect this
+    // query — a partial refund leaves `Payment.status = SUCCESS` and a full
+    // refund on a COMPLETED order never rewrites the order at all (the refund
+    // finalizer only rewrites orders in REFUND_CANCELLABLE_ORDER_STATUSES,
+    // which excludes COMPLETED). Previously this comment claimed the opposite.
+    // Orders whose refund allocation between vendor and platform is undecided
+    // are withheld rather than paid at their full checkout snapshot.
+    const payoutCandidates = await prisma.order.findMany({
       where: { vendorId: this.vendorId, status: OrderStatus.COMPLETED, paymentStatus: "SUCCESS", payoutId: null },
-      select: { id: true, totalPrice: true, deliveryFee: true },
+      select: {
+        id: true,
+        basePrice: true,
+        totalPrice: true,
+        deliveryFee: true,
+        idempotencyKey: true,
+        commissionKobo: true,
+        vendorPayoutKobo: true,
+        commissionRateSnapshot: true,
+      },
     });
+    const { eligible: eligibleOrders } = await partitionPayoutBlockedOrders(
+      prisma,
+      payoutCandidates,
+    );
 
-    const { grossRevenue, commission, netAvailable } = calculatePayoutAmounts(eligibleOrders, vendor.commissionRate);
+    // Batch G: same snapshot-first equation as settlement (see
+    // previewVendorPayoutAmounts) so the vendor's available balance is the
+    // claimable balance, not a live-rate recomputation.
+    const preview = previewVendorPayoutAmounts(eligibleOrders, vendor.commissionRate);
+    const { grossRevenue, commission, netAvailable } = preview;
 
     const [payoutHistory, lifetimePaidAgg] = await Promise.all([
       prisma.vendorPayout.findMany({ where: { vendorId: this.vendorId }, orderBy: { createdAt: "desc" }, take: 20 }),
@@ -923,6 +977,9 @@ async getOrdersToday(): Promise<number> {
       bankOnFile: !!(vendor.bankName && vendor.bankAccountNumber),
       bankAccountName: vendor.bankAccountName,
       available: { grossRevenue, commission, netAvailable, orderCount: eligibleOrders.length },
+      // Additive Batch G metadata (see previewVendorPayoutAmounts).
+      payoutBlocked: preview.blocked,
+      payoutBlockReason: preview.blockReason ?? null,
       lifetimePaid: lifetimePaidAgg._sum.amount || 0,
       payoutHistory: payoutHistory.map((p) => ({
         id: p.id,
@@ -944,10 +1001,121 @@ async getOrdersToday(): Promise<number> {
  * gross revenue since it isn't the vendor's money to begin with (it
  * belongs to whoever delivers the order), only commission is deducted
  * from what's left.
+ *
+ * All amounts are integer kobo (Phase 3A): `totalPrice`/`deliveryFee` on
+ * the passed orders are kobo, and the returned grossRevenue/commission/
+ * netAvailable are kobo integers. No Float math, no * 100 at this layer.
  */
-export function calculatePayoutAmounts(orders: { totalPrice: number; deliveryFee: number }[], commissionRate: number) {
-  const grossRevenue = orders.reduce((sum, o) => sum + (o.totalPrice - o.deliveryFee), 0);
-  const commission = Number((grossRevenue * commissionRate).toFixed(2));
-  const netAvailable = Number((grossRevenue - commission).toFixed(2));
-  return { grossRevenue: Number(grossRevenue.toFixed(2)), commission, netAvailable };
+export function calculatePayoutAmounts(
+  orders: { totalPrice: number; deliveryFee: number }[],
+  commissionRate: number,
+) {
+  const grossRevenue = orders.reduce(
+    (sum, o) => sum + (o.totalPrice - o.deliveryFee),
+    0,
+  );
+  const commission = Math.round(grossRevenue * commissionRate);
+  const netAvailable = grossRevenue - commission;
+  return { grossRevenue, commission, netAvailable };
+}
+
+export interface SnapshotBackedPreviewOrder {
+  id: string;
+  basePrice: number;
+  totalPrice: number;
+  deliveryFee: number;
+  commissionKobo: bigint | null;
+  vendorPayoutKobo: bigint | null;
+  commissionRateSnapshot: number | null;
+}
+
+export interface VendorPayoutPreview {
+  grossRevenue: number;
+  commission: number;
+  netAvailable: number;
+  orderCount: number;
+  /** Orders priced from frozen snapshots (authoritative, matches settlement). */
+  snapshotOrderCount: number;
+  /** Pre-3.2b orders without snapshots, priced by the documented fallback. */
+  legacyOrderCount: number;
+  /** True when settlement itself would refuse this batch. */
+  blocked: boolean;
+  blockReason?: string;
+}
+
+/**
+ * Batch G: snapshot-first payout preview.
+ *
+ * Both admin and vendor previews previously used live-rate Float math over
+ * every order, while settlement pays exact snapshot kobo (with the legacy
+ * Float fallback ONLY for all-NULL rows) and refuses torn snapshots
+ * outright. The preview therefore disagreed with the claim. This helper
+ * mirrors the settlement equation exactly — same validators, same
+ * aggregation, same fallback scope, same kobo→naira boundary — so the
+ * displayed balance is the claimable balance. `blocked` mirrors the
+ * settlement refusal instead of showing a number settlement would reject.
+ */
+export function previewVendorPayoutAmounts(
+  orders: SnapshotBackedPreviewOrder[],
+  liveCommissionRate: number,
+): VendorPayoutPreview {
+  // Normalize absent snapshot columns to NULL (the database shape for
+  // pre-3.2b rows). A missing selection must read as "no history" and take
+  // the documented legacy fallback — never as a torn snapshot. Genuinely
+  // partial rows (exactly one side present) still defect below.
+  const normalized = orders.map((o) => ({
+    ...o,
+    commissionKobo: o.commissionKobo ?? null,
+    vendorPayoutKobo: o.vendorPayoutKobo ?? null,
+    commissionRateSnapshot: o.commissionRateSnapshot ?? null,
+  }));
+  const defects = findPayoutSnapshotDefects(normalized);
+  if (defects.length > 0) {
+    return {
+      grossRevenue: 0,
+      commission: 0,
+      netAvailable: 0,
+      orderCount: orders.length,
+      snapshotOrderCount: 0,
+      legacyOrderCount: 0,
+      blocked: true,
+      blockReason: `PAYOUT_SNAPSHOT_INVALID: order ${defects[0].orderId} (${defects[0].reason})`,
+    };
+  }
+  const snapshotTotals = sumSnapshotKoboTotals(normalized);
+  const legacyOrders = normalized.filter(isLegacyNullSnapshotOrder);
+  let legacyGrossKobo = 0n;
+  let legacyCommissionKobo = 0n;
+  let legacyNetKobo = 0n;
+  if (legacyOrders.length > 0) {
+    const legacy = calculatePayoutAmounts(legacyOrders, liveCommissionRate);
+    // calculatePayoutAmounts already returns integer kobo — no * 100.
+    legacyGrossKobo = BigInt(legacy.grossRevenue);
+    legacyCommissionKobo = BigInt(legacy.commission);
+    legacyNetKobo = BigInt(legacy.netAvailable);
+  }
+  const grossKobo = snapshotTotals.grossKobo + legacyGrossKobo;
+  const commissionKobo = snapshotTotals.commissionKobo + legacyCommissionKobo;
+  const netKobo = snapshotTotals.vendorPayoutKobo + legacyNetKobo;
+  if (netKobo <= 0n) {
+    return {
+      grossRevenue: Number(grossKobo) / 100,
+      commission: Number(commissionKobo) / 100,
+      netAvailable: 0,
+      orderCount: orders.length,
+      snapshotOrderCount: snapshotTotals.snapshotOrderCount,
+      legacyOrderCount: legacyOrders.length,
+      blocked: true,
+      blockReason: "NON_POSITIVE_NET",
+    };
+  }
+  return {
+    grossRevenue: Number(grossKobo) / 100,
+    commission: Number(commissionKobo) / 100,
+    netAvailable: Number(netKobo) / 100,
+    orderCount: orders.length,
+    snapshotOrderCount: snapshotTotals.snapshotOrderCount,
+    legacyOrderCount: legacyOrders.length,
+    blocked: false,
+  };
 }

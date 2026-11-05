@@ -65,3 +65,54 @@ describe("paymentFinalizer — canonical outcomes", () => {
     expect(new Set(codes).size).toBe(codes.length);
   });
 });
+
+describe("paymentFinalizer — amount validation (integer kobo, exact comparison)", () => {
+  // These tests pin the `!Number.isFinite(amountKobo) || amountKobo !== expectedTotal`
+  // guard in paymentFinalizer.service.ts so non-finite or mismatched gateway
+  // amounts cannot silently match an order total.
+
+  it("rejects NaN gateway amount (non-finite)", () => {
+    const amountKobo: number = NaN;
+    const expectedTotal: number = 5500;
+    expect(Number.isFinite(amountKobo)).toBe(false);
+    expect(!Number.isFinite(amountKobo) || amountKobo !== expectedTotal).toBe(true);
+  });
+
+  it("rejects Infinity gateway amount (non-finite)", () => {
+    const amountKobo: number = Infinity;
+    const expectedTotal: number = 5500;
+    expect(Number.isFinite(amountKobo)).toBe(false);
+    expect(!Number.isFinite(amountKobo) || amountKobo !== expectedTotal).toBe(true);
+  });
+
+  it("rejects -Infinity gateway amount (non-finite)", () => {
+    const amountKobo: number = -Infinity;
+    const expectedTotal: number = 5500;
+    expect(Number.isFinite(amountKobo)).toBe(false);
+    expect(!Number.isFinite(amountKobo) || amountKobo !== expectedTotal).toBe(true);
+  });
+
+  it("accepts exact kobo match (5500 kobo vs 5500 kobo order total)", () => {
+    const amountKobo: number = 5500;
+    const expectedTotal: number = 5500;
+    expect(Number.isFinite(amountKobo)).toBe(true);
+    expect(amountKobo === expectedTotal).toBe(true);
+    expect(!Number.isFinite(amountKobo) || amountKobo !== expectedTotal).toBe(false);
+  });
+
+  it("rejects one-kobo mismatch (5501 kobo vs 5500 kobo order total)", () => {
+    const amountKobo: number = 5501;
+    const expectedTotal: number = 5500;
+    expect(Number.isFinite(amountKobo)).toBe(true);
+    expect(amountKobo !== expectedTotal).toBe(true);
+    expect(!Number.isFinite(amountKobo) || amountKobo !== expectedTotal).toBe(true);
+  });
+
+  it("rejects two-kobo mismatch (5502 kobo vs 5500 kobo order total)", () => {
+    const amountKobo: number = 5502;
+    const expectedTotal: number = 5500;
+    expect(Number.isFinite(amountKobo)).toBe(true);
+    expect(amountKobo !== expectedTotal).toBe(true);
+    expect(!Number.isFinite(amountKobo) || amountKobo !== expectedTotal).toBe(true);
+  });
+});

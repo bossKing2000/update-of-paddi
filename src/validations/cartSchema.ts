@@ -6,7 +6,10 @@ const MAX_QTY = Number(process.env.MAX_CART_ITEM_QTY) || 99;
 export const addToCartSchema = z.object({
   productId: z.string().uuid(),
   quantity: z.number().int().min(1).max(MAX_QTY).optional(), // defaults to 1, capped to prevent DoS/overflow
+  // Legacy authority: ProductOption ids. New authority: optionGroupItemIds.
+  // Both present and non-empty is rejected (one line, one representation).
   selectedOptions: z.array(z.string().uuid()).optional(),
+  optionGroupItemIds: z.array(z.string().uuid()).optional(),
   specialRequest: z.string().max(500).optional(), // optional note
 });
 
@@ -14,5 +17,6 @@ export const addToCartSchema = z.object({
 export const updateCartItemSchema = z.object({
   quantity: z.number().int().min(1).max(MAX_QTY).optional(),
   selectedOptions: z.array(z.string().uuid()).optional(),
+  optionGroupItemIds: z.array(z.string().uuid()).optional(),
   specialRequest: z.string().max(500).optional(),
 });
