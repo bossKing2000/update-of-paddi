@@ -9,12 +9,17 @@ import {
   SupportTicketStatus,
   SpecialOrderRequestStatus,
   SpecialOrderOfferStatus,
+  KycStatus,
   ActivityType,
   DiscountType,
   PromotionScope,
   ReferralRewardStatus,
 } from "@prisma/client";
 import { faker } from "@faker-js/faker";
+import bcrypt from "bcryptjs";
+import { seedFinancialFixtures } from "./seedFinancialFixtures";
+import { assertSeedAllowed } from "./seedGuard";
+import { DEMO_RIDER_FINANCIALS } from "./seedFinancialRules";
 
 // // npx ts-node src/jobs/seed.ts
 // // npx prisma db push --force-reset
@@ -55,8 +60,7 @@ function envRange(
 }
 
 /** Change these defaults, or override any value with the matching SEED_* env variable. */
-export const SEED_CONFIG = {
-  vendors: envInt("SEED_VENDORS", 200),
+export const SEED_CONFIG = {  vendors: envInt("SEED_VENDORS", 200),
   customers: envInt("SEED_CUSTOMERS", 1000),
   deliveryPeople: envInt("SEED_DELIVERY", 20),
   addressesPerUser: envRange("SEED_ADDRESSES_MIN", "SEED_ADDRESSES_MAX", 1, 2),
@@ -118,6 +122,19 @@ export const SEED_CONFIG = {
   dateRangeDays: envRange("SEED_DATE_DAYS_MIN", "SEED_DATE_DAYS_MAX", 10, 10),
   clearRedis: process.env.SEED_CLEAR_REDIS === "true",
 };
+
+// Password hashing uses the SAME mechanism as production auth
+// (auth.service.ts): bcryptjs with the app's configured rounds.
+// Bulk demo users are not login fixtures, so they share a single hash of
+// a random secret (one bcrypt call, never plaintext). The designated demo
+// accounts below share the known-password hash instead.
+const BCRYPT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS) || 10;
+// Development/test login password for the designated demo accounts.
+// Overridable via SEED_TEST_PASSWORD. The fallback lives here, in the
+// seeding context only: never log it, never expose it, never reuse it in
+// production. (Deliberately kept out of SEED_CONFIG, which is console-
+// logged at seed start.)
+const SEED_TEST_PASSWORD = process.env.SEED_TEST_PASSWORD ?? "PaddiDemo123!";
 
 export const seederState = {
   running: false,
@@ -651,7 +668,79 @@ async function createMany<T>(
   for (const chunk of chunks(data)) if (chunk.length) await create(chunk);
 }
 
+// Fail-fast taxonomy prerequisite (Stage A): this seeder owns no taxonomy
+// rows — Category/DishType/Tag come from prisma/seed.ts. Product creation
+// below resolves dishTypeId -> categoryId and falls back to DishType
+// "OTHER", so an empty taxonomy would fail hundreds of rows deep. Verify
+// minimum known state up front instead, and point at the taxonomy stage.
+const REQUIRED_TAXONOMY = {
+  categories: 12,
+  dishTypes: 65,
+  tags: 20,
+  fallbackDishTypeId: "OTHER",
+};
+
+async function assertTaxonomySeeded(): Promise<void> {
+  const [categoryCount, dishTypeCount, tagCount, fallback] = await Promise.all([
+    prisma.category.count(),
+    prisma.dishType.count(),
+    prisma.tag.count(),
+    prisma.dishType.findUnique({
+      where: { id: REQUIRED_TAXONOMY.fallbackDishTypeId },
+      select: { id: true },
+    }),
+  ]);
+  const problems: string[] = [];
+  if (categoryCount < REQUIRED_TAXONOMY.categories)
+    problems.push(`categories ${categoryCount}/${REQUIRED_TAXONOMY.categories}`);
+  if (dishTypeCount < REQUIRED_TAXONOMY.dishTypes)
+    problems.push(`dishTypes ${dishTypeCount}/${REQUIRED_TAXONOMY.dishTypes}`);
+  if (tagCount < REQUIRED_TAXONOMY.tags)
+    problems.push(`tags ${tagCount}/${REQUIRED_TAXONOMY.tags}`);
+  if (!fallback)
+    problems.push(`DishType "${REQUIRED_TAXONOMY.fallbackDishTypeId}" missing (required category fallback)`);
+  if (problems.length > 0) {
+    throw new Error(
+      `Demo seeder prerequisite missing: incomplete catalog taxonomy (${problems.join("; ")}). ` +
+        `Run the taxonomy stage first ("npm run db:seed:taxonomy") or the full pipeline ("npm run db:seed"). ` +
+        `The demo seeder never creates taxonomy rows itself.`,
+    );
+  }
+}
+
+/**
+ * Demo-email domain for every bulk user this seeder creates.
+ *
+ * Used as a stable marker to detect a previous run. The demo seeder is
+ * deliberately NOT idempotent — it bulk-creates users, vendors, products,
+ * orders, payments and assignments with no upserts and no cleanup, so a second
+ * run would silently duplicate the entire dataset. Rather than pretend
+ * otherwise, this makes a rerun fail loudly and point at the reset workflow.
+ */
+const DEMO_EMAIL_DOMAIN = "@foodpaddi.test";
+
+export async function assertNoPreviousDemoRun(): Promise<void> {
+  const existing = await prisma.user.count({
+    where: { email: { endsWith: DEMO_EMAIL_DOMAIN } },
+  });
+  if (existing > 0) {
+    throw new Error(
+      `Refusing to re-run the demo seeder: ${existing} user(s) matching "${DEMO_EMAIL_DOMAIN}" already exist. ` +
+        "This seeder is additive only (no upserts, no cleanup), so running it twice duplicates the dataset. " +
+        "A reset DESTROYS ALL DATA in the target database and cannot be undone: " +
+        '"prisma migrate reset" and "prisma db push --force-reset" drop and recreate the schema ' +
+        "BEFORE any seeder guard is consulted. Verify you are pointed at the intended (non-production) " +
+        "database yourself, then reseed. To avoid a reset, run only the idempotent stages instead: " +
+        '"npm run db:seed:taxonomy" and the deterministic financial fixtures.',
+    );
+  }
+}
+
 async function seedDatabase() {
+  // Opt-in guard first: nothing below may touch the database without it.
+  assertSeedAllowed("src/jobs/seed.ts");
+  await assertNoPreviousDemoRun();
+  await assertTaxonomySeeded();
   console.log("Starting database seed with configuration:", SEED_CONFIG);
   const setProgress = (current: number, message: string) => {
     seederState.current = current;
@@ -660,6 +749,11 @@ async function seedDatabase() {
   };
 
   const users: Prisma.UserCreateManyInput[] = [];
+  // Stage A auth correction: hash once up front. Bulk demo users share one
+  // hash of a random secret (they are volume, not login fixtures — never
+  // plaintext). Designated test accounts below get the known-password hash.
+  const bulkPasswordHash = await bcrypt.hash(faker.string.alphanumeric(24), BCRYPT_ROUNDS);
+  const testPasswordHash = await bcrypt.hash(SEED_TEST_PASSWORD, BCRYPT_ROUNDS);
   const addUsers = (role: Role, count: number, prefix: string) => {
     for (let index = 0; index < count; index++) {
       const name = faker.person.fullName();
@@ -667,7 +761,7 @@ async function seedDatabase() {
         name,
         email: `${prefix}${index}_${faker.string.alphanumeric(6).toLowerCase()}@foodpaddi.test`,
         username: `${prefix}_${index}_${faker.string.alphanumeric(5).toLowerCase()}`,
-        password: faker.internet.password(),
+        password: bulkPasswordHash,
         role,
         roles: [role],
         preferences: take(["JOLLOF", "SUYA", "OFADA", "AMALA", "BOLI", "EGUSI"], 2),
@@ -688,6 +782,57 @@ async function seedDatabase() {
   addUsers(Role.VENDOR, SEED_CONFIG.vendors, "vendor");
   addUsers(Role.CUSTOMER, SEED_CONFIG.customers, "customer");
   addUsers(Role.DELIVERY, SEED_CONFIG.deliveryPeople, "delivery");
+  // Stage A designated login/test accounts: one per primary role, known
+  // emails, known password (SEED_TEST_PASSWORD). Created only when absent
+  // so re-runs never duplicate them. The vendor is live + VERIFIED so it
+  // can take orders; downstream showcase flips target bulk vendors only.
+  const demoAccounts: {
+    name: string;
+    email: string;
+    username: string;
+    role: Role;
+    brandName?: string;
+    isLive?: boolean;
+    kycStatus?: KycStatus;
+  }[] = [
+    { name: "Demo Admin", email: "admin.demo@foodpaddi.test", username: "demo_admin", role: Role.ADMIN },
+    {
+      name: "Demo Vendor",
+      email: "vendor.demo@foodpaddi.test",
+      username: "demo_vendor",
+      role: Role.VENDOR,
+      brandName: "Demo Vendor Foods",
+      isLive: true,
+      kycStatus: KycStatus.VERIFIED,
+    },
+    { name: "Demo Customer", email: "customer.demo@foodpaddi.test", username: "demo_customer", role: Role.CUSTOMER },
+    { name: "Demo Rider", email: "rider.demo@foodpaddi.test", username: "demo_rider", role: Role.DELIVERY, kycStatus: KycStatus.VERIFIED },
+  ];
+  const existingDemoEmails = new Set(
+    (
+      await prisma.user.findMany({
+        where: { email: { in: demoAccounts.map((a) => a.email) } },
+        select: { email: true },
+      })
+    ).map((u) => u.email),
+  );
+  for (const account of demoAccounts) {
+    if (existingDemoEmails.has(account.email)) continue;
+    users.push({
+      name: account.name,
+      email: account.email,
+      username: account.username,
+      password: testPasswordHash,
+      role: account.role,
+      roles: [account.role],
+      preferences: [],
+      authProviders: ["local"],
+      brandName: account.brandName,
+      isEmailVerified: true,
+      isLive: account.isLive,
+      kycStatus: account.kycStatus,
+    });
+  }
   await createMany((data) => prisma.user.createMany({ data }), users);
   setProgress(10, `Created ${users.length} users`);
 
@@ -703,7 +848,12 @@ async function seedDatabase() {
   // Bulk vendors above are VERIFIED+live. Flip 5 to cover the other valid
   // states. nin/ninData intentionally left NULL: the app stores raw Dojah
   // responses there, so we do not invent fake verification payloads.
+  // Designated demo accounts are excluded so the demo vendor stays live.
   if (vendors.length >= 5) {
+    const flipCandidates = vendors.filter((v) => !v.email.includes(".demo@"));
+    if (flipCandidates.length < 5) {
+      console.warn("Skipping KYC showcase flips: fewer than 5 non-demo vendors available.");
+    } else {
     const kycShowcase: { kycStatus: "PENDING" | "VERIFIED" | "REJECTED"; isLive: boolean }[] = [
       { kycStatus: "PENDING", isLive: false },
       { kycStatus: "PENDING", isLive: false },
@@ -712,13 +862,14 @@ async function seedDatabase() {
       { kycStatus: "REJECTED", isLive: false },
     ];
     for (let i = 0; i < kycShowcase.length; i++) {
-      const v = vendors[i];
+      const v = flipCandidates[i];
       await prisma.user.update({
         where: { id: v.id },
         data: { kycStatus: kycShowcase[i].kycStatus, isLive: false },
       });
       v.kycStatus = kycShowcase[i].kycStatus as unknown as typeof v.kycStatus;
       v.isLive = false;
+    }
     }
   }
   const deliveryProfiles: Prisma.DeliveryPersonCreateManyInput[] =
@@ -728,11 +879,16 @@ async function seedDatabase() {
       licensePlate: faker.vehicle.vrm(),
       status: DeliveryPersonStatus.ACTIVE,
       rating: faker.number.float({ min: 3, max: 5, fractionDigits: 1 }),
-      totalDeliveries: faker.number.int({ min: 0, max: 50 }),
+      // Never fabricated. The bulk demo set records no DeliveryEarning rows, so
+      // a rider with no earnings must carry no balance and no delivery count —
+      // see DEMO_RIDER_FINANCIALS for the rule and the rationale. Random values
+      // here would be money that reconciles to nothing and would make any
+      // wallet-vs-earnings reconciliation report a meaningless difference.
+      totalDeliveries: DEMO_RIDER_FINANCIALS.totalDeliveries,
       isOnline: true,
       latitude: faker.number.float({ min: 6.3, max: 6.7, fractionDigits: 6 }),
       longitude: faker.number.float({ min: 3.2, max: 3.6, fractionDigits: 6 }),
-      walletBalance: money(0, 10000),
+      walletBalance: DEMO_RIDER_FINANCIALS.walletBalance,
       lastSeenAt: new Date(),
     }));
   await createMany(
@@ -763,6 +919,11 @@ async function seedDatabase() {
     `Created ${deliveryProfiles.length} delivery profiles and ${addresses.length} addresses`,
   );
 
+  // Phase 2B.1 compat: categoryId is server-derived from the classified
+  // dish type (same authoritative chain as product creation).
+  const dishCategoryById = new Map(
+    (await prisma.dishType.findMany({ select: { id: true, categoryId: true } })).map((d) => [d.id, d.categoryId] as const),
+  );
   const products: Prisma.ProductCreateManyInput[] = [];
   for (const vendor of vendors)
     for (
@@ -771,6 +932,7 @@ async function seedDatabase() {
       index++
     ) {
       const name = `${pick(foodNames) || "Meal"} ${index + 1}`;
+      const dishTypeId = classifyDishType(name);
       products.push({
         id: faker.string.uuid(),
         name,
@@ -789,7 +951,8 @@ async function seedDatabase() {
           ][Math.floor(Math.random() * 10)]
         } ${name.toLowerCase()} prepared with care by ${vendor.brandName || vendor.name}.`,
         price: money(),
-        dishTypeId: classifyDishType(name),
+        dishTypeId,
+        categoryId: dishCategoryById.get(dishTypeId) ?? dishCategoryById.get("OTHER")!,
         archived: false,
         vendorId: vendor.id,
         images: randomImages(),
@@ -1261,16 +1424,19 @@ async function seedDatabase() {
 
   // P1 — small coherent showcase for missing Order/Payment/Delivery states.
   // Each scenario reuses the single-scenario pattern (header/items/payment
-  // share one timeline). Volumes stay small (~14 orders) vs bulk 5-200.
+  // share one timeline). Volumes stay small (~13 orders) vs bulk 5-200.
   const showcaseOrderIds: string[] = [];
   {
     type ShowcaseSpec = {
       key: string;
       orderStatus: OrderStatus;
       paymentStatus: PaymentStatus;
-      paymentState: "pending" | "initiated" | "success" | "failed" | "expired" | "late" | "mismatch" | "refunded";
+      paymentState: "pending" | "initiated" | "success" | "failed" | "expired" | "late" | "mismatch";
       cancellationReason?: string;
-      assign?: { status: DeliveryStatus; extra?: "declined-history" | "cancelled-history" };
+      assign?: {
+        status: DeliveryStatus;
+        extra?: "declined-history" | "cancelled-history" | "failed-history";
+      };
     };
     const specs: ShowcaseSpec[] = [
       { key: "waiting-vendor", orderStatus: OrderStatus.WAITING_VENDOR_CONFIRMATION, paymentStatus: PaymentStatus.PENDING, paymentState: "pending" },
@@ -1282,11 +1448,15 @@ async function seedDatabase() {
       { key: "out-delivery", orderStatus: OrderStatus.OUT_FOR_DELIVERY, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.EN_ROUTE, extra: "declined-history" } },
       { key: "cancelled", orderStatus: OrderStatus.CANCELLED, paymentStatus: PaymentStatus.FAILED, paymentState: "failed", cancellationReason: "USER_CANCELLED" },
       { key: "failed-delivery", orderStatus: OrderStatus.FAILED_DELIVERY, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.FAILED } },
+      // RETURNED is only reachable from FAILED in DELIVERY_TRANSITIONS, so this
+      // scenario carries the failed leg for the first rider and the returned leg
+      // for the reassigned one. Both mirror the order to FAILED_DELIVERY, which
+      // matches the showcase order status.
+      { key: "returned", orderStatus: OrderStatus.FAILED_DELIVERY, paymentStatus: PaymentStatus.SUCCESS, paymentState: "success", assign: { status: DeliveryStatus.RETURNED, extra: "failed-history" } },
       { key: "payment-expired", orderStatus: OrderStatus.PAYMENT_EXPIRED, paymentStatus: PaymentStatus.EXPIRED, paymentState: "expired", cancellationReason: "PAYMENT_EXPIRED" },
       { key: "cancelled-unpaid", orderStatus: OrderStatus.CANCELLED_UNPAID, paymentStatus: PaymentStatus.EXPIRED, paymentState: "expired", cancellationReason: "USER_CANCELLED" },
       { key: "late-payment", orderStatus: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.LATE_PAYMENT, paymentState: "late" },
       { key: "amount-mismatch", orderStatus: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.AMOUNT_MISMATCH, paymentState: "mismatch" },
-      { key: "refunded", orderStatus: OrderStatus.COMPLETED, paymentStatus: PaymentStatus.REFUNDED, paymentState: "refunded", assign: { status: DeliveryStatus.RETURNED } },
     ];
     const showcaseOrders: Prisma.OrderCreateManyInput[] = [];
     const showcaseItems: Prisma.OrderItemCreateManyInput[] = [];
@@ -1318,12 +1488,16 @@ async function seedDatabase() {
       let expiresAt = addMilliseconds(orderDate, DAY_MS);
       let amount = Math.round(totalPrice * 100);
       let refundedAmount = 0;
-      if (spec.paymentState === "success" || spec.paymentState === "late" || spec.paymentState === "refunded") {
-        completedAt =
-          spec.paymentState === "late"
-            ? addMilliseconds(protectedUntil, 5 * 60000 + faker.number.int({ min: 0, max: 300_000 }))
-            : addMilliseconds(paymentStartedAt, faker.number.int({ min: 1_000, max: 60_000 }));
-        if (spec.paymentState === "refunded") refundedAmount = amount;
+      // Stage A: no orphaned refund accounting — every seeded payment keeps
+      // refundedAmount at its truthful reservation-ledger value (0; nothing
+      // was ever reserved or refunded here). Refund-request fixtures belong
+      // to a later reviewed stage, so no REFUNDED showcase exists.
+      if (spec.paymentState === "success" || spec.paymentState === "late") {
+        if (spec.paymentState === "late")
+          completedAt =
+            addMilliseconds(protectedUntil, 5 * 60000 + faker.number.int({ min: 0, max: 300_000 }))
+          else
+            completedAt = addMilliseconds(paymentStartedAt, faker.number.int({ min: 1_000, max: 60_000 }));
       } else if (spec.paymentState === "mismatch") {
         completedAt = addMilliseconds(paymentStartedAt, faker.number.int({ min: 1_000, max: 60_000 }));
         amount = Math.round(totalPrice * 100) + 1000; // intentional +₦10 mismatch case
@@ -1415,6 +1589,14 @@ async function seedDatabase() {
               assignedAt,
               declinedAt: addMilliseconds(assignedAt, 120_000),
             } as const;
+          // A failed leg is reached from PICKED_UP/EN_ROUTE, so it keeps the
+          // accepted + started stamps but has no completedAt.
+          if (status === DeliveryStatus.FAILED)
+            return { assignedAt, acceptedAt, startedAt } as const;
+          // A returned leg follows a failed one; completedAt marks when the
+          // return was handed back, not a successful delivery.
+          if (status === DeliveryStatus.RETURNED)
+            return { assignedAt, acceptedAt, startedAt, completedAt: completedAt2 } as const;
           return { assignedAt, acceptedAt, startedAt, completedAt: completedAt2 } as const;
         };
         // History case: a first driver declined/cancelled, then reassigned.
@@ -1436,6 +1618,15 @@ async function seedDatabase() {
             ...buildTimeline(DeliveryStatus.CANCELLED),
           });
         }
+        if (spec.assign.extra === "failed-history") {
+          const first = pick(deliveryProfilesSaved) ?? driver;
+          showcaseAssignments.push({
+            orderId,
+            deliveryPersonId: first.id,
+            status: DeliveryStatus.FAILED,
+            ...buildTimeline(DeliveryStatus.FAILED),
+          });
+        }
         showcaseAssignments.push({
           orderId,
           deliveryPersonId: driver.id,
@@ -1451,7 +1642,7 @@ async function seedDatabase() {
       (data) => prisma.deliveryAssignment.createMany({ data }),
       showcaseAssignments,
     );
-    // Make late/mismatch/refunded showcase payments discoverable for the
+    // Make late/mismatch showcase payments discoverable for the
     // second audit without rescanning the whole table.
     console.log(
       `Showcase: ${showcaseOrders.length} orders, ${showcasePayments.length} payments, ${showcaseAssignments.length} assignments`,
@@ -1869,6 +2060,394 @@ async function seedDatabase() {
     85,
     `Created ${assignments.length} assignments, ${notifications.length} notifications and supporting data`,
   );
+
+  // ------------------------------------------------------------
+  // Phase 2 deterministic showcase fixtures (Stage B).
+  // faker-random bulk data above + fixed, addressable fixtures here.
+  // Every record uses a stable ID and is existence-guarded, so re-runs
+  // never duplicate it. Covers the frozen Phase 2 model the bulk seeder
+  // cannot: OptionGroup/OptionGroupItem authority, CartItemOption and
+  // OrderItemOption rows in both authorities, and scheduling/cap columns.
+  // No Payment / RefundRequest / payout / snapshot values are created
+  // here — those are Phase 3 fixtures (later stage). Seeded orders keep
+  // Phase 3 snapshot fields NULL (historical posture) with coherent
+  // totals (totalPrice = basePrice + extraCharge + deliveryFee).
+  // ------------------------------------------------------------
+  const SHOWCASE = {
+    vendorId: "seed-showcase-vendor",
+    productPlainId: "seed-showcase-plain",
+    productStructuredId: "seed-showcase-jollof",
+    productScheduledId: "seed-showcase-scheduled",
+    legacyOptionId: "seed-showcase-legacy-extra",
+    groupSizeId: "seed-showcase-size",
+    groupProteinId: "seed-showcase-protein",
+    groupSpiceId: "seed-showcase-spice",
+    itemSmallId: "seed-showcase-size-s",
+    itemMediumId: "seed-showcase-size-m",
+    itemLargeId: "seed-showcase-size-l",
+    itemChickenId: "seed-showcase-protein-chicken",
+    itemBeefId: "seed-showcase-protein-beef",
+    itemPromoChickenId: "seed-showcase-protein-promo",
+    itemWagyuId: "seed-showcase-protein-wagyu",
+    itemMildId: "seed-showcase-spice-mild",
+    itemHotId: "seed-showcase-spice-hot",
+    cartId: "seed-showcase-cart",
+    cartItemNewId: "seed-showcase-cartitem-1",
+    cartItemLegacyId: "seed-showcase-cartitem-2",
+    orderId: "seed-showcase-order",
+    orderItemNewId: "seed-showcase-orderitem-1",
+    orderItemLegacyId: "seed-showcase-orderitem-2",
+  };
+  const showcaseCategoryId = dishCategoryById.get("JOLLOF") ?? dishCategoryById.get("OTHER");
+  if (!showcaseCategoryId) {
+    throw new Error("Showcase fixtures require DishType taxonomy (JOLLOF/OTHER).");
+  }
+
+  const showcaseVendor =
+    (await prisma.user.findUnique({ where: { id: SHOWCASE.vendorId } })) ??
+    (await prisma.user.create({
+      data: {
+        id: SHOWCASE.vendorId,
+        name: "Seed Showcase Vendor",
+        email: "showcase.vendor@foodpaddi.test",
+        username: "seed_showcase_vendor",
+        password: testPasswordHash,
+        role: Role.VENDOR,
+        roles: [Role.VENDOR],
+        preferences: [],
+        authProviders: ["local"],
+        brandName: "Seed Showcase Foods",
+        isEmailVerified: true,
+        isLive: true,
+        kycStatus: KycStatus.VERIFIED,
+      },
+    }));
+
+  // The bulk address loop runs before this section, so the showcase
+  // vendor gets its own kitchen address (delivery-fee flows resolve
+  // vendor location from addresses).
+  if (!(await prisma.address.findUnique({ where: { id: "seed-showcase-vendor-address" } }))) {
+    await prisma.address.create({
+      data: {
+        id: "seed-showcase-vendor-address",
+        userId: showcaseVendor.id,
+        label: "Kitchen",
+        street: "14 Showcase Avenue",
+        city: "Lagos",
+        state: "Lagos",
+        country: "Nigeria",
+        zipCode: "100001",
+        latitude: 6.5,
+        longitude: 3.35,
+        isDefault: true,
+      },
+    });
+  }
+  // Product A — plain: no structured option groups (legacy extra only, see
+  // below for why it exists). Live/orderable under current semantics.
+  const showcasePlain =
+    (await prisma.product.findUnique({ where: { id: SHOWCASE.productPlainId } })) ??
+    (await prisma.product.create({
+      data: {
+        id: SHOWCASE.productPlainId,
+        name: "Seed Showcase Plain Rice",
+        description: "Deterministic showcase product with no structured option groups.",
+        price: 2500,
+        dishTypeId: "JOLLOF",
+        categoryId: showcaseCategoryId,
+        archived: false,
+        vendorId: showcaseVendor.id,
+        images: [],
+        video: [],
+      },
+    }));
+  // Product B — structured: required single group + two optional groups.
+  const showcaseStructured =
+    (await prisma.product.findUnique({ where: { id: SHOWCASE.productStructuredId } })) ??
+    (await prisma.product.create({
+      data: {
+        id: SHOWCASE.productStructuredId,
+        name: "Seed Showcase Party Jollof",
+        description: "Deterministic showcase product with structured option groups.",
+        price: 3000,
+        dishTypeId: "JOLLOF",
+        categoryId: showcaseCategoryId,
+        archived: false,
+        vendorId: showcaseVendor.id,
+        images: [],
+        video: [],
+      },
+    }));
+  // Product D — scheduling/cap columns. SCHEMA/DEMO FIXTURES ONLY:
+  // production code does not currently read or enforce isScheduled,
+  // orderCutoffTime, dailyCap, or ProductDailyCounter, so these values
+  // must not be interpreted as proof that runtime scheduling exists.
+  const showcaseScheduled =
+    (await prisma.product.findUnique({ where: { id: SHOWCASE.productScheduledId } })) ??
+    (await prisma.product.create({
+      data: {
+        id: SHOWCASE.productScheduledId,
+        name: "Seed Showcase Scheduled Feast",
+        description: "Scheduling/cap fixture. Inert until enforcement is implemented.",
+        price: 2000,
+        dishTypeId: "JOLLOF",
+        categoryId: showcaseCategoryId,
+        archived: false,
+        vendorId: showcaseVendor.id,
+        images: [],
+        video: [],
+        isScheduled: true,
+        orderCutoffTime: "17:30",
+        dailyCap: 20,
+      },
+    }));
+  // Exactly one deterministic counter for the capped product. count = 0
+  // (no consumption). No partial counters: without a consumer they would
+  // imply reservation behavior that does not exist. Date is an arbitrary
+  // UTC-day anchor — no timezone/business-day semantics are defined.
+  const counterDate = new Date(new Date().setUTCHours(0, 0, 0, 0));
+  if (
+    !(await prisma.productDailyCounter.findUnique({
+      where: { productId_date: { productId: SHOWCASE.productScheduledId, date: counterDate } },
+    }))
+  ) {
+    await prisma.productDailyCounter.create({
+      data: { productId: SHOWCASE.productScheduledId, date: counterDate, count: 0 },
+    });
+  }
+
+  // Legacy compatibility: exactly one legacy ProductOption on the plain
+  // product. Required because legacy cart/order lines must reference the
+  // line's own product options (application ownership invariant), and it
+  // keeps both frozen compatibility branches represented. Showcase
+  // structured products intentionally carry no legacy options.
+  const showcaseLegacyOption =
+    (await prisma.productOption.findUnique({ where: { id: SHOWCASE.legacyOptionId } })) ??
+    (await prisma.productOption.create({
+      data: {
+        id: SHOWCASE.legacyOptionId,
+        productId: showcasePlain.id,
+        name: "Extra Meat",
+        price: 600,
+      },
+    }));
+
+  // Structured groups on product B (production invariants from
+  // optionGroup.service.ts: min <= max; required => min >= 1).
+  const ensureGroup = async (
+    id: string,
+    data: { name: string; required: boolean; minSelections: number; maxSelections: number; sortOrder: number },
+  ) =>
+    (await prisma.optionGroup.findUnique({ where: { id } })) ??
+    (await prisma.optionGroup.create({ data: { id, productId: showcaseStructured.id, ...data } }));
+  await ensureGroup(SHOWCASE.groupSizeId, {
+    name: "Size",
+    required: true,
+    minSelections: 1,
+    maxSelections: 1,
+    sortOrder: 0,
+  });
+  await ensureGroup(SHOWCASE.groupProteinId, {
+    name: "Protein",
+    required: false,
+    minSelections: 0,
+    maxSelections: 2,
+    sortOrder: 1,
+  });
+  await ensureGroup(SHOWCASE.groupSpiceId, {
+    name: "Spice Level",
+    required: false,
+    minSelections: 0,
+    maxSelections: 1,
+    sortOrder: 2,
+  });
+  const ensureGroupItem = async (
+    id: string,
+    data: { optionGroupId: string; name: string; priceAdd: number; isActive?: boolean; sortOrder: number },
+  ) =>
+    (await prisma.optionGroupItem.findUnique({ where: { id } })) ??
+    (await prisma.optionGroupItem.create({ data: { id, ...data } }));
+  await ensureGroupItem(SHOWCASE.itemSmallId, {
+    optionGroupId: SHOWCASE.groupSizeId,
+    name: "Small",
+    priceAdd: 0,
+    sortOrder: 0,
+  });
+  await ensureGroupItem(SHOWCASE.itemMediumId, {
+    optionGroupId: SHOWCASE.groupSizeId,
+    name: "Medium",
+    priceAdd: 500,
+    sortOrder: 1,
+  });
+  await ensureGroupItem(SHOWCASE.itemLargeId, {
+    optionGroupId: SHOWCASE.groupSizeId,
+    name: "Large",
+    priceAdd: 1000,
+    sortOrder: 2,
+  });
+  await ensureGroupItem(SHOWCASE.itemChickenId, {
+    optionGroupId: SHOWCASE.groupProteinId,
+    name: "Chicken",
+    priceAdd: 800,
+    sortOrder: 0,
+  });
+  await ensureGroupItem(SHOWCASE.itemBeefId, {
+    optionGroupId: SHOWCASE.groupProteinId,
+    name: "Beef",
+    priceAdd: 1200,
+    sortOrder: 1,
+  });
+  // Negative priceAdd is schema-legal (discount add-on). Selected below
+  // with Medium (+500) so the line total stays positive — never seed a
+  // negative-total cart or order.
+  await ensureGroupItem(SHOWCASE.itemPromoChickenId, {
+    optionGroupId: SHOWCASE.groupProteinId,
+    name: "Promo Chicken (-200)",
+    priceAdd: -200,
+    sortOrder: 2,
+  });
+  await ensureGroupItem(SHOWCASE.itemWagyuId, {
+    optionGroupId: SHOWCASE.groupProteinId,
+    name: "Wagyu (paused)",
+    priceAdd: 2500,
+    isActive: false,
+    sortOrder: 3,
+  });
+  await ensureGroupItem(SHOWCASE.itemMildId, {
+    optionGroupId: SHOWCASE.groupSpiceId,
+    name: "Mild",
+    priceAdd: 0,
+    sortOrder: 0,
+  });
+  await ensureGroupItem(SHOWCASE.itemHotId, {
+    optionGroupId: SHOWCASE.groupSpiceId,
+    name: "Hot",
+    priceAdd: 50,
+    sortOrder: 1,
+  });
+
+  // Cart + order showcases ride on the Stage A demo customer (stable,
+  // known account). If it is absent something is structurally wrong, so
+  // skip only these two fixtures with a warning rather than inventing
+  // another customer here.
+  const showcaseCustomer = await prisma.user.findUnique({
+    where: { email: "customer.demo@foodpaddi.test" },
+    select: { id: true },
+  });
+  if (!showcaseCustomer) {
+    console.warn("Skipping showcase cart/order: demo customer account is missing.");
+  } else {
+    // New-authority line: Medium (+500) + Promo Chicken (-200).
+    // unitPrice = 3000 + 500 - 200 = 3300 (production pricing semantics:
+    // effective base + add-ons). Legacy line: plain + Extra Meat (+600).
+    // Every option row sets exactly one FK source (CHECK constraint).
+    const showcaseCart =
+      (await prisma.cart.findUnique({ where: { id: SHOWCASE.cartId } })) ??
+      (await prisma.cart.create({
+        data: { id: SHOWCASE.cartId, customerId: showcaseCustomer.id, basePrice: 9700, totalPrice: 9700 },
+      }));
+    if (!(await prisma.cartItem.findUnique({ where: { id: SHOWCASE.cartItemNewId } }))) {
+      const newLine = await prisma.cartItem.create({
+        data: {
+          id: SHOWCASE.cartItemNewId,
+          cartId: showcaseCart.id,
+          productId: showcaseStructured.id,
+          quantity: 2,
+          unitPrice: 3300,
+          subtotal: 6600,
+        },
+      });
+      await prisma.cartItemOption.createMany({
+        data: [
+          { cartItemId: newLine.id, optionGroupItemId: SHOWCASE.itemMediumId, name: "Medium", price: 500 },
+          { cartItemId: newLine.id, optionGroupItemId: SHOWCASE.itemPromoChickenId, name: "Promo Chicken (-200)", price: -200 },
+        ],
+      });
+    }
+    if (!(await prisma.cartItem.findUnique({ where: { id: SHOWCASE.cartItemLegacyId } }))) {
+      const legacyLine = await prisma.cartItem.create({
+        data: {
+          id: SHOWCASE.cartItemLegacyId,
+          cartId: showcaseCart.id,
+          productId: showcasePlain.id,
+          quantity: 1,
+          unitPrice: 3100,
+          subtotal: 3100,
+        },
+      });
+      await prisma.cartItemOption.create({
+        data: {
+          cartItemId: legacyLine.id,
+          productOptionId: showcaseLegacyOption.id,
+          name: "Extra Meat",
+          price: 600,
+        },
+      });
+    }
+
+    // Showcase order mirrors the cart lines with checkout-equivalent
+    // option snapshots (name/price frozen from the referenced rows).
+    // AWAITING_PAYMENT + no Payment row: schema-legal, and creating a
+    // payment fixture here would be Phase 3 contamination.
+    if (!(await prisma.order.findUnique({ where: { id: SHOWCASE.orderId } }))) {
+      const now = new Date();
+      await prisma.order.create({
+        data: {
+          id: SHOWCASE.orderId,
+          customerId: showcaseCustomer.id,
+          vendorId: showcaseVendor.id,
+          basePrice: 9700,
+          extraCharge: 250,
+          deliveryFee: 500,
+          totalPrice: 10450,
+          customerApproval: true,
+          status: OrderStatus.AWAITING_PAYMENT,
+          paymentStatus: PaymentStatus.PENDING,
+          createdAt: now,
+          updatedAt: now,
+          paymentStartedAt: now,
+          protectedUntil: new Date(now.getTime() + 15 * 60000),
+          paymentGraceMinutes: 15,
+          items: {
+            create: [
+              {
+                id: SHOWCASE.orderItemNewId,
+                productId: showcaseStructured.id,
+                quantity: 2,
+                unitPrice: 3300,
+                subtotal: 6600,
+                createdAt: now,
+                updatedAt: now,
+                options: {
+                  create: [
+                    { optionGroupItemId: SHOWCASE.itemMediumId, name: "Medium", price: 500 },
+                    { optionGroupItemId: SHOWCASE.itemPromoChickenId, name: "Promo Chicken (-200)", price: -200 },
+                  ],
+                },
+              },
+              {
+                id: SHOWCASE.orderItemLegacyId,
+                productId: showcasePlain.id,
+                quantity: 1,
+                unitPrice: 3100,
+                subtotal: 3100,
+                createdAt: now,
+                updatedAt: now,
+                options: {
+                  create: [{ optionId: showcaseLegacyOption.id, name: "Extra Meat", price: 600 }],
+                },
+              },
+            ],
+          },
+        },
+      });
+    }
+  }
+  setProgress(90, "Created Phase 2 deterministic showcase fixtures");
+
+  // Phase 3 deterministic financial fixtures (Stage C, separate module).
+  await seedFinancialFixtures();
+  setProgress(95, "Created Phase 3 deterministic financial fixtures");
 
   if (SEED_CONFIG.clearRedis)
     console.warn(

@@ -157,6 +157,14 @@ export const createProduct = async (req: AuthRequest, res: Response) => {
   // Dish type must be a real, active vocabulary entry.
   await assertActiveDishType(dishTypeId);
 
+  // Phase 2B.1 compat: categoryId is server-derived from the authoritative
+  // chain dishTypeId -> DishType.categoryId (never client-controlled).
+  const dishType = await prisma.dishType.findUnique({
+    where: { id: dishTypeId },
+    select: { categoryId: true },
+  });
+  if (!dishType) throw new ValidationError("Invalid dish type.");
+
   // Stock semantics: tracked products need an explicit starting count;
   // untracked products ignore any stock value sent.
   if (trackInventory && stock == null)
@@ -174,6 +182,7 @@ export const createProduct = async (req: AuthRequest, res: Response) => {
       description: description.trim(),
       price,
       dishTypeId,
+      categoryId: dishType.categoryId,
       portionLabel: portionLabel?.trim() || null,
       trackInventory,
       stock: trackInventory ? stock ?? 0 : null,

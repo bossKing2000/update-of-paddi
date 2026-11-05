@@ -8,10 +8,12 @@
     "build": "npx prisma generate && tsc && cp src/AI/custom-food-dict.txt dist/AI/custom-food-dict.txt",
     "start": "node dist/server.js",
     "create-admin": "ts-node src/jobs/createAdmin.ts",
-    "test": "jest --runInBand",
+    "test": "jest --config jest.unit.config.js --runInBand",
+    "test:integration": "jest --config jest.integration.config.js --runInBand",
+    "test:redis-integration": "jest --config jest.redis-integration.config.js --runInBand",
     "db:seed:taxonomy": "ts-node prisma/seed.ts",
     "db:seed:demo": "ts-node src/jobs/seed.ts",
-    "db:seed": "ts-node prisma/seed.ts && ts-node src/jobs/seed.ts"
+    "db:seed": "ts-node prisma/seed.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
